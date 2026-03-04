@@ -363,6 +363,10 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 
 		lastResult = iterResult
 
+		if err := writeIterationOutput(ctxVars.OUTPUT, iterResult, provResult); err != nil {
+			return Result{}, fmt.Errorf("runner: write iteration %d output: %w", i, err)
+		}
+
 		// Update state with iteration output.
 		outputVars := map[string]any{
 			"decision": iterResult.Decision,
@@ -523,6 +527,7 @@ type pipelineRunNode struct {
 	StageName  string
 	Iterations int
 	Index      int
+	Inputs     compile.Inputs
 }
 
 func runPipeline(ctx context.Context, cfg Config) (Result, error) {
@@ -597,7 +602,7 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 		nodeCfg.StageName = node.StageName
 		nodeCfg.Iterations = node.Iterations
 
-		stageConfig := buildStageConfig(nodeCfg)
+		stageConfig := buildPipelineStageConfig(node)
 		fixed := termination.NewFixed(termination.FixedConfig{Iterations: &node.Iterations})
 		var lastResult result.Result
 
@@ -697,6 +702,10 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 				}, nil
 			}
 			lastResult = iterResult
+
+			if err := writeIterationOutput(ctxVars.OUTPUT, iterResult, provResult); err != nil {
+				return Result{}, fmt.Errorf("runner: write stage output for %s iteration %d: %w", node.ID, i, err)
+			}
 
 			outputVars := map[string]any{
 				"decision": iterResult.Decision,
@@ -860,6 +869,7 @@ func pipelineNodes(pipeline *compile.Pipeline) ([]pipelineRunNode, error) {
 			StageName:  stageName,
 			Iterations: iterations,
 			Index:      idx,
+			Inputs:     node.Inputs,
 		})
 	}
 	return nodes, nil
@@ -894,10 +904,49 @@ func resolvePrompt(template, ctxPath, session string, iteration int, sc apcontex
 func buildStageConfig(cfg Config) apcontext.StageConfig {
 	idx := 0
 	return apcontext.StageConfig{
+		ID:            cfg.StageName,
 		Name:          cfg.StageName,
 		Index:         &idx,
 		MaxIterations: &cfg.Iterations,
 	}
+}
+
+func buildPipelineStageConfig(node pipelineRunNode) apcontext.StageConfig {
+	index := node.Index
+	maxIterations := node.Iterations
+	cfg := apcontext.StageConfig{
+		ID:            node.ID,
+		Name:          node.StageName,
+		Index:         &index,
+		MaxIterations: &maxIterations,
+	}
+	if strings.TrimSpace(node.Inputs.From) != "" || strings.TrimSpace(node.Inputs.Select) != "" {
+		from := strings.TrimSpace(node.Inputs.From)
+		selectMode := strings.TrimSpace(node.Inputs.Select)
+		cfg.Inputs = &apcontext.InputsConfig{
+			From:   from,
+			Select: selectMode,
+		}
+	}
+	return cfg
+}
+
+func writeIterationOutput(path string, iterResult result.Result, provResult provider.Result) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	content := strings.TrimSpace(iterResult.Summary)
+	if content == "" {
+		content = strings.TrimSpace(provResult.Stdout)
+	}
+	if content == "" {
+		content = strings.TrimSpace(provResult.Output)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create output dir: %w", err)
+	}
+	return os.WriteFile(path, []byte(content+"\n"), 0o644)
 }
 
 // buildEnv constructs the provider environment from config and iteration.

@@ -102,6 +102,32 @@ func newTestCLI(t *testing.T, body string) *CLI {
 	return cli
 }
 
+func TestResolveModel_Aliases(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"opus", "opus"},
+		{"claude-opus", "opus"},
+		{"opus-4", "opus"},
+		{"opus-4.5", "opus"},
+		{"sonnet", "sonnet"},
+		{"claude-sonnet", "sonnet"},
+		{"sonnet-4", "sonnet"},
+		{"haiku", "haiku"},
+		{"claude-haiku", "haiku"},
+		{"OPUS", "opus"},                  // case insensitive
+		{"Claude-Opus", "opus"},           // mixed case
+		{"custom-model", "custom-model"},  // passthrough
+	}
+	for _, tt := range tests {
+		got := ResolveModel(tt.input)
+		if got != tt.want {
+			t.Errorf("ResolveModel(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
 func writeFakeClaude(t *testing.T, script string) string {
 	t.Helper()
 

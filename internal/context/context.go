@@ -123,7 +123,7 @@ func GenerateContext(session string, iteration int, stageConfig StageConfig, run
 		}
 	}
 
-	outputFile := filepath.Join(stageDir, "output.md")
+	outputFile := filepath.Join(iterDir, "output.md")
 	statusFile := filepath.Join(iterDir, "status.json")
 	resultFile := filepath.Join(iterDir, "result.json")
 

@@ -292,6 +292,52 @@ func TestWithBypass(t *testing.T) {
 	}
 }
 
+func TestResolveModel_Passthrough(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"gpt-5.3-codex", "gpt-5.3-codex"},
+		{"GPT-5.3-CODEX", "gpt-5.3-codex"},
+		{"o3", "o3"},
+		{"gpt-5.2-codex:xhigh", "gpt-5.2-codex:xhigh"},
+		{"GPT-5.2-CODEX:XHIGH", "gpt-5.2-codex:xhigh"},
+	}
+	for _, tt := range tests {
+		got := ResolveModel(tt.input)
+		if got != tt.want {
+			t.Errorf("ResolveModel(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestBaseModel_StripsReasoning(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"gpt-5.2-codex:xhigh", "gpt-5.2-codex"},
+		{"gpt-5.3-codex:reasoning", "gpt-5.3-codex"},
+		{"o3:high", "o3"},
+		{"gpt-5.3-codex", "gpt-5.3-codex"}, // no suffix
+		{"GPT-5.2-CODEX:XHIGH", "gpt-5.2-codex"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		got := BaseModel(tt.input)
+		if got != tt.want {
+			t.Errorf("BaseModel(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestValidate_ReasoningSuffix(t *testing.T) {
+	cli := New(WithBinary("codex"), WithDefaultModel("gpt-5.2-codex:xhigh"))
+	if err := cli.Validate(); err != nil {
+		t.Errorf("Validate() with reasoning suffix: unexpected error: %v", err)
+	}
+}
+
 // --- test helpers ---
 
 func newTestCLI(t *testing.T, body string) *CLI {

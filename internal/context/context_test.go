@@ -98,6 +98,32 @@ func TestContextPathsAndInputs(t *testing.T) {
 	}
 }
 
+func TestGenerateContextOutputPathUsesIterationDir(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	stageConfig := StageConfig{
+		ID:    "plan",
+		Name:  "improve-plan",
+		Index: intPtr(1),
+	}
+
+	contextPath, err := GenerateContext("test-session", 1, stageConfig, tempDir)
+	if err != nil {
+		t.Fatalf("GenerateContext: %v", err)
+	}
+
+	var manifest ContextManifest
+	if err := readJSON(contextPath, &manifest); err != nil {
+		t.Fatalf("read context.json: %v", err)
+	}
+
+	want := filepath.Join(tempDir, "stage-01-plan", "iterations", "001", "output.md")
+	if manifest.Paths.Output != want {
+		t.Fatalf("output path = %q, want %q", manifest.Paths.Output, want)
+	}
+}
+
 func TestRemainingSecondsCalculation(t *testing.T) {
 	t.Parallel()
 
@@ -202,6 +228,91 @@ func TestPlanInputsPreserved(t *testing.T) {
 	}
 	if len(inputs.FromInitial) != 1 || inputs.FromInitial[0] != planFile {
 		t.Fatalf("from_initial mismatch: %#v", inputs.FromInitial)
+	}
+}
+
+func TestBuildInputsFromStageLatestByDefault(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	stageDir := filepath.Join(tempDir, "stage-00-plan")
+	output1 := filepath.Join(stageDir, "iterations", "001", "output.md")
+	output2 := filepath.Join(stageDir, "iterations", "002", "output.md")
+	if err := os.MkdirAll(filepath.Dir(output1), 0o755); err != nil {
+		t.Fatalf("mkdir output1 dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(output2), 0o755); err != nil {
+		t.Fatalf("mkdir output2 dir: %v", err)
+	}
+	if err := os.WriteFile(output1, []byte("plan-1"), 0o644); err != nil {
+		t.Fatalf("write output1: %v", err)
+	}
+	if err := os.WriteFile(output2, []byte("plan-2"), 0o644); err != nil {
+		t.Fatalf("write output2: %v", err)
+	}
+
+	stageConfig := StageConfig{
+		ID:    "refine",
+		Name:  "refine-tasks",
+		Index: intPtr(1),
+		Inputs: &InputsConfig{
+			From: "plan",
+		},
+	}
+	inputs, err := BuildInputs(tempDir, stageConfig, 1)
+	if err != nil {
+		t.Fatalf("BuildInputs: %v", err)
+	}
+
+	got := inputs.FromStage["plan"]
+	if len(got) != 1 || got[0] != output2 {
+		t.Fatalf("from_stage[plan] = %#v, want [%q]", got, output2)
+	}
+}
+
+func TestBuildInputsFromStageSelectAll(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	stageDir := filepath.Join(tempDir, "stage-00-plan")
+	output1 := filepath.Join(stageDir, "iterations", "001", "output.md")
+	output2 := filepath.Join(stageDir, "iterations", "002", "output.md")
+	if err := os.MkdirAll(filepath.Dir(output1), 0o755); err != nil {
+		t.Fatalf("mkdir output1 dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(output2), 0o755); err != nil {
+		t.Fatalf("mkdir output2 dir: %v", err)
+	}
+	if err := os.WriteFile(output1, []byte("plan-1"), 0o644); err != nil {
+		t.Fatalf("write output1: %v", err)
+	}
+	if err := os.WriteFile(output2, []byte("plan-2"), 0o644); err != nil {
+		t.Fatalf("write output2: %v", err)
+	}
+
+	stageConfig := StageConfig{
+		ID:    "refine",
+		Name:  "refine-tasks",
+		Index: intPtr(1),
+		Inputs: &InputsConfig{
+			From:   "plan",
+			Select: "all",
+		},
+	}
+	inputs, err := BuildInputs(tempDir, stageConfig, 1)
+	if err != nil {
+		t.Fatalf("BuildInputs: %v", err)
+	}
+
+	got := inputs.FromStage["plan"]
+	want := []string{output1, output2}
+	if len(got) != len(want) {
+		t.Fatalf("from_stage[plan] length = %d, want %d (%#v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("from_stage[plan][%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 

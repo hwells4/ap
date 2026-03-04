@@ -519,6 +519,132 @@ func TestValidateProviderName(t *testing.T) {
 	}
 }
 
+func TestResolveModelName_Precedence(t *testing.T) {
+	tests := []struct {
+		name    string
+		cli     string
+		stage   string
+		provDef string
+		want    string
+	}{
+		{"cli wins over all", "opus", "sonnet", "haiku", "opus"},
+		{"stage wins over provider default", "", "sonnet", "haiku", "sonnet"},
+		{"provider default wins over empty", "", "", "haiku", "haiku"},
+		{"all empty returns empty", "", "", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveModelName(tt.cli, tt.stage, tt.provDef)
+			if got != tt.want {
+				t.Errorf("resolveModelName(%q, %q, %q) = %q, want %q", tt.cli, tt.stage, tt.provDef, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateModelForProvider_Claude(t *testing.T) {
+	// Valid models.
+	for _, model := range []string{"opus", "sonnet", "haiku", "claude-opus", "opus-4"} {
+		if err := validateModelForProvider(model, "claude"); err != nil {
+			t.Errorf("validateModelForProvider(%q, claude) unexpected error: %v", model, err)
+		}
+	}
+
+	// Invalid model.
+	errResp := validateModelForProvider("gpt-5.3-codex", "claude")
+	if errResp == nil {
+		t.Fatal("expected error for codex model on claude provider")
+	}
+	if errResp.Error.Code != "UNKNOWN_MODEL" {
+		t.Errorf("error code = %q, want UNKNOWN_MODEL", errResp.Error.Code)
+	}
+}
+
+func TestValidateModelForProvider_Codex(t *testing.T) {
+	// Valid models.
+	for _, model := range []string{"gpt-5.3-codex", "o3", "o3-mini"} {
+		if err := validateModelForProvider(model, "codex"); err != nil {
+			t.Errorf("validateModelForProvider(%q, codex) unexpected error: %v", model, err)
+		}
+	}
+
+	// Valid model with reasoning suffix.
+	if err := validateModelForProvider("gpt-5.2-codex:xhigh", "codex"); err != nil {
+		t.Errorf("validateModelForProvider(gpt-5.2-codex:xhigh, codex) unexpected error: %v", err)
+	}
+
+	// Invalid model.
+	errResp := validateModelForProvider("opus", "codex")
+	if errResp == nil {
+		t.Fatal("expected error for claude model on codex provider")
+	}
+	if errResp.Error.Code != "UNKNOWN_MODEL" {
+		t.Errorf("error code = %q, want UNKNOWN_MODEL", errResp.Error.Code)
+	}
+}
+
+func TestValidateModelForProvider_EmptySkips(t *testing.T) {
+	// Empty model should always pass (provider uses its default).
+	if err := validateModelForProvider("", "claude"); err != nil {
+		t.Errorf("empty model should pass: %v", err)
+	}
+}
+
+func TestRun_ModelFlag_Invalid(t *testing.T) {
+	dir := setupStageDir(t)
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeHuman,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd: func() (string, error) {
+			return dir, nil
+		},
+	}
+
+	code := runWithDeps([]string{"run", "ralph", "my-session", "-m", "nonexistent-model", "--fg"}, deps)
+	if code != output.ExitInvalidArgs {
+		t.Fatalf("exit code = %d, want %d; stderr: %s", code, output.ExitInvalidArgs, stderr.String())
+	}
+	if !containsSubstring(stderr.String(), "UNKNOWN_MODEL") {
+		t.Errorf("expected UNKNOWN_MODEL in stderr: %s", stderr.String())
+	}
+}
+
+func TestRun_ModelFlag_Invalid_JSON(t *testing.T) {
+	dir := setupStageDir(t)
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd: func() (string, error) {
+			return dir, nil
+		},
+	}
+
+	code := runWithDeps([]string{"run", "ralph", "my-session", "-m", "bad-model", "--json"}, deps)
+	if code != output.ExitInvalidArgs {
+		t.Fatalf("exit code = %d, want %d", code, output.ExitInvalidArgs)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	errObj, ok := result["error"].(map[string]any)
+	if !ok {
+		t.Fatal("missing error object")
+	}
+	if errObj["code"] != "UNKNOWN_MODEL" {
+		t.Errorf("error code = %v, want UNKNOWN_MODEL", errObj["code"])
+	}
+	// Output layer flattens Available map: {"models": [...]} → "available_models" key.
+	if _, ok := errObj["available_models"]; !ok {
+		t.Fatal("missing available_models field in error")
+	}
+}
+
 // setupStageDir creates a minimal project directory with a ralph stage
 // so the spec parser can resolve stage names.
 func setupStageDir(t *testing.T) string {

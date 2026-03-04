@@ -209,8 +209,15 @@ func (c *CLI) Execute(ctx context.Context, req provider.Request) (provider.Resul
 	return result, nil
 }
 
+// ResolveModel maps model aliases to canonical Claude model names.
+// This is the public API for callers that need to normalize before validation.
+func ResolveModel(model string) string {
+	return normalizeModel(model)
+}
+
 func normalizeModel(model string) string {
-	switch strings.ToLower(strings.TrimSpace(model)) {
+	lowered := strings.ToLower(strings.TrimSpace(model))
+	switch lowered {
 	case "claude-opus", "opus-4", "opus-4.5":
 		return "opus"
 	case "claude-sonnet", "sonnet-4":
@@ -218,7 +225,7 @@ func normalizeModel(model string) string {
 	case "claude-haiku":
 		return "haiku"
 	default:
-		return model
+		return lowered
 	}
 }
 

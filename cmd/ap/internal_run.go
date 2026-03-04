@@ -297,6 +297,61 @@ func validateProviderName(name string) *output.ErrorResponse {
 	return &errResp
 }
 
+// resolveModelName implements precedence: CLI flag > stage.yaml > provider default.
+func resolveModelName(cliFlag, stageModel, providerDefault string) string {
+	if cliFlag != "" {
+		return cliFlag
+	}
+	if stageModel != "" {
+		return stageModel
+	}
+	if providerDefault != "" {
+		return providerDefault
+	}
+	return ""
+}
+
+// validateModelForProvider checks if the model is valid for the resolved provider.
+// Returns nil if the model is empty (provider will use its default) or valid.
+func validateModelForProvider(model, providerName string) *output.ErrorResponse {
+	if model == "" {
+		return nil
+	}
+
+	normalized := provider.NormalizeName(providerName)
+	var supported []string
+	var resolvedModel string
+
+	switch normalized {
+	case "claude":
+		resolvedModel = claude.ResolveModel(model)
+		supported = claude.SupportedModels
+	case "codex":
+		resolvedModel = codex.BaseModel(model) // strip reasoning suffix
+		supported = codex.SupportedModels
+	default:
+		return nil // unknown provider — skip model validation
+	}
+
+	for _, m := range supported {
+		if strings.EqualFold(resolvedModel, m) {
+			return nil
+		}
+	}
+
+	errResp := output.NewError(
+		"UNKNOWN_MODEL",
+		fmt.Sprintf("unknown model %q for provider %q", model, normalized),
+		fmt.Sprintf("Model %q is not supported by provider %q. Available models: %s.", model, normalized, strings.Join(supported, ", ")),
+		"ap run <spec> <session> -m MODEL --provider NAME",
+		[]string{
+			fmt.Sprintf("ap run ralph my-session -m %s", supported[0]),
+		},
+	)
+	errResp.Error.Available = map[string]any{"models": supported}
+	return &errResp
+}
+
 func internalRunError(deps cliDeps, msg string) int {
 	_, _ = fmt.Fprintf(deps.stderr, "_run: %s\n", msg)
 	return output.ExitGeneralError

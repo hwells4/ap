@@ -132,7 +132,7 @@ func buildLayout(projectRoot, sessionName, stageName string, stageIndex, iterati
 		StatePath:      filepath.Join(sessionDir, "state.json"),
 		EventsPath:     filepath.Join(sessionDir, "events.jsonl"),
 		ProgressPath:   filepath.Join(stageDir, "progress.md"),
-		OutputPath:     filepath.Join(stageDir, "output.md"),
+		OutputPath:     filepath.Join(iterationDir, "output.md"),
 		StatusPath:     filepath.Join(iterationDir, "status.json"),
 		ResultPath:     filepath.Join(iterationDir, "result.json"),
 	}

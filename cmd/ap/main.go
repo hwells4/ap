@@ -154,6 +154,17 @@ func runRun(args []string, deps cliDeps) int {
 		req.Provider = provider.NormalizeName(req.Provider)
 	}
 
+	// Validate model for the selected provider.
+	if req.Model != "" {
+		provName := req.Provider
+		if provName == "" {
+			provName = "claude" // default provider
+		}
+		if modelErr := validateModelForProvider(req.Model, provName); modelErr != nil {
+			return renderError(deps, output.ExitInvalidArgs, *modelErr)
+		}
+	}
+
 	payload := map[string]any{
 		"request":     serializeRunRequest(req),
 		"parsed_spec": summarizeSpec(parsedSpec),

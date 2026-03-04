@@ -203,6 +203,82 @@ func TestRun_Pipeline_SequentialStages(t *testing.T) {
 	}
 }
 
+func TestRun_PipelineStageToStageInputs(t *testing.T) {
+	runDir := tempSession(t)
+
+	mp := mock.New(
+		mock.WithResponses(
+			mock.ContinueResponse("plan iteration 1"),
+			mock.StopResponse("plan iteration 2", "stage 1 complete"),
+			mock.StopResponse("refine iteration 1", "stage 2 complete"),
+		),
+	)
+
+	pipeline := &compile.Pipeline{
+		Name: "stage-inputs",
+		Nodes: []compile.Node{
+			{ID: "plan", Stage: "improve-plan", Runs: 2},
+			{
+				ID:    "refine",
+				Stage: "refine-tasks",
+				Runs:  1,
+				Inputs: compile.Inputs{
+					From:   "plan",
+					Select: compile.SelectAll,
+				},
+			},
+		},
+	}
+
+	res, err := Run(context.Background(), Config{
+		Session:        "pipeline-inputs",
+		RunDir:         runDir,
+		Provider:       mp,
+		Pipeline:       pipeline,
+		PromptTemplate: "iteration ${ITERATION}",
+		WorkDir:        filepath.Dir(filepath.Dir(runDir)),
+	})
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if res.Status != state.StateCompleted {
+		t.Fatalf("status = %q, want %q", res.Status, state.StateCompleted)
+	}
+
+	upstream1 := filepath.Join(runDir, "stage-00-plan", "iterations", "001", "output.md")
+	upstream2 := filepath.Join(runDir, "stage-00-plan", "iterations", "002", "output.md")
+	for _, path := range []string{upstream1, upstream2} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("upstream output missing %q: %v", path, err)
+		}
+	}
+
+	ctxPath := filepath.Join(runDir, "stage-01-refine", "iterations", "001", "context.json")
+	ctxData, err := os.ReadFile(ctxPath)
+	if err != nil {
+		t.Fatalf("read downstream context: %v", err)
+	}
+	var manifest struct {
+		Inputs struct {
+			FromStage map[string][]string `json:"from_stage"`
+		} `json:"inputs"`
+	}
+	if err := json.Unmarshal(ctxData, &manifest); err != nil {
+		t.Fatalf("parse downstream context: %v", err)
+	}
+
+	got := manifest.Inputs.FromStage["plan"]
+	want := []string{upstream1, upstream2}
+	if len(got) != len(want) {
+		t.Fatalf("from_stage[plan] = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("from_stage[plan][%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestRun_EscalateAlwaysPausesAndRecordsEscalation(t *testing.T) {
 	t.Parallel()
 

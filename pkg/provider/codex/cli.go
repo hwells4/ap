@@ -123,7 +123,9 @@ func (c *CLI) Validate() error {
 		return fmt.Errorf("invalid binary: %w", err)
 	}
 	if c.Model != "" {
-		if err := validate.Model(c.Model, SupportedModels); err != nil {
+		// Validate base model (strip reasoning suffix).
+		base := BaseModel(c.Model)
+		if err := validate.Model(base, SupportedModels); err != nil {
 			return fmt.Errorf("invalid model: %w", err)
 		}
 	}
@@ -212,7 +214,23 @@ func (c *CLI) Execute(ctx context.Context, req provider.Request) (provider.Resul
 	return result, nil
 }
 
+// ResolveModel normalizes Codex model names and handles reasoning syntax.
+// Input "gpt-5.2-codex:xhigh" returns "gpt-5.2-codex:xhigh" (lowercased).
+// The base model (before ":") is used for validation, the full string is
+// passed to the CLI.
+func ResolveModel(model string) string {
+	return normalizeModel(model)
+}
+
+// BaseModel extracts the base model name, stripping any :reasoning suffix.
+// "gpt-5.2-codex:xhigh" → "gpt-5.2-codex"
+func BaseModel(model string) string {
+	base, _, _ := strings.Cut(strings.ToLower(strings.TrimSpace(model)), ":")
+	return base
+}
+
 // normalizeModel lowercases model names for consistency.
+// Preserves reasoning suffix if present (e.g., "gpt-5.2-codex:xhigh").
 func normalizeModel(model string) string {
 	return strings.ToLower(strings.TrimSpace(model))
 }
