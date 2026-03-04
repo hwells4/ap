@@ -20,6 +20,7 @@ const (
 	providerStateFile = "state.json"
 	providerProgFile  = "progress.md"
 	manifestFile      = "manifest.json"
+	resumeFile        = "resume.json"
 )
 
 type providerStatus string
@@ -92,6 +93,7 @@ type Result struct {
 	BlockDir      string
 	ProvidersRoot string
 	ManifestPath  string
+	ResumePath    string
 	Providers     map[string]ProviderResult
 }
 
@@ -109,6 +111,93 @@ type manifestBlock struct {
 		Name string `json:"name"`
 	} `json:"block"`
 	Providers map[string]map[string]StageResult `json:"providers"`
+	Outputs   map[string][]string               `json:"outputs,omitempty"`
+}
+
+type resumeDoc struct {
+	Block struct {
+		Name string `json:"name"`
+	} `json:"block"`
+	Providers map[string]resumeProviderHint `json:"providers"`
+}
+
+type resumeProviderHint struct {
+	Status          string   `json:"status"`
+	Skipped         bool     `json:"skipped,omitempty"`
+	CurrentStage    string   `json:"current_stage,omitempty"`
+	CompletedStages []string `json:"completed_stages,omitempty"`
+	StatePath       string   `json:"state_path,omitempty"`
+	ProgressPath    string   `json:"progress_path,omitempty"`
+	OutputPaths     []string `json:"output_paths,omitempty"`
+	Error           string   `json:"error,omitempty"`
+	UpdatedAt       string   `json:"updated_at,omitempty"`
+}
+
+// Manifest is the exported type for reading manifest.json files.
+// Downstream stages use this to resolve from_parallel inputs.
+type Manifest struct {
+	Block struct {
+		Name string `json:"name"`
+	} `json:"block"`
+	Providers map[string]map[string]StageResult `json:"providers"`
+	Outputs   map[string][]string               `json:"outputs,omitempty"`
+}
+
+// ResumeHints is the exported type for reading resume.json files.
+// Used for crash recovery to determine which providers need re-execution.
+type ResumeHints struct {
+	Block struct {
+		Name string `json:"name"`
+	} `json:"block"`
+	Providers map[string]ProviderHint `json:"providers"`
+}
+
+// ProviderHint captures one provider's recovery state.
+type ProviderHint struct {
+	Status          string   `json:"status"`
+	Skipped         bool     `json:"skipped,omitempty"`
+	CurrentStage    string   `json:"current_stage,omitempty"`
+	CompletedStages []string `json:"completed_stages,omitempty"`
+	StatePath       string   `json:"state_path,omitempty"`
+	ProgressPath    string   `json:"progress_path,omitempty"`
+	OutputPaths     []string `json:"output_paths,omitempty"`
+	Error           string   `json:"error,omitempty"`
+	UpdatedAt       string   `json:"updated_at,omitempty"`
+}
+
+// ReadManifest reads and parses a manifest.json file.
+func ReadManifest(path string) (*Manifest, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("parallel: read manifest: %w", err)
+	}
+	var m Manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, fmt.Errorf("parallel: parse manifest: %w", err)
+	}
+	if m.Providers == nil {
+		m.Providers = map[string]map[string]StageResult{}
+	}
+	if m.Outputs == nil {
+		m.Outputs = map[string][]string{}
+	}
+	return &m, nil
+}
+
+// ReadResumeHints reads and parses a resume.json file.
+func ReadResumeHints(path string) (*ResumeHints, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("parallel: read resume: %w", err)
+	}
+	var h ResumeHints
+	if err := json.Unmarshal(data, &h); err != nil {
+		return nil, fmt.Errorf("parallel: parse resume: %w", err)
+	}
+	if h.Providers == nil {
+		h.Providers = map[string]ProviderHint{}
+	}
+	return &h, nil
 }
 
 type providerWork struct {
@@ -145,7 +234,16 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		BlockDir:      blockDir,
 		ProvidersRoot: providersRoot,
 		ManifestPath:  filepath.Join(blockDir, manifestFile),
+		ResumePath:    filepath.Join(blockDir, resumeFile),
 		Providers:     make(map[string]ProviderResult, len(cfg.Providers)),
+	}
+
+	previousStages := map[string]map[string]StageResult{}
+	if cfg.Resume {
+		manifest, err := readManifest(out.ManifestPath)
+		if err == nil {
+			previousStages = manifest.Providers
+		}
 	}
 
 	workItems := make([]providerWork, 0, len(cfg.Providers))
@@ -175,6 +273,10 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		if cfg.Resume {
 			prev, err := readProviderState(statePath)
 			if err == nil && strings.EqualFold(prev.Status, string(statusCompleted)) {
+				stages := map[string]StageResult{}
+				if existingStages, ok := previousStages[name]; ok {
+					stages = copyStageMap(existingStages)
+				}
 				out.Providers[name] = ProviderResult{
 					Name:         name,
 					Directory:    providerDir,
@@ -182,7 +284,7 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 					StatePath:    statePath,
 					Status:       prev.Status,
 					Skipped:      true,
-					Stages:       map[string]StageResult{},
+					Stages:       stages,
 				}
 				continue
 			}
@@ -215,6 +317,9 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	wg.Wait()
 
 	if err := writeManifest(out.ManifestPath, strings.TrimSpace(cfg.BlockID), out.Providers); err != nil {
+		return out, err
+	}
+	if err := writeResume(out.ResumePath, strings.TrimSpace(cfg.BlockID), out.Providers); err != nil {
 		return out, err
 	}
 
@@ -317,6 +422,7 @@ func runProvider(
 func writeManifest(path, blockID string, providers map[string]ProviderResult) error {
 	manifest := manifestBlock{
 		Providers: make(map[string]map[string]StageResult, len(providers)),
+		Outputs:   make(map[string][]string, len(providers)),
 	}
 	if strings.TrimSpace(blockID) == "" {
 		manifest.Block.Name = "parallel"
@@ -340,6 +446,10 @@ func writeManifest(path, blockID string, providers map[string]ProviderResult) er
 			stageMap[stageKey] = providers[key].Stages[stageKey]
 		}
 		manifest.Providers[key] = stageMap
+		outputPaths := collectOutputPaths(providers[key].Stages)
+		if len(outputPaths) > 0 {
+			manifest.Outputs[key] = outputPaths
+		}
 	}
 
 	data, err := json.MarshalIndent(manifest, "", "  ")
@@ -350,6 +460,116 @@ func writeManifest(path, blockID string, providers map[string]ProviderResult) er
 		return fmt.Errorf("parallel: write manifest: %w", err)
 	}
 	return nil
+}
+
+func readManifest(path string) (manifestBlock, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return manifestBlock{}, err
+	}
+	var manifest manifestBlock
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return manifestBlock{}, err
+	}
+	if manifest.Providers == nil {
+		manifest.Providers = map[string]map[string]StageResult{}
+	}
+	if manifest.Outputs == nil {
+		manifest.Outputs = map[string][]string{}
+	}
+	return manifest, nil
+}
+
+func writeResume(path, blockID string, providers map[string]ProviderResult) error {
+	doc := resumeDoc{
+		Providers: make(map[string]resumeProviderHint, len(providers)),
+	}
+	if strings.TrimSpace(blockID) == "" {
+		doc.Block.Name = "parallel"
+	} else {
+		doc.Block.Name = strings.TrimSpace(blockID)
+	}
+
+	keys := make([]string, 0, len(providers))
+	for key := range providers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	for _, key := range keys {
+		result := providers[key]
+		hint := resumeProviderHint{
+			Status:       strings.TrimSpace(result.Status),
+			Skipped:      result.Skipped,
+			StatePath:    result.StatePath,
+			ProgressPath: result.ProgressPath,
+			OutputPaths:  collectOutputPaths(result.Stages),
+			Error:        strings.TrimSpace(result.Error),
+		}
+
+		state, err := readProviderState(result.StatePath)
+		if err == nil {
+			if hint.Status == "" {
+				hint.Status = strings.TrimSpace(state.Status)
+			}
+			hint.CurrentStage = strings.TrimSpace(state.CurrentStage)
+			hint.CompletedStages = append([]string(nil), state.CompletedStages...)
+			hint.UpdatedAt = strings.TrimSpace(state.UpdatedAt)
+			if hint.Error == "" {
+				hint.Error = strings.TrimSpace(state.Error)
+			}
+		}
+		if hint.Status == "" {
+			hint.Status = "unknown"
+		}
+		doc.Providers[key] = hint
+	}
+
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("parallel: marshal resume: %w", err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+		return fmt.Errorf("parallel: write resume: %w", err)
+	}
+	return nil
+}
+
+func copyStageMap(values map[string]StageResult) map[string]StageResult {
+	if len(values) == 0 {
+		return map[string]StageResult{}
+	}
+	out := make(map[string]StageResult, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
+func collectOutputPaths(stages map[string]StageResult) []string {
+	if len(stages) == 0 {
+		return nil
+	}
+	stageKeys := make([]string, 0, len(stages))
+	for stageKey := range stages {
+		stageKeys = append(stageKeys, stageKey)
+	}
+	sort.Strings(stageKeys)
+
+	outputs := make([]string, 0, len(stageKeys))
+	seen := map[string]struct{}{}
+	for _, stageKey := range stageKeys {
+		path := strings.TrimSpace(stages[stageKey].LatestOutput)
+		if path == "" {
+			continue
+		}
+		if _, exists := seen[path]; exists {
+			continue
+		}
+		seen[path] = struct{}{}
+		outputs = append(outputs, path)
+	}
+	return outputs
 }
 
 func ensureProgressFile(path string) error {
