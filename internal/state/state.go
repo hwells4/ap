@@ -65,6 +65,7 @@ type SessionState struct {
 	Type               string           `json:"type"`
 	Pipeline           string           `json:"pipeline"`
 	Status             State            `json:"status"`
+	NodeID             string           `json:"node_id,omitempty"`
 	Iteration          int              `json:"iteration"`
 	IterationCompleted int              `json:"iteration_completed"`
 	IterationStarted   *string          `json:"iteration_started"`

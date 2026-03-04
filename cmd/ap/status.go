@@ -73,6 +73,12 @@ func renderStatusHuman(s *state.SessionState) string {
 	if s.CurrentStage != "" {
 		b.WriteString(fmt.Sprintf("Stage:      %s\n", s.CurrentStage))
 	}
+	if stagePos, stageTotal, ok := pipelineStageProgress(s); ok {
+		b.WriteString(fmt.Sprintf("Pipeline:   stage %d of %d\n", stagePos, stageTotal))
+	}
+	if s.NodeID != "" {
+		b.WriteString(fmt.Sprintf("Node:       %s\n", s.NodeID))
+	}
 	b.WriteString(fmt.Sprintf("Iteration:  %d (completed: %d)\n", s.Iteration, s.IterationCompleted))
 	b.WriteString(fmt.Sprintf("Started:    %s\n", s.StartedAt))
 	if s.CompletedAt != nil {
@@ -88,6 +94,18 @@ func renderStatusHuman(s *state.SessionState) string {
 		b.WriteString(fmt.Sprintf("Children:   %s\n", strings.Join(s.ChildSessions, ", ")))
 	}
 	return b.String()
+}
+
+func pipelineStageProgress(s *state.SessionState) (int, int, bool) {
+	if s == nil || len(s.Stages) == 0 || s.CurrentStage == "" {
+		return 0, 0, false
+	}
+	for idx, stageState := range s.Stages {
+		if stageState.Name == s.CurrentStage {
+			return idx + 1, len(s.Stages), true
+		}
+	}
+	return 0, 0, false
 }
 
 func parseStatusArgs(args []string) (string, *output.ErrorResponse) {

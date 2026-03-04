@@ -31,6 +31,7 @@ func runKill(args []string, deps cliDeps) int {
 	statePath := filepath.Join(sessionDir, "state.json")
 
 	wasRunning := false
+	var childrenKilled []string
 
 	// Try to kill via TmuxLauncher (primary backend). Kill is idempotent,
 	// so success does not imply the session was running.
@@ -52,6 +53,13 @@ func runKill(args []string, deps cliDeps) int {
 					s.Status = state.StateAborted
 					return nil
 				})
+			}
+
+			// Cascade kill to child sessions.
+			for _, child := range st.ChildSessions {
+				if killChildSession(runsDir, locksDir, child, tmux) {
+					childrenKilled = append(childrenKilled, child)
+				}
 			}
 		}
 	}
@@ -78,9 +86,10 @@ func runKill(args []string, deps cliDeps) int {
 	}
 
 	payload := map[string]any{
-		"session":     sessionName,
-		"status":      status,
-		"was_running": wasRunning,
+		"session":         sessionName,
+		"status":          status,
+		"was_running":     wasRunning,
+		"children_killed": childrenKilled,
 	}
 
 	if deps.mode == output.ModeJSON {
@@ -104,6 +113,35 @@ func runKill(args []string, deps cliDeps) int {
 		_, _ = fmt.Fprintf(deps.stdout, "Session %q was not running.\n", sessionName)
 	}
 	return output.ExitSuccess
+}
+
+// killChildSession attempts to abort a child session. Returns true if the
+// child was running and was successfully aborted.
+func killChildSession(runsDir, locksDir, child string, tmux *session.TmuxLauncher) bool {
+	childStatePath := filepath.Join(runsDir, child, "state.json")
+	if _, err := os.Stat(childStatePath); err != nil {
+		return false
+	}
+	st, err := state.Load(childStatePath)
+	if err != nil {
+		return false
+	}
+	switch st.Status {
+	case state.StateCompleted, state.StateFailed, state.StateAborted:
+		return false // already terminal
+	}
+	if tmux != nil && tmux.Available() {
+		_ = tmux.Kill(child)
+	}
+	_, _ = state.Update(childStatePath, func(s *state.SessionState) error {
+		s.Status = state.StateAborted
+		return nil
+	})
+	lk, err := lock.Acquire(locksDir, child)
+	if err == nil {
+		_ = lk.Release()
+	}
+	return true
 }
 
 func parseKillArgs(args []string) (string, *output.ErrorResponse) {
