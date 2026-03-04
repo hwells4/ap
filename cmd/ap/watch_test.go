@@ -5,10 +5,15 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/hwells4/ap/internal/output"
 )
+
+// ---------------------------------------------------------------------------
+// matchEventType — unit tests
+// ---------------------------------------------------------------------------
 
 func TestMatchEventType_DirectMatch(t *testing.T) {
 	t.Parallel()
@@ -19,6 +24,9 @@ func TestMatchEventType_DirectMatch(t *testing.T) {
 		{"session.completed", "session.completed", true},
 		{"signal.escalate", "signal.escalate", true},
 		{"session.started", "session.completed", false},
+		{"session.idle", "session.idle", true},
+		{"iteration.failed", "iteration.failed", true},
+		{"", "", true},
 	}
 	for _, tc := range cases {
 		if got := matchEventType(tc.actual, tc.pattern); got != tc.want {
@@ -48,6 +56,67 @@ func TestMatchEventType_Shorthands(t *testing.T) {
 	}
 }
 
+func TestMatchEventType_CaseInsensitive(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		actual, pattern string
+		want            bool
+	}{
+		{"Session.Completed", "session.completed", true},
+		{"SESSION.COMPLETED", "completed", true},
+		{"Signal.Escalate", "ESCALATE", true},
+		{"SIGNAL.ESCALATE", "escalated", true},
+		{"Session.Failed", "FAILED", true},
+		{"SESSION.IDLE", "idle", true},
+	}
+	for _, tc := range cases {
+		if got := matchEventType(tc.actual, tc.pattern); got != tc.want {
+			t.Errorf("matchEventType(%q, %q) = %v, want %v", tc.actual, tc.pattern, got, tc.want)
+		}
+	}
+}
+
+func TestMatchEventType_WhitespaceTrimming(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		actual, pattern string
+		want            bool
+	}{
+		{" session.completed ", "session.completed", true},
+		{"session.completed", " session.completed ", true},
+		{" session.completed ", " completed ", true},
+		{" signal.escalate\t", "\tescalate ", true},
+	}
+	for _, tc := range cases {
+		if got := matchEventType(tc.actual, tc.pattern); got != tc.want {
+			t.Errorf("matchEventType(%q, %q) = %v, want %v", tc.actual, tc.pattern, got, tc.want)
+		}
+	}
+}
+
+func TestMatchEventType_NoFalsePositives(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		actual, pattern string
+	}{
+		{"session.started", "completed"},
+		{"session.started", "escalate"},
+		{"session.started", "failed"},
+		{"session.started", "idle"},
+		{"iteration.completed", "completed"},
+		{"some.random.event", "escalate"},
+	}
+	for _, tc := range cases {
+		if got := matchEventType(tc.actual, tc.pattern); got {
+			t.Errorf("matchEventType(%q, %q) = true, want false", tc.actual, tc.pattern)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// expandWatchVars — unit tests
+// ---------------------------------------------------------------------------
+
 func TestExpandWatchVars(t *testing.T) {
 	t.Parallel()
 	evt := map[string]any{
@@ -67,6 +136,103 @@ func TestExpandWatchVars(t *testing.T) {
 	}
 }
 
+func TestExpandWatchVars_MissingData(t *testing.T) {
+	t.Parallel()
+	// Event with no data or cursor blocks — placeholders remain unexpanded.
+	evt := map[string]any{
+		"type": "session.started",
+	}
+
+	cmd := expandWatchVars("echo ${SESSION} ${EVENT} ${REASON} ${ITERATION}", "sess", evt)
+	want := "echo sess session.started ${REASON} ${ITERATION}"
+	if cmd != want {
+		t.Fatalf("expandWatchVars = %q, want %q", cmd, want)
+	}
+}
+
+func TestExpandWatchVars_NoPlaceholders(t *testing.T) {
+	t.Parallel()
+	evt := map[string]any{"type": "session.completed"}
+	cmd := expandWatchVars("notify-send finished", "s1", evt)
+	if cmd != "notify-send finished" {
+		t.Fatalf("expandWatchVars = %q, want unchanged", cmd)
+	}
+}
+
+func TestExpandWatchVars_MultipleSameVar(t *testing.T) {
+	t.Parallel()
+	evt := map[string]any{"type": "session.completed"}
+	cmd := expandWatchVars("${SESSION}/${SESSION}", "abc", evt)
+	if cmd != "abc/abc" {
+		t.Fatalf("expandWatchVars = %q, want abc/abc", cmd)
+	}
+}
+
+func TestExpandWatchVars_TableDriven(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		cmd     string
+		session string
+		evt     map[string]any
+		want    string
+	}{
+		{
+			name:    "session var only",
+			cmd:     "echo ${SESSION}",
+			session: "test-run",
+			evt:     map[string]any{"type": "session.started"},
+			want:    "echo test-run",
+		},
+		{
+			name:    "event var only",
+			cmd:     "echo ${EVENT}",
+			session: "s",
+			evt:     map[string]any{"type": "signal.escalate"},
+			want:    "echo signal.escalate",
+		},
+		{
+			name:    "reason from data",
+			cmd:     "log ${REASON}",
+			session: "s",
+			evt: map[string]any{
+				"type": "session.failed",
+				"data": map[string]any{"reason": "timeout"},
+			},
+			want: "log timeout",
+		},
+		{
+			name:    "iteration from cursor",
+			cmd:     "iter ${ITERATION}",
+			session: "s",
+			evt: map[string]any{
+				"type":   "iteration.completed",
+				"cursor": map[string]any{"iteration": float64(42)},
+			},
+			want: "iter 42",
+		},
+		{
+			name:    "empty event map",
+			cmd:     "${SESSION}",
+			session: "x",
+			evt:     map[string]any{},
+			want:    "x",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := expandWatchVars(tc.cmd, tc.session, tc.evt)
+			if got != tc.want {
+				t.Errorf("expandWatchVars(%q) = %q, want %q", tc.cmd, got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// isSessionEnd — unit tests
+// ---------------------------------------------------------------------------
+
 func TestIsSessionEnd(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -78,7 +244,11 @@ func TestIsSessionEnd(t *testing.T) {
 		{`{"type":"session.aborted"}`, true},
 		{`{"type":"iteration.completed"}`, false},
 		{`{"type":"session.started"}`, false},
+		{`{"type":"signal.escalate"}`, false},
+		{`{"type":"session.idle"}`, false},
 		{`invalid json`, false},
+		{`{}`, false},
+		{`{"type":""}`, false},
 	}
 	for _, tc := range cases {
 		if got := isSessionEnd(tc.line); got != tc.want {
@@ -86,6 +256,10 @@ func TestIsSessionEnd(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// parseWatchArgs — unit tests
+// ---------------------------------------------------------------------------
 
 func TestParseWatchArgs_Basic(t *testing.T) {
 	t.Parallel()
@@ -109,7 +283,7 @@ func TestParseWatchArgs_Basic(t *testing.T) {
 
 func TestParseWatchArgs_MultipleHooks(t *testing.T) {
 	t.Parallel()
-	_, hooks, errResp := parseWatchArgs([]string{
+	session, hooks, errResp := parseWatchArgs([]string{
 		"my-session",
 		"--on", "completed", "echo done",
 		"--on", "escalate", "echo escalated",
@@ -117,8 +291,33 @@ func TestParseWatchArgs_MultipleHooks(t *testing.T) {
 	if errResp != nil {
 		t.Fatalf("unexpected error: %v", errResp)
 	}
+	if session != "my-session" {
+		t.Fatalf("session = %q, want my-session", session)
+	}
 	if len(hooks) != 2 {
 		t.Fatalf("hooks len = %d, want 2", len(hooks))
+	}
+	if hooks[0].EventType != "completed" || hooks[0].Command != "echo done" {
+		t.Errorf("hooks[0] = %+v, want completed/echo done", hooks[0])
+	}
+	if hooks[1].EventType != "escalate" || hooks[1].Command != "echo escalated" {
+		t.Errorf("hooks[1] = %+v, want escalate/echo escalated", hooks[1])
+	}
+}
+
+func TestParseWatchArgs_ThreeHooks(t *testing.T) {
+	t.Parallel()
+	_, hooks, errResp := parseWatchArgs([]string{
+		"sess",
+		"--on", "completed", "cmd1",
+		"--on", "failed", "cmd2",
+		"--on", "idle", "cmd3",
+	})
+	if errResp != nil {
+		t.Fatalf("unexpected error: %v", errResp)
+	}
+	if len(hooks) != 3 {
+		t.Fatalf("hooks len = %d, want 3", len(hooks))
 	}
 }
 
@@ -138,6 +337,195 @@ func TestParseWatchArgs_IncompleteOn(t *testing.T) {
 	}
 }
 
+func TestParseWatchArgs_OnWithNoArgs(t *testing.T) {
+	t.Parallel()
+	_, _, errResp := parseWatchArgs([]string{"my-session", "--on"})
+	if errResp == nil {
+		t.Fatal("expected error for --on with no arguments")
+	}
+}
+
+func TestParseWatchArgs_UnknownFlag(t *testing.T) {
+	t.Parallel()
+	_, _, errResp := parseWatchArgs([]string{"my-session", "--bad-flag"})
+	if errResp == nil {
+		t.Fatal("expected error for unknown flag")
+	}
+	if errResp.Error.Code != "INVALID_ARGUMENT" {
+		t.Fatalf("error code = %q, want INVALID_ARGUMENT", errResp.Error.Code)
+	}
+}
+
+func TestParseWatchArgs_DuplicateSession(t *testing.T) {
+	t.Parallel()
+	_, _, errResp := parseWatchArgs([]string{"session1", "session2"})
+	if errResp == nil {
+		t.Fatal("expected error for duplicate session")
+	}
+	if errResp.Error.Code != "INVALID_ARGUMENT" {
+		t.Fatalf("error code = %q, want INVALID_ARGUMENT", errResp.Error.Code)
+	}
+}
+
+func TestParseWatchArgs_JSONFlagSkipped(t *testing.T) {
+	t.Parallel()
+	session, hooks, errResp := parseWatchArgs([]string{
+		"my-session", "--json", "--on", "completed", "echo done",
+	})
+	if errResp != nil {
+		t.Fatalf("unexpected error: %v", errResp)
+	}
+	if session != "my-session" {
+		t.Fatalf("session = %q, want my-session", session)
+	}
+	if len(hooks) != 1 {
+		t.Fatalf("hooks len = %d, want 1", len(hooks))
+	}
+}
+
+func TestParseWatchArgs_EmptyArgs(t *testing.T) {
+	t.Parallel()
+	_, _, errResp := parseWatchArgs([]string{})
+	if errResp == nil {
+		t.Fatal("expected error for empty args")
+	}
+}
+
+func TestParseWatchArgs_SessionBeforeAndAfterOn(t *testing.T) {
+	t.Parallel()
+	// Session appears before --on — valid.
+	session, hooks, errResp := parseWatchArgs([]string{
+		"sess", "--on", "escalate", "notify",
+	})
+	if errResp != nil {
+		t.Fatalf("unexpected error: %v", errResp)
+	}
+	if session != "sess" {
+		t.Fatalf("session = %q, want sess", session)
+	}
+	if len(hooks) != 1 {
+		t.Fatalf("hooks len = %d, want 1", len(hooks))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// processWatchLine — unit tests
+// ---------------------------------------------------------------------------
+
+func TestProcessWatchLine_InvalidJSON(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+	}
+	hooks := []watchHook{{EventType: "completed", Command: "echo done"}}
+
+	// Should not panic or produce output for invalid JSON.
+	processWatchLine("not json at all", "sess", hooks, deps)
+	if stdout.Len() > 0 {
+		t.Errorf("expected no output for invalid JSON, got: %s", stdout.String())
+	}
+}
+
+func TestProcessWatchLine_NonMatchingEvent(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+	}
+	hooks := []watchHook{{EventType: "completed", Command: "echo done"}}
+
+	// session.started does not match "completed" hook.
+	processWatchLine(`{"type":"session.started"}`, "sess", hooks, deps)
+	if stdout.Len() > 0 {
+		t.Errorf("expected no JSON output for non-matching event, got: %s", stdout.String())
+	}
+}
+
+func TestProcessWatchLine_MatchingEvent_JSONOutput(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+	}
+	// Use "true" as the hook command (produces no output) so that stdout
+	// contains only the JSON payload emitted by processWatchLine.
+	hooks := []watchHook{{EventType: "completed", Command: "true"}}
+
+	processWatchLine(`{"type":"session.completed"}`, "my-sess", hooks, deps)
+
+	// stdout contains the JSON line followed by any command output.
+	// Parse only the first line (the JSON payload).
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) < 1 {
+		t.Fatalf("expected at least 1 line of output, got none")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &payload); err != nil {
+		t.Fatalf("invalid JSON output: %v; raw: %s", err, lines[0])
+	}
+	if payload["event"] != "session.completed" {
+		t.Errorf("event = %v, want session.completed", payload["event"])
+	}
+	if payload["hook"] != "completed" {
+		t.Errorf("hook = %v, want completed", payload["hook"])
+	}
+	if payload["command"] != "true" {
+		t.Errorf("command = %v, want true", payload["command"])
+	}
+}
+
+func TestProcessWatchLine_MultipleHooksMatchSameEvent(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+	}
+	hooks := []watchHook{
+		{EventType: "completed", Command: "cmd1"},
+		{EventType: "session.completed", Command: "cmd2"},
+	}
+
+	processWatchLine(`{"type":"session.completed"}`, "s", hooks, deps)
+
+	// Both hooks match session.completed: shorthand "completed" and direct "session.completed".
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 JSON lines, got %d: %s", len(lines), stdout.String())
+	}
+}
+
+func TestProcessWatchLine_HumanMode_NoJSON(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeHuman,
+		stdout: &stdout,
+		stderr: &stderr,
+	}
+	hooks := []watchHook{{EventType: "completed", Command: "true"}}
+
+	processWatchLine(`{"type":"session.completed"}`, "s", hooks, deps)
+
+	// In human mode, no JSON payload is written to stdout (only the command's own output).
+	raw := stdout.String()
+	if strings.Contains(raw, `"event"`) {
+		t.Errorf("human mode should not emit JSON payload, got: %s", raw)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// runWatch — integration tests
+// ---------------------------------------------------------------------------
+
 func TestRunWatch_SessionNotFound(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -153,6 +541,44 @@ func TestRunWatch_SessionNotFound(t *testing.T) {
 	code := runWatch([]string{"nonexistent", "--on", "completed", "echo done"}, deps)
 	if code != output.ExitNotFound {
 		t.Fatalf("exit code = %d, want %d", code, output.ExitNotFound)
+	}
+
+	// Verify JSON error structure.
+	var errPayload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &errPayload); err != nil {
+		t.Fatalf("invalid error JSON: %v; raw: %s", err, stdout.String())
+	}
+	errObj, _ := errPayload["error"].(map[string]any)
+	if errObj == nil {
+		t.Fatalf("expected error object in JSON")
+	}
+	if errObj["code"] != "SESSION_NOT_FOUND" {
+		t.Errorf("error code = %v, want SESSION_NOT_FOUND", errObj["code"])
+	}
+}
+
+func TestRunWatch_NoHooksError(t *testing.T) {
+	// Cannot use t.Parallel() because t.Setenv modifies process environment.
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, ".ap", "runs", "sess")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Set HOME to temp to avoid loading real config.
+	t.Setenv("HOME", dir)
+
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd:  func() (string, error) { return dir, nil },
+	}
+
+	code := runWatch([]string{"sess"}, deps)
+	if code != output.ExitInvalidArgs {
+		t.Fatalf("exit code = %d, want %d; stdout: %s", code, output.ExitInvalidArgs, stdout.String())
 	}
 }
 
@@ -198,5 +624,293 @@ func TestRunWatch_CompletedEventFiresHook(t *testing.T) {
 	// Verify the hook was fired.
 	if _, err := os.Stat(markerPath); err != nil {
 		t.Fatalf("hook command did not fire: marker file missing: %v", err)
+	}
+}
+
+func TestRunWatch_EscalateEventFiresHook(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, ".ap", "runs", "esc-watch")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	events := []map[string]any{
+		{"type": "signal.escalate", "data": map[string]any{"reason": "stuck"}},
+		{"type": "session.completed"},
+	}
+	var eventsData bytes.Buffer
+	for _, evt := range events {
+		line, _ := json.Marshal(evt)
+		eventsData.Write(line)
+		eventsData.WriteByte('\n')
+	}
+	eventsPath := filepath.Join(sessionDir, "events.jsonl")
+	if err := os.WriteFile(eventsPath, eventsData.Bytes(), 0o644); err != nil {
+		t.Fatalf("write events: %v", err)
+	}
+
+	markerPath := filepath.Join(dir, "escalate-fired")
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd:  func() (string, error) { return dir, nil },
+	}
+
+	code := runWatch([]string{"esc-watch", "--on", "escalate", "touch " + markerPath}, deps)
+	if code != output.ExitSuccess {
+		t.Fatalf("exit code = %d, want %d\nstdout: %s\nstderr: %s", code, output.ExitSuccess, stdout.String(), stderr.String())
+	}
+
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("escalate hook did not fire: marker file missing: %v", err)
+	}
+}
+
+func TestRunWatch_FailedEventFiresHook(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, ".ap", "runs", "fail-watch")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	events := []map[string]any{
+		{"type": "session.failed", "data": map[string]any{"reason": "crash"}},
+	}
+	var eventsData bytes.Buffer
+	for _, evt := range events {
+		line, _ := json.Marshal(evt)
+		eventsData.Write(line)
+		eventsData.WriteByte('\n')
+	}
+	eventsPath := filepath.Join(sessionDir, "events.jsonl")
+	if err := os.WriteFile(eventsPath, eventsData.Bytes(), 0o644); err != nil {
+		t.Fatalf("write events: %v", err)
+	}
+
+	markerPath := filepath.Join(dir, "failed-fired")
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd:  func() (string, error) { return dir, nil },
+	}
+
+	code := runWatch([]string{"fail-watch", "--on", "failed", "touch " + markerPath}, deps)
+	if code != output.ExitSuccess {
+		t.Fatalf("exit code = %d, want %d", code, output.ExitSuccess)
+	}
+
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("failed hook did not fire: marker file missing: %v", err)
+	}
+}
+
+func TestRunWatch_MultipleHooksDifferentEvents(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, ".ap", "runs", "multi-watch")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	events := []map[string]any{
+		{"type": "signal.escalate", "data": map[string]any{"reason": "help"}},
+		{"type": "session.completed", "data": map[string]any{"reason": "done"}},
+	}
+	var eventsData bytes.Buffer
+	for _, evt := range events {
+		line, _ := json.Marshal(evt)
+		eventsData.Write(line)
+		eventsData.WriteByte('\n')
+	}
+	eventsPath := filepath.Join(sessionDir, "events.jsonl")
+	if err := os.WriteFile(eventsPath, eventsData.Bytes(), 0o644); err != nil {
+		t.Fatalf("write events: %v", err)
+	}
+
+	escalateMarker := filepath.Join(dir, "escalate-marker")
+	completedMarker := filepath.Join(dir, "completed-marker")
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd:  func() (string, error) { return dir, nil },
+	}
+
+	code := runWatch([]string{
+		"multi-watch",
+		"--on", "escalate", "touch " + escalateMarker,
+		"--on", "completed", "touch " + completedMarker,
+	}, deps)
+	if code != output.ExitSuccess {
+		t.Fatalf("exit code = %d, want %d\nstdout: %s\nstderr: %s", code, output.ExitSuccess, stdout.String(), stderr.String())
+	}
+
+	if _, err := os.Stat(escalateMarker); err != nil {
+		t.Fatalf("escalate hook did not fire: %v", err)
+	}
+	if _, err := os.Stat(completedMarker); err != nil {
+		t.Fatalf("completed hook did not fire: %v", err)
+	}
+}
+
+func TestRunWatch_HookReceivesExpandedVars(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, ".ap", "runs", "var-watch")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	events := []map[string]any{
+		{
+			"type": "session.completed",
+			"data": map[string]any{"reason": "all-done"},
+			"cursor": map[string]any{
+				"iteration": float64(7),
+			},
+		},
+	}
+	var eventsData bytes.Buffer
+	for _, evt := range events {
+		line, _ := json.Marshal(evt)
+		eventsData.Write(line)
+		eventsData.WriteByte('\n')
+	}
+	eventsPath := filepath.Join(sessionDir, "events.jsonl")
+	if err := os.WriteFile(eventsPath, eventsData.Bytes(), 0o644); err != nil {
+		t.Fatalf("write events: %v", err)
+	}
+
+	outFile := filepath.Join(dir, "var-output.txt")
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd:  func() (string, error) { return dir, nil },
+	}
+
+	// The hook command writes expanded variables to a file.
+	hookCmd := "echo ${SESSION} ${EVENT} ${REASON} ${ITERATION} > " + outFile
+	code := runWatch([]string{"var-watch", "--on", "completed", hookCmd}, deps)
+	if code != output.ExitSuccess {
+		t.Fatalf("exit code = %d, want %d\nstderr: %s", code, output.ExitSuccess, stderr.String())
+	}
+
+	content, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read output file: %v", err)
+	}
+	got := strings.TrimSpace(string(content))
+	want := "var-watch session.completed all-done 7"
+	if got != want {
+		t.Fatalf("hook output = %q, want %q", got, want)
+	}
+}
+
+func TestRunWatch_AbortedEventEndsWatch(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, ".ap", "runs", "abort-watch")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	events := []map[string]any{
+		{"type": "session.started"},
+		{"type": "session.aborted"},
+	}
+	var eventsData bytes.Buffer
+	for _, evt := range events {
+		line, _ := json.Marshal(evt)
+		eventsData.Write(line)
+		eventsData.WriteByte('\n')
+	}
+	eventsPath := filepath.Join(sessionDir, "events.jsonl")
+	if err := os.WriteFile(eventsPath, eventsData.Bytes(), 0o644); err != nil {
+		t.Fatalf("write events: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd:  func() (string, error) { return dir, nil },
+	}
+
+	// Even though hook is on "completed", watch should still exit on session.aborted.
+	code := runWatch([]string{"abort-watch", "--on", "completed", "true"}, deps)
+	if code != output.ExitSuccess {
+		t.Fatalf("exit code = %d, want %d (session.aborted should end watch)", code, output.ExitSuccess)
+	}
+}
+
+func TestRunWatch_NonMatchingEventsSkipped(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, ".ap", "runs", "skip-watch")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	events := []map[string]any{
+		{"type": "session.started"},
+		{"type": "iteration.completed"},
+		{"type": "iteration.started"},
+		{"type": "session.completed"},
+	}
+	var eventsData bytes.Buffer
+	for _, evt := range events {
+		line, _ := json.Marshal(evt)
+		eventsData.Write(line)
+		eventsData.WriteByte('\n')
+	}
+	eventsPath := filepath.Join(sessionDir, "events.jsonl")
+	if err := os.WriteFile(eventsPath, eventsData.Bytes(), 0o644); err != nil {
+		t.Fatalf("write events: %v", err)
+	}
+
+	markerPath := filepath.Join(dir, "escalate-not-fired")
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd:  func() (string, error) { return dir, nil },
+	}
+
+	// Hook on "escalate" — none of the events match escalate.
+	code := runWatch([]string{"skip-watch", "--on", "escalate", "touch " + markerPath}, deps)
+	if code != output.ExitSuccess {
+		t.Fatalf("exit code = %d, want %d", code, output.ExitSuccess)
+	}
+
+	// Marker should NOT exist because no escalate events were emitted.
+	if _, err := os.Stat(markerPath); err == nil {
+		t.Fatalf("escalate hook should not have fired, but marker file exists")
+	}
+}
+
+func TestRunWatch_InvalidArgs_ReturnsInvalidArgs(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+	}
+
+	code := runWatch([]string{}, deps)
+	if code != output.ExitInvalidArgs {
+		t.Fatalf("exit code = %d, want %d", code, output.ExitInvalidArgs)
 	}
 }
