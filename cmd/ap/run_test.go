@@ -3,18 +3,21 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/hwells4/ap/internal/output"
+	"github.com/hwells4/ap/internal/session"
 )
 
 func TestRun_MinimalArgs(t *testing.T) {
 	dir := setupStageDir(t)
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
-		mode:   output.ModeHuman,
+		mode:   output.ModeJSON,
 		stdout: &stdout,
 		stderr: &stderr,
 		getwd: func() (string, error) {
@@ -22,11 +25,13 @@ func TestRun_MinimalArgs(t *testing.T) {
 		},
 	}
 
-	// ap run ralph my-session --fg (foreground so it doesn't try tmux)
-	code := runWithDeps([]string{"run", "ralph", "my-session", "--fg"}, deps)
-	// With no real provider, we expect a provider error, not an argument error.
+	// Use --explain-spec to validate arg parsing without launching a session.
+	code := runWithDeps([]string{"run", "ralph", "my-session", "--explain-spec", "--json"}, deps)
 	if code == output.ExitInvalidArgs {
 		t.Fatalf("got invalid args error, should have parsed successfully; stderr: %s", stderr.String())
+	}
+	if code != output.ExitSuccess {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}
 }
 
@@ -92,7 +97,7 @@ func TestRun_IterationFlag(t *testing.T) {
 	dir := setupStageDir(t)
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
-		mode:   output.ModeHuman,
+		mode:   output.ModeJSON,
 		stdout: &stdout,
 		stderr: &stderr,
 		getwd: func() (string, error) {
@@ -100,9 +105,13 @@ func TestRun_IterationFlag(t *testing.T) {
 		},
 	}
 
-	code := runWithDeps([]string{"run", "ralph", "my-session", "-n", "25", "--fg"}, deps)
+	// Use --explain-spec to validate arg parsing without launching a session.
+	code := runWithDeps([]string{"run", "ralph:25", "my-session", "--explain-spec", "--json"}, deps)
 	if code == output.ExitInvalidArgs {
-		t.Fatalf("got invalid args error with -n flag; stderr: %s", stderr.String())
+		t.Fatalf("got invalid args error with iteration count; stderr: %s", stderr.String())
+	}
+	if code != output.ExitSuccess {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
 	}
 }
 
@@ -642,6 +651,299 @@ func TestRun_ModelFlag_Invalid_JSON(t *testing.T) {
 	// Output layer flattens Available map: {"models": [...]} → "available_models" key.
 	if _, ok := errObj["available_models"]; !ok {
 		t.Fatal("missing available_models field in error")
+	}
+}
+
+// --- Stub launcher for testing run→launch path ---
+
+type testLauncher struct {
+	handle    session.SessionHandle
+	err       error
+	available bool
+
+	calls   int
+	session string
+	cmd     []string
+	opts    session.StartOptions
+}
+
+func (l *testLauncher) Start(sess string, runnerCmd []string, opts session.StartOptions) (session.SessionHandle, error) {
+	l.calls++
+	l.session = sess
+	l.cmd = append([]string(nil), runnerCmd...)
+	l.opts = opts
+	if l.err != nil {
+		return session.SessionHandle{}, l.err
+	}
+	return l.handle, nil
+}
+
+func (l *testLauncher) Kill(string) error { return nil }
+func (l *testLauncher) Available() bool   { return l.available }
+func (l *testLauncher) Name() string      { return "test" }
+
+func TestRun_BackgroundLaunch_JSON(t *testing.T) {
+	dir := setupStageDir(t)
+	var stdout, stderr bytes.Buffer
+	launcher := &testLauncher{
+		available: true,
+		handle: session.SessionHandle{
+			Session: "my-session",
+			PID:     9876,
+			Backend: "test",
+		},
+	}
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd: func() (string, error) {
+			return dir, nil
+		},
+		launcher: launcher,
+	}
+
+	code := runWithDeps([]string{"run", "ralph", "my-session", "--json"}, deps)
+	if code != output.ExitSuccess {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("invalid JSON: %v; output: %s", err, stdout.String())
+	}
+
+	if result["launched"] != true {
+		t.Errorf("expected launched=true, got %v", result["launched"])
+	}
+	if result["session"] != "my-session" {
+		t.Errorf("session = %v, want my-session", result["session"])
+	}
+	if result["launcher"] != "test" {
+		t.Errorf("launcher = %v, want test", result["launcher"])
+	}
+	if launcher.calls != 1 {
+		t.Errorf("launcher calls = %d, want 1", launcher.calls)
+	}
+}
+
+func TestRun_BackgroundLaunch_Human(t *testing.T) {
+	dir := setupStageDir(t)
+	var stdout, stderr bytes.Buffer
+	launcher := &testLauncher{
+		available: true,
+		handle: session.SessionHandle{
+			Session: "my-session",
+			PID:     9876,
+			Backend: "test",
+		},
+	}
+	deps := cliDeps{
+		mode:   output.ModeHuman,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd: func() (string, error) {
+			return dir, nil
+		},
+		launcher: launcher,
+	}
+
+	code := runWithDeps([]string{"run", "ralph", "my-session"}, deps)
+	if code != output.ExitSuccess {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	out := stdout.String()
+	if !containsSubstring(out, "started") {
+		t.Errorf("expected 'started' in output: %s", out)
+	}
+	if !containsSubstring(out, "my-session") {
+		t.Errorf("expected session name in output: %s", out)
+	}
+}
+
+func TestRun_LaunchError_JSON(t *testing.T) {
+	dir := setupStageDir(t)
+	var stdout, stderr bytes.Buffer
+	launcher := &testLauncher{
+		available: true,
+		err:       fmt.Errorf("tmux exploded"),
+	}
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd: func() (string, error) {
+			return dir, nil
+		},
+		launcher: launcher,
+	}
+
+	code := runWithDeps([]string{"run", "ralph", "my-session", "--json"}, deps)
+	if code != output.ExitGeneralError {
+		t.Fatalf("exit code = %d, want %d", code, output.ExitGeneralError)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("invalid JSON: %v; output: %s", err, stdout.String())
+	}
+	errObj, ok := result["error"].(map[string]any)
+	if !ok {
+		t.Fatal("missing error object")
+	}
+	if errObj["code"] != "START_FAILED" {
+		t.Errorf("error code = %v, want START_FAILED", errObj["code"])
+	}
+}
+
+func TestRun_LauncherUnavailable_FallsToForeground(t *testing.T) {
+	// When launcher.Available() is false in background mode, runRun falls back
+	// to runForeground which also checks Available() and returns an error.
+	dir := setupStageDir(t)
+	var stdout, stderr bytes.Buffer
+	launcher := &testLauncher{
+		available: false,
+	}
+	deps := cliDeps{
+		mode:   output.ModeHuman,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd: func() (string, error) {
+			return dir, nil
+		},
+		launcher: launcher,
+	}
+
+	code := runWithDeps([]string{"run", "ralph", "my-session"}, deps)
+	if code != output.ExitGeneralError {
+		t.Fatalf("exit code = %d, want %d; stdout: %s; stderr: %s", code, output.ExitGeneralError, stdout.String(), stderr.String())
+	}
+	if !containsSubstring(stderr.String(), "not available") {
+		t.Errorf("expected 'not available' in stderr: %s", stderr.String())
+	}
+}
+
+func TestRun_Foreground_PollsStateJSON(t *testing.T) {
+	dir := setupStageDir(t)
+	var stdout, stderr bytes.Buffer
+	launcher := &testLauncher{
+		available: true,
+		handle: session.SessionHandle{
+			Session: "fg-session",
+			PID:     5555,
+			Backend: "test",
+		},
+	}
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd: func() (string, error) {
+			return dir, nil
+		},
+		launcher: launcher,
+	}
+
+	// Run foreground in a goroutine since it polls.
+	done := make(chan int, 1)
+	go func() {
+		done <- runWithDeps([]string{"run", "ralph", "fg-session", "--fg", "--json"}, deps)
+	}()
+
+	// The launcher is called synchronously, so wait for it.
+	for i := 0; i < 50; i++ {
+		if launcher.calls > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if launcher.calls == 0 {
+		t.Fatal("launcher was never called")
+	}
+
+	// Write state.json to the run dir so the foreground poller sees completion.
+	runDir := filepath.Join(dir, ".ap", "runs", "fg-session")
+	stateJSON := `{"status": "completed", "iteration_completed": 3}`
+	if err := os.WriteFile(filepath.Join(runDir, "state.json"), []byte(stateJSON), 0o644); err != nil {
+		t.Fatalf("write state.json: %v", err)
+	}
+
+	select {
+	case code := <-done:
+		if code != output.ExitSuccess {
+			t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("foreground polling did not complete within timeout")
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("invalid JSON: %v; output: %s", err, stdout.String())
+	}
+	if result["status"] != "completed" {
+		t.Errorf("status = %v, want completed", result["status"])
+	}
+	if result["session"] != "fg-session" {
+		t.Errorf("session = %v, want fg-session", result["session"])
+	}
+}
+
+func TestRun_Foreground_FailedStatus(t *testing.T) {
+	dir := setupStageDir(t)
+	var stdout, stderr bytes.Buffer
+	launcher := &testLauncher{
+		available: true,
+		handle: session.SessionHandle{
+			Session: "fail-session",
+			PID:     6666,
+			Backend: "test",
+		},
+	}
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd: func() (string, error) {
+			return dir, nil
+		},
+		launcher: launcher,
+	}
+
+	done := make(chan int, 1)
+	go func() {
+		done <- runWithDeps([]string{"run", "ralph", "fail-session", "--fg", "--json"}, deps)
+	}()
+
+	for i := 0; i < 50; i++ {
+		if launcher.calls > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	runDir := filepath.Join(dir, ".ap", "runs", "fail-session")
+	stateJSON := `{"status": "failed", "iteration_completed": 1}`
+	if err := os.WriteFile(filepath.Join(runDir, "state.json"), []byte(stateJSON), 0o644); err != nil {
+		t.Fatalf("write state.json: %v", err)
+	}
+
+	select {
+	case code := <-done:
+		if code != output.ExitProviderError {
+			t.Fatalf("exit code = %d, want %d", code, output.ExitProviderError)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("foreground polling did not complete within timeout")
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("invalid JSON: %v; output: %s", err, stdout.String())
+	}
+	if result["status"] != "failed" {
+		t.Errorf("status = %v, want failed", result["status"])
 	}
 }
 

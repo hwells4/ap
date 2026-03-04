@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -8,9 +9,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hwells4/ap/internal/fuzzy"
 	"github.com/hwells4/ap/internal/output"
+	"github.com/hwells4/ap/internal/session"
 	"github.com/hwells4/ap/internal/spec"
 	"github.com/hwells4/ap/internal/stage"
 	"github.com/hwells4/ap/pkg/provider"
@@ -24,6 +27,7 @@ type cliDeps struct {
 	stderr      io.Writer
 	getwd       func() (string, error)
 	corrections []output.Correction
+	launcher    session.Launcher
 }
 
 func main() {
@@ -167,13 +171,80 @@ func runRun(args []string, deps cliDeps) int {
 		}
 	}
 
-	payload := map[string]any{
-		"request":     serializeRunRequest(req),
-		"parsed_spec": summarizeSpec(parsedSpec),
-	}
+	// Explain-spec mode: just return the parsed spec without launching.
 	if req.ExplainSpec {
-		payload["explain_spec"] = true
-		payload["foreground"] = req.Foreground
+		payload := map[string]any{
+			"request":      serializeRunRequest(req),
+			"parsed_spec":  summarizeSpec(parsedSpec),
+			"explain_spec": true,
+			"foreground":   req.Foreground,
+		}
+		if deps.mode == output.ModeJSON {
+			serialized, err := output.MarshalSuccess(output.NewSuccess(payload, deps.corrections))
+			if err != nil {
+				return renderError(deps, output.ExitGeneralError, output.NewError(
+					"GENERAL_ERROR", "failed to render run output", err.Error(),
+					"ap run <spec> <session> [flags]", nil))
+			}
+			_, _ = fmt.Fprintln(deps.stdout, string(serialized))
+			return output.ExitSuccess
+		}
+		_, _ = fmt.Fprintln(deps.stdout, "Spec explain generated.")
+		return output.ExitSuccess
+	}
+
+	// Resolve project root.
+	projectRoot := "."
+	if deps.getwd != nil {
+		if cwd, err := deps.getwd(); err == nil {
+			projectRoot = cwd
+		}
+	}
+
+	// Resolve launcher: use injected launcher or default to tmux.
+	launcher := deps.launcher
+	if launcher == nil {
+		launcher = session.NewTmuxLauncher()
+	}
+
+	// Foreground mode: run directly in this process.
+	if req.Foreground {
+		return runForeground(req, parsedSpec, projectRoot, launcher, deps)
+	}
+
+	// Background mode: launch via tmux.
+	if !launcher.Available() {
+		// Fall back to foreground if launcher is not available.
+		return runForeground(req, parsedSpec, projectRoot, launcher, deps)
+	}
+
+	sess, err := session.Start(parsedSpec, req.Session, session.StartOpts{
+		ProjectRoot: projectRoot,
+		Provider:    req.Provider,
+		Model:       req.Model,
+		OnEscalate:  req.OnEscalate,
+		Context:     req.Context,
+		InputFiles:  req.InputFiles,
+		Force:       req.Force,
+		Launcher:    launcher,
+	})
+	if err != nil {
+		return renderError(deps, output.ExitGeneralError, output.NewError(
+			"START_FAILED",
+			fmt.Sprintf("failed to start session: %v", err),
+			"",
+			"ap run <spec> <session> [flags]",
+			[]string{"ap list", "ap run ralph:3 my-session --fg"},
+		))
+	}
+
+	payload := map[string]any{
+		"session":      sess.Name,
+		"run_dir":      sess.RunDir,
+		"request":      serializeRunRequest(req),
+		"parsed_spec":  summarizeSpec(parsedSpec),
+		"launched":     true,
+		"launcher":     launcher.Name(),
 	}
 	if deps.mode == output.ModeJSON {
 		serialized, err := output.MarshalSuccess(output.NewSuccess(payload, deps.corrections))
@@ -185,13 +256,79 @@ func runRun(args []string, deps cliDeps) int {
 		_, _ = fmt.Fprintln(deps.stdout, string(serialized))
 		return output.ExitSuccess
 	}
-	if req.ExplainSpec {
-		_, _ = fmt.Fprintln(deps.stdout, "Spec explain generated.")
-		return output.ExitSuccess
-	}
-	_, _ = fmt.Fprintf(deps.stdout, "Parsed run request for session %q.\n", req.Session)
-	_, _ = fmt.Fprintln(deps.stdout, "Execution wiring lands in a later milestone.")
+	_, _ = fmt.Fprintf(deps.stdout, "Session %q started in tmux.\n", sess.Name)
+	_, _ = fmt.Fprintf(deps.stdout, "  ap status %s\n", sess.Name)
+	_, _ = fmt.Fprintf(deps.stdout, "  ap logs %s -f\n", sess.Name)
 	return output.ExitSuccess
+}
+
+// runForeground runs the session directly in the current process using ap _run.
+func runForeground(req runRequest, parsedSpec spec.Spec, projectRoot string, launcher session.Launcher, deps cliDeps) int {
+	if !launcher.Available() {
+		_, _ = fmt.Fprintln(deps.stderr, "launcher is not available for session execution")
+		return output.ExitGeneralError
+	}
+
+	sess, err := session.Start(parsedSpec, req.Session, session.StartOpts{
+		ProjectRoot: projectRoot,
+		Provider:    req.Provider,
+		Model:       req.Model,
+		OnEscalate:  req.OnEscalate,
+		Context:     req.Context,
+		InputFiles:  req.InputFiles,
+		Force:       req.Force,
+		Launcher:    launcher,
+	})
+	if err != nil {
+		return renderError(deps, output.ExitGeneralError, output.NewError(
+			"START_FAILED",
+			fmt.Sprintf("failed to start session: %v", err),
+			"",
+			"ap run <spec> <session> --fg [flags]",
+			[]string{"ap list"},
+		))
+	}
+
+	_, _ = fmt.Fprintf(deps.stderr, "Session %q running (foreground wait)...\n", sess.Name)
+
+	// Poll state.json until session completes or timeout (30 minutes).
+	stPath := filepath.Join(sess.RunDir, "state.json")
+	deadline := time.Now().Add(30 * time.Minute)
+	for {
+		if time.Now().After(deadline) {
+			_, _ = fmt.Fprintln(deps.stderr, "foreground wait timed out (30m)")
+			return output.ExitGeneralError
+		}
+		time.Sleep(2 * time.Second)
+		data, readErr := os.ReadFile(stPath)
+		if readErr != nil {
+			continue
+		}
+		var stateMap map[string]any
+		if jsonErr := json.Unmarshal(data, &stateMap); jsonErr != nil {
+			continue
+		}
+		status, _ := stateMap["status"].(string)
+		if status == "completed" || status == "failed" || status == "paused" {
+			payload := map[string]any{
+				"session":             sess.Name,
+				"run_dir":             sess.RunDir,
+				"status":              status,
+				"iteration_completed": stateMap["iteration_completed"],
+			}
+			if deps.mode == output.ModeJSON {
+				serialized, _ := output.MarshalSuccess(output.NewSuccess(payload, deps.corrections))
+				_, _ = fmt.Fprintln(deps.stdout, string(serialized))
+			} else {
+				iter, _ := stateMap["iteration_completed"].(float64)
+				_, _ = fmt.Fprintf(deps.stdout, "Session %q: %s (%d iterations)\n", sess.Name, status, int(iter))
+			}
+			if status == "failed" {
+				return output.ExitProviderError
+			}
+			return output.ExitSuccess
+		}
+	}
 }
 
 func parseRunArgs(args []string, getwd func() (string, error)) (runRequest, spec.Spec, []output.Correction, *output.ErrorResponse) {
