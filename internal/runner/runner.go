@@ -170,8 +170,8 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		// Execute provider.
 		provResult, provErr := cfg.Provider.Execute(ctx, req)
 		if provErr != nil {
-			// Provider failure: emit iteration_failed and mark session failed.
-			_ = ew.Append(events.NewEvent(events.TypeError, cfg.Session, cursor, map[string]any{
+			// Provider failure: emit iteration.failed and mark session failed.
+			_ = ew.Append(events.NewEvent(events.TypeIterationFailed, cfg.Session, cursor, map[string]any{
 				"iteration": i,
 				"error":     provErr.Error(),
 				"exit_code": provResult.ExitCode,
@@ -188,8 +188,8 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		// Parse result from status.json / result.json.
 		iterResult, _, loadErr := result.Load(resultFilePath, statusFilePath)
 		if loadErr != nil {
-			// Missing or invalid status.json: emit error and fail.
-			_ = ew.Append(events.NewEvent(events.TypeError, cfg.Session, cursor, map[string]any{
+			// Missing or invalid status.json: emit iteration.failed and fail.
+			_ = ew.Append(events.NewEvent(events.TypeIterationFailed, cfg.Session, cursor, map[string]any{
 				"iteration": i,
 				"error":     fmt.Sprintf("result load: %v", loadErr),
 			}))

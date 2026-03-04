@@ -76,26 +76,26 @@ func TestIntegration_SignalCancelsIteration(t *testing.T) {
 		t.Fatal("no events recorded")
 	}
 
-	// Should have at least session_start and an error event.
+	// Should have at least session.started and a failure/error event.
 	hasSessionStart := false
-	hasError := false
+	hasFailureEvent := false
 	for _, line := range events {
 		var evt map[string]any
 		if err := json.Unmarshal([]byte(line), &evt); err != nil {
 			continue
 		}
 		switch evt["type"] {
-		case "session_start":
+		case "session.started":
 			hasSessionStart = true
-		case "error":
-			hasError = true
+		case "error", "iteration.failed":
+			hasFailureEvent = true
 		}
 	}
 	if !hasSessionStart {
-		t.Error("missing session_start event")
+		t.Error("missing session.started event")
 	}
-	if !hasError {
-		t.Error("missing error event for signal termination")
+	if !hasFailureEvent {
+		t.Error("missing failure event for signal termination")
 	}
 }
 

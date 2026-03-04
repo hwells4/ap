@@ -16,17 +16,19 @@ import (
 
 const (
 	// TypeSessionStart marks the start of a session.
-	TypeSessionStart = "session_start"
+	TypeSessionStart = "session.started"
 	// TypeSessionComplete marks the completion of a session.
-	TypeSessionComplete = "session_complete"
+	TypeSessionComplete = "session.completed"
 	// TypeNodeStart marks the start of a node.
-	TypeNodeStart = "node_start"
+	TypeNodeStart = "node.started"
 	// TypeNodeComplete marks the completion of a node.
-	TypeNodeComplete = "node_complete"
+	TypeNodeComplete = "node.completed"
 	// TypeIterationStart marks the start of an iteration.
-	TypeIterationStart = "iteration_start"
+	TypeIterationStart = "iteration.started"
 	// TypeIterationComplete marks the completion of an iteration.
-	TypeIterationComplete = "iteration_complete"
+	TypeIterationComplete = "iteration.completed"
+	// TypeIterationFailed marks an iteration failure.
+	TypeIterationFailed = "iteration.failed"
 	// TypeError marks an error event.
 	TypeError = "error"
 )

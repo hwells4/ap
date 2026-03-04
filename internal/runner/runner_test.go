@@ -266,16 +266,16 @@ func TestRun_EventsEmitted(t *testing.T) {
 
 	lines := splitNonEmpty(string(data))
 	if len(lines) < 3 {
-		t.Errorf("events lines = %d, want >= 3 (session_start, iteration_start, iteration_complete, session_complete)", len(lines))
+		t.Errorf("events lines = %d, want >= 3 (session.started, iteration.started, iteration.completed, session.completed)", len(lines))
 	}
 
-	// Check first event is session_start.
+	// Check first event is session.started.
 	var first map[string]any
 	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
 		t.Fatalf("parse first event: %v", err)
 	}
-	if first["type"] != "session_start" {
-		t.Errorf("first event type = %q, want session_start", first["type"])
+	if first["type"] != "session.started" {
+		t.Errorf("first event type = %q, want session.started", first["type"])
 	}
 }
 
@@ -517,12 +517,12 @@ func TestRun_EventOrdering(t *testing.T) {
 	}
 
 	lines := splitNonEmpty(string(data))
-	// Expected: session_start, iter1_start, iter1_complete, iter2_start, iter2_complete, session_complete
+	// Expected: session.started, iter1 started/completed, iter2 started/completed, session.completed
 	expectedTypes := []string{
-		"session_start",
-		"iteration_start", "iteration_complete",
-		"iteration_start", "iteration_complete",
-		"session_complete",
+		"session.started",
+		"iteration.started", "iteration.completed",
+		"iteration.started", "iteration.completed",
+		"session.completed",
 	}
 	if len(lines) != len(expectedTypes) {
 		t.Fatalf("event count = %d, want %d", len(lines), len(expectedTypes))
