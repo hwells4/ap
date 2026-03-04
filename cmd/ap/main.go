@@ -2,12 +2,21 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/hwells4/ap/internal/output"
 )
 
 const version = "0.1.0"
+
+// cliDeps holds injectable dependencies for testability.
+type cliDeps struct {
+	mode   output.Mode
+	stdout io.Writer
+	stderr io.Writer
+	getwd  func() (string, error)
+}
 
 func main() {
 	exitCode := run(os.Args[1:])
@@ -21,49 +30,66 @@ func run(args []string) int {
 		Env:         envMap(),
 	})
 
+	return runWithDeps(args, cliDeps{
+		mode:   mode,
+		stdout: os.Stdout,
+		stderr: os.Stderr,
+		getwd:  os.Getwd,
+	})
+}
+
+func runWithDeps(args []string, deps cliDeps) int {
 	if len(args) == 0 {
-		rendered, err := output.RenderNoArgs(mode, version)
+		rendered, err := output.RenderNoArgs(deps.mode, version)
 		if err != nil {
-			_, _ = fmt.Fprintln(os.Stderr, err)
+			_, _ = fmt.Fprintln(deps.stderr, err)
 			return output.ExitGeneralError
 		}
-		_, _ = fmt.Fprintln(os.Stdout, rendered)
+		_, _ = fmt.Fprintln(deps.stdout, rendered)
 		return output.ExitSuccess
 	}
 
-	errResp := output.NewError(
+	switch args[0] {
+	case "list":
+		return runList(args[1:], deps)
+	}
+
+	return renderError(deps, output.ExitInvalidArgs, output.NewError(
 		"UNKNOWN_COMMAND",
 		fmt.Sprintf("unknown command %q", args[0]),
-		"Only no-args help is implemented in this milestone slice.",
+		"Supported commands: list. More coming in later milestones.",
 		"ap <command> [args] [flags]",
 		[]string{
 			"ap",
 			"ap run <spec> <session>",
 			"ap list",
 		},
-	)
+	))
+}
 
-	if mode == output.ModeJSON {
+// renderError writes a structured error in the appropriate mode and returns the exit code.
+func renderError(deps cliDeps, exitCode int, errResp output.ErrorResponse) int {
+	if deps.mode == output.ModeJSON {
 		serialized, err := output.MarshalError(errResp)
 		if err != nil {
-			_, _ = fmt.Fprintln(os.Stderr, err)
+			_, _ = fmt.Fprintln(deps.stderr, err)
 			return output.ExitGeneralError
 		}
-		_, _ = fmt.Fprintln(os.Stdout, string(serialized))
-		return output.ExitInvalidArgs
+		_, _ = fmt.Fprintln(deps.stdout, string(serialized))
+		return exitCode
 	}
 
-	_, _ = fmt.Fprintf(os.Stderr, "%s: %s\n", errResp.Error.Code, errResp.Error.Message)
+	_, _ = fmt.Fprintf(deps.stderr, "%s: %s\n", errResp.Error.Code, errResp.Error.Message)
 	if errResp.Error.Detail != "" {
-		_, _ = fmt.Fprintln(os.Stderr, errResp.Error.Detail)
+		_, _ = fmt.Fprintln(deps.stderr, errResp.Error.Detail)
 	}
 	if errResp.Error.Syntax != "" {
-		_, _ = fmt.Fprintf(os.Stderr, "syntax: %s\n", errResp.Error.Syntax)
+		_, _ = fmt.Fprintf(deps.stderr, "syntax: %s\n", errResp.Error.Syntax)
 	}
 	for _, suggestion := range errResp.Error.Suggestions {
-		_, _ = fmt.Fprintf(os.Stderr, "try: %s\n", suggestion)
+		_, _ = fmt.Fprintf(deps.stderr, "try: %s\n", suggestion)
 	}
-	return output.ExitInvalidArgs
+	return exitCode
 }
 
 func hasJSONFlag(args []string) bool {
