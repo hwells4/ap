@@ -82,6 +82,14 @@ func TestResumePausedSession(t *testing.T) {
 	if !ok || int(resumeFrom) != 5 {
 		t.Fatalf("resume_from = %v, want 5", result["resume_from"])
 	}
+
+	updated, err := state.Load(filepath.Join(dir, ".ap", "runs", "paused-sess", "state.json"))
+	if err != nil {
+		t.Fatalf("load resumed state: %v", err)
+	}
+	if updated.Status != state.StateRunning {
+		t.Fatalf("status after resume = %q, want %q", updated.Status, state.StateRunning)
+	}
 }
 
 func TestResumeFailedSession(t *testing.T) {
@@ -125,6 +133,14 @@ func TestResumeFailedSession(t *testing.T) {
 	resumeFrom, ok := result["resume_from"].(float64)
 	if !ok || int(resumeFrom) != 3 {
 		t.Fatalf("resume_from = %v, want 3", result["resume_from"])
+	}
+
+	updated, err := state.Load(filepath.Join(dir, ".ap", "runs", "failed-sess", "state.json"))
+	if err != nil {
+		t.Fatalf("load resumed state: %v", err)
+	}
+	if updated.Status != state.StateRunning {
+		t.Fatalf("status after resume = %q, want %q", updated.Status, state.StateRunning)
 	}
 }
 

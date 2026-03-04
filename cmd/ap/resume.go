@@ -66,7 +66,7 @@ func runResume(args []string, deps cliDeps) int {
 	case state.StateRunning:
 		return resumeAlreadyRunning(deps, sessionName, snapshot)
 	case state.StatePaused, state.StateFailed:
-		return resumeSession(deps, sessionName, snapshot, contextOverride)
+		return resumeSession(deps, sessionName, statePath, snapshot, contextOverride)
 	case state.StateCompleted:
 		return renderError(deps, output.ExitInvalidArgs, output.NewError(
 			"SESSION_COMPLETED",
@@ -105,13 +105,25 @@ func resumeAlreadyRunning(deps cliDeps, session string, snapshot *state.SessionS
 	return renderResumeSuccess(deps, payload)
 }
 
-func resumeSession(deps cliDeps, session string, snapshot *state.SessionState, contextOverride string) int {
+func resumeSession(deps cliDeps, session, statePath string, snapshot *state.SessionState, contextOverride string) int {
 	resumeFrom := state.ResumeFrom(snapshot)
+	updated, err := state.Update(statePath, func(s *state.SessionState) error {
+		return s.Transition(state.StateRunning)
+	})
+	if err != nil {
+		return renderError(deps, output.ExitGeneralError, output.NewError(
+			"STATE_TRANSITION_ERROR",
+			fmt.Sprintf("failed to resume session %q", session),
+			err.Error(),
+			"ap resume <session> [--context TEXT] [--json]",
+			nil,
+		))
+	}
 
 	payload := map[string]any{
 		"session":     session,
 		"action":      "resumed",
-		"status":      string(snapshot.Status),
+		"status":      string(updated.Status),
 		"resume_from": resumeFrom,
 	}
 	if contextOverride != "" {

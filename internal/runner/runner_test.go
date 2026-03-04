@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hwells4/ap/internal/events"
 	"github.com/hwells4/ap/internal/mock"
 	"github.com/hwells4/ap/internal/result"
 	"github.com/hwells4/ap/internal/state"
@@ -105,6 +106,119 @@ func TestRun_EarlyStop(t *testing.T) {
 	}
 	if mp.CallCount() != 2 {
 		t.Errorf("provider calls = %d, want 2", mp.CallCount())
+	}
+}
+
+func TestRun_EscalateAlwaysPausesAndRecordsEscalation(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name     string
+		decision string
+	}{
+		{name: "continue", decision: "continue"},
+		{name: "stop", decision: "stop"},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			runRoot := t.TempDir()
+			sessionName := "test-escalate-" + tc.name
+			runDir := filepath.Join(runRoot, ".ap", "runs", sessionName)
+			if err := os.MkdirAll(runDir, 0o755); err != nil {
+				t.Fatalf("mkdir run dir: %v", err)
+			}
+
+			mp := mock.New(
+				mock.WithResponses(
+					mock.EscalateResponse(tc.decision, "need input", "human", "choose A or B", []string{"A", "B"}),
+					mock.ContinueResponse("should never run"),
+				),
+			)
+
+			cfg := Config{
+				Session:        sessionName,
+				RunDir:         runDir,
+				StageName:      "test-stage",
+				Provider:       mp,
+				Iterations:     3,
+				PromptTemplate: "iteration ${ITERATION}",
+			}
+
+			res, err := Run(context.Background(), cfg)
+			if err != nil {
+				t.Fatalf("Run() error: %v", err)
+			}
+			if res.Status != state.StatePaused {
+				t.Fatalf("status = %q, want %q", res.Status, state.StatePaused)
+			}
+			if res.Iterations != 1 {
+				t.Fatalf("iterations = %d, want 1", res.Iterations)
+			}
+			if mp.CallCount() != 1 {
+				t.Fatalf("provider calls = %d, want 1", mp.CallCount())
+			}
+
+			snapshot, err := state.Load(filepath.Join(runDir, "state.json"))
+			if err != nil {
+				t.Fatalf("load state: %v", err)
+			}
+			if snapshot.Status != state.StatePaused {
+				t.Fatalf("state status = %q, want %q", snapshot.Status, state.StatePaused)
+			}
+			if snapshot.Escalation == nil {
+				t.Fatalf("expected escalation snapshot, got nil")
+			}
+			if snapshot.Escalation.Type != "human" {
+				t.Fatalf("escalation type = %q, want %q", snapshot.Escalation.Type, "human")
+			}
+			if snapshot.Escalation.Reason != "choose A or B" {
+				t.Fatalf("escalation reason = %q, want %q", snapshot.Escalation.Reason, "choose A or B")
+			}
+			if len(snapshot.Escalation.Options) != 2 || snapshot.Escalation.Options[0] != "A" || snapshot.Escalation.Options[1] != "B" {
+				t.Fatalf("escalation options = %#v, want [A B]", snapshot.Escalation.Options)
+			}
+
+			eventsPath := filepath.Join(runDir, "events.jsonl")
+			data, err := os.ReadFile(eventsPath)
+			if err != nil {
+				t.Fatalf("read events: %v", err)
+			}
+
+			lines := splitNonEmpty(string(data))
+			foundEscalate := false
+			for _, line := range lines {
+				var evt map[string]any
+				if err := json.Unmarshal([]byte(line), &evt); err != nil {
+					t.Fatalf("parse event: %v", err)
+				}
+
+				switch evt["type"] {
+				case events.TypeSessionComplete:
+					t.Fatalf("unexpected %q event for escalated run", events.TypeSessionComplete)
+				case events.TypeSignalEscalate:
+					foundEscalate = true
+					payload, ok := evt["data"].(map[string]any)
+					if !ok {
+						t.Fatalf("signal.escalate data has unexpected type %T", evt["data"])
+					}
+					if payload["reason"] != "choose A or B" {
+						t.Fatalf("event reason = %v, want %q", payload["reason"], "choose A or B")
+					}
+					options, ok := payload["options"].([]any)
+					if !ok {
+						t.Fatalf("event options has unexpected type %T", payload["options"])
+					}
+					if len(options) != 2 || options[0] != "A" || options[1] != "B" {
+						t.Fatalf("event options = %#v, want [A B]", options)
+					}
+				}
+			}
+			if !foundEscalate {
+				t.Fatalf("expected %q event, but none found", events.TypeSignalEscalate)
+			}
+		})
 	}
 }
 
@@ -549,6 +663,176 @@ func containsSubstr(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+func TestRun_EscalateSignal_PausesSession(t *testing.T) {
+	runDir := tempSession(t)
+
+	mp := mock.New(
+		mock.WithResponses(
+			mock.ContinueResponse("iteration 1 ok"),
+			mock.EscalateResponse("continue", "iteration 2 work", "human", "needs human review", []string{"approve", "reject"}),
+		),
+	)
+
+	cfg := Config{
+		Session:        "test-escalate",
+		RunDir:         runDir,
+		StageName:      "test-stage",
+		Provider:       mp,
+		Iterations:     10,
+		PromptTemplate: "iteration ${ITERATION}",
+	}
+
+	res, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	// Escalate should pause after iteration 2, regardless of "continue" decision.
+	if res.Status != state.StatePaused {
+		t.Errorf("status = %q, want %q", res.Status, state.StatePaused)
+	}
+	if res.Iterations != 2 {
+		t.Errorf("iterations = %d, want 2", res.Iterations)
+	}
+	if mp.CallCount() != 2 {
+		t.Errorf("provider calls = %d, want 2", mp.CallCount())
+	}
+}
+
+func TestRun_EscalateSignal_OverridesStopDecision(t *testing.T) {
+	runDir := tempSession(t)
+
+	// Agent says "stop" but also escalates — escalate wins, session pauses.
+	mp := mock.New(
+		mock.WithResponses(
+			mock.EscalateResponse("stop", "done", "human", "review before finishing", nil),
+		),
+	)
+
+	cfg := Config{
+		Session:        "test-escalate-override",
+		RunDir:         runDir,
+		StageName:      "test-stage",
+		Provider:       mp,
+		Iterations:     5,
+		PromptTemplate: "iteration ${ITERATION}",
+	}
+
+	res, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	// Should be paused, not completed (even though agent said "stop").
+	if res.Status != state.StatePaused {
+		t.Errorf("status = %q, want %q", res.Status, state.StatePaused)
+	}
+	if res.Iterations != 1 {
+		t.Errorf("iterations = %d, want 1", res.Iterations)
+	}
+}
+
+func TestRun_EscalateSignal_StateHasEscalation(t *testing.T) {
+	runDir := tempSession(t)
+
+	mp := mock.New(
+		mock.WithResponses(
+			mock.EscalateResponse("continue", "work done", "human", "needs approval", []string{"approve", "reject", "defer"}),
+		),
+	)
+
+	cfg := Config{
+		Session:        "test-escalate-state",
+		RunDir:         runDir,
+		StageName:      "test-stage",
+		Provider:       mp,
+		Iterations:     5,
+		PromptTemplate: "iteration ${ITERATION}",
+	}
+
+	_, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	// Verify state.json contains escalation info.
+	st, err := state.Load(filepath.Join(runDir, "state.json"))
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if st.Status != state.StatePaused {
+		t.Fatalf("state status = %q, want %q", st.Status, state.StatePaused)
+	}
+	if st.Escalation == nil {
+		t.Fatal("state.Escalation is nil, want non-nil")
+	}
+	if st.Escalation.Type != "human" {
+		t.Errorf("escalation type = %q, want %q", st.Escalation.Type, "human")
+	}
+	if st.Escalation.Reason != "needs approval" {
+		t.Errorf("escalation reason = %q, want %q", st.Escalation.Reason, "needs approval")
+	}
+	if len(st.Escalation.Options) != 3 {
+		t.Errorf("escalation options = %v, want 3 options", st.Escalation.Options)
+	}
+}
+
+func TestRun_EscalateSignal_EventEmitted(t *testing.T) {
+	runDir := tempSession(t)
+
+	mp := mock.New(
+		mock.WithResponses(
+			mock.EscalateResponse("continue", "work", "human", "help needed", []string{"yes", "no"}),
+		),
+	)
+
+	cfg := Config{
+		Session:        "test-escalate-event",
+		RunDir:         runDir,
+		StageName:      "test-stage",
+		Provider:       mp,
+		Iterations:     5,
+		PromptTemplate: "iteration ${ITERATION}",
+	}
+
+	_, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	// Verify events.jsonl contains signal.escalate event.
+	data, err := os.ReadFile(filepath.Join(runDir, "events.jsonl"))
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+
+	lines := splitNonEmpty(string(data))
+	found := false
+	for _, line := range lines {
+		var ev map[string]any
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("parse event: %v", err)
+		}
+		if ev["type"] == "signal.escalate" {
+			found = true
+			evData, ok := ev["data"].(map[string]any)
+			if !ok {
+				t.Fatal("signal.escalate event missing data")
+			}
+			if evData["type"] != "human" {
+				t.Errorf("event data.type = %v, want human", evData["type"])
+			}
+			if evData["reason"] != "help needed" {
+				t.Errorf("event data.reason = %v, want 'help needed'", evData["reason"])
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("signal.escalate event not found in events.jsonl")
+	}
 }
 
 // These keep the imports valid even if not all are used in every test.
