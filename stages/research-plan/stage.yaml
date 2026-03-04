@@ -1,0 +1,13 @@
+# Research Plan Stage - Hybrid research + architecture refinement
+# Researches external repos, local models, integration opportunities
+# Then improves plan based on findings
+
+name: research-plan
+description: Research-driven plan refinement with external repo analysis
+
+termination:
+  type: judgment
+  min_iterations: 3
+  consensus: 2
+
+delay: 3

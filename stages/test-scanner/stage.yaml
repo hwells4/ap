@@ -1,0 +1,13 @@
+# Test Scanner Stage - Scan codebase for test coverage gaps
+# Agent explores different areas each iteration, documenting missing tests
+# Uses judgment termination - stops when two agents agree all major areas are covered
+
+name: test-scanner
+description: Scan codebase with fresh eyes to discover missing tests and coverage gaps
+
+termination:
+  type: judgment
+  min_iterations: 2
+  consensus: 2
+
+delay: 3

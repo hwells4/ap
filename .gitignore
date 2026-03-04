@@ -1,0 +1,34 @@
+# Binaries
+/ap
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test
+*.test
+*.out
+coverage.html
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Session data (runtime, not committed)
+.ap/
+
+# Beads data (local task tracking)
+.beads/
+
+# Environment
+.env
+.env.*

@@ -1,0 +1,10 @@
+name: peer-code-reviewer
+description: Cross-agent code review to catch issues from parallel work
+
+termination:
+  type: judgment
+  min_iterations: 1
+  consensus: 2
+  max: 5
+
+delay: 3

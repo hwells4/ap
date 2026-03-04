@@ -1,0 +1,12 @@
+# Improve Plan Stage - Iteratively refine a plan document
+# Agent decides when quality has plateaued
+
+name: improve-plan
+description: Iteratively improve a plan document until quality plateaus
+
+termination:
+  type: judgment
+  min_iterations: 2
+  consensus: 2
+
+delay: 2

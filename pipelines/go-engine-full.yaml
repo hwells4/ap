@@ -1,0 +1,209 @@
+# Go Engine Full Pipeline
+# Runs all 3 phases: implement (Codex) → discover → triage → fix (Claude)
+
+name: go-engine-full
+description: Complete Go engine rewrite - all 3 phases with bug review cycles
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 1: Core Engine (MVP)
+  # ═══════════════════════════════════════════════════════════════
+  - id: phase1-implement
+    stage: codex-work
+    model: gpt-5.2-codex:high
+    termination:
+      type: fixed
+      iterations: 25  # Max - agent stops early when beads empty
+    context: |
+      PHASE 1: Core Engine MVP
+
+      BEAD LABEL: Use `pipeline/phase1` for ALL bead commands (NOT pipeline/${SESSION_NAME})
+
+      WORKFLOW:
+      1. Check in_progress: bd list --label=pipeline/phase1 --status=in_progress
+      2. If in_progress exists: FINISH IT and bd close <id>
+      3. Check ready: bd ready --label=pipeline/phase1
+      4. If ready exists: bd update <id> --status=in_progress, implement, bd close <id>
+      5. If ready empty but beads exist: They're BLOCKED - write decision: continue
+      6. If ALL beads closed: write decision: stop
+
+      CRITICAL: ALWAYS run `bd close <id>` after finishing a bead. Unclosed beads block everything.
+
+      Tests: go test ./...
+
+  - id: phase1-discover
+    stage: bug-discovery
+    model: opus
+    termination:
+      type: fixed
+      iterations: 5
+    inputs:
+      from: phase1-implement
+    context: |
+      Spawn these review agents in parallel via Task tool:
+      - compound-engineering:review:architecture-strategist
+      - compound-engineering:review:security-sentinel
+      - compound-engineering:review:performance-oracle
+      - compound-engineering:review:code-simplicity-reviewer
+      - compound-engineering:review:pattern-recognition-specialist
+      Focus on Go code in cmd/, pkg/, internal/. Document bugs in progress file.
+
+  - id: phase1-triage
+    stage: bug-triage
+    model: opus
+    termination:
+      type: judgment
+      consensus: 2
+      max: 5
+    inputs:
+      from: phase1-discover
+
+  - id: phase1-fix
+    stage: ralph
+    model: opus
+    termination:
+      type: queue  # Stop when bug beads are done
+      max: 15
+    inputs:
+      from: phase1-triage
+    context: |
+      Fix bugs created by bug-triage (uses default pipeline/${SESSION_NAME} label).
+      Commit after each fix: git add -A && git commit -m "fix: [bead-id] - description"
+      Tests: go test ./...
+
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 2: Full Parity
+  # ═══════════════════════════════════════════════════════════════
+  - id: phase2-implement
+    stage: codex-work
+    model: gpt-5.2-codex:high
+    termination:
+      type: fixed
+      iterations: 30  # More tasks in phase 2
+    inputs:
+      from: phase1-fix
+    context: |
+      PHASE 2: Full Parity
+
+      BEAD LABEL: Use `pipeline/phase2` for ALL bead commands (NOT pipeline/${SESSION_NAME})
+
+      WORKFLOW:
+      1. Check in_progress: bd list --label=pipeline/phase2 --status=in_progress
+      2. If in_progress exists: FINISH IT and bd close <id>
+      3. Check ready: bd ready --label=pipeline/phase2
+      4. If ready exists: bd update <id> --status=in_progress, implement, bd close <id>
+      5. If ready empty but beads exist: They're BLOCKED - write decision: continue
+      6. If ALL beads closed: write decision: stop
+
+      CRITICAL: ALWAYS run `bd close <id>` after finishing a bead. Unclosed beads block everything.
+
+      Tests: go test ./...
+
+  - id: phase2-discover
+    stage: bug-discovery
+    model: opus
+    termination:
+      type: fixed
+      iterations: 5
+    inputs:
+      from: phase2-implement
+    context: |
+      Spawn these review agents in parallel via Task tool:
+      - compound-engineering:review:architecture-strategist
+      - compound-engineering:review:security-sentinel
+      - compound-engineering:review:performance-oracle
+      - compound-engineering:review:code-simplicity-reviewer
+      - compound-engineering:review:pattern-recognition-specialist
+      Focus on Phase 2: termination strategies, parallel blocks, session locking.
+
+  - id: phase2-triage
+    stage: bug-triage
+    model: opus
+    termination:
+      type: judgment
+      consensus: 2
+      max: 5
+    inputs:
+      from: phase2-discover
+
+  - id: phase2-fix
+    stage: ralph
+    model: opus
+    termination:
+      type: queue
+      max: 15
+    inputs:
+      from: phase2-triage
+    context: |
+      Fix bugs created by bug-triage (uses default pipeline/${SESSION_NAME} label).
+      Commit after each fix: git add -A && git commit -m "fix: [bead-id] - description"
+      Tests: go test ./...
+
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 3: SDK & Hooks
+  # ═══════════════════════════════════════════════════════════════
+  - id: phase3-implement
+    stage: codex-work
+    model: gpt-5.2-codex:high
+    termination:
+      type: fixed
+      iterations: 20  # Fewer tasks in phase 3
+    inputs:
+      from: phase2-fix
+    context: |
+      PHASE 3: SDK & Hooks
+
+      BEAD LABEL: Use `pipeline/phase3` for ALL bead commands (NOT pipeline/${SESSION_NAME})
+
+      WORKFLOW:
+      1. Check in_progress: bd list --label=pipeline/phase3 --status=in_progress
+      2. If in_progress exists: FINISH IT and bd close <id>
+      3. Check ready: bd ready --label=pipeline/phase3
+      4. If ready exists: bd update <id> --status=in_progress, implement, bd close <id>
+      5. If ready empty but beads exist: They're BLOCKED - write decision: continue
+      6. If ALL beads closed: write decision: stop
+
+      CRITICAL: ALWAYS run `bd close <id>` after finishing a bead. Unclosed beads block everything.
+
+      Tests: go test ./...
+
+  - id: phase3-discover
+    stage: bug-discovery
+    model: opus
+    termination:
+      type: fixed
+      iterations: 5
+    inputs:
+      from: phase3-implement
+    context: |
+      Spawn these review agents in parallel via Task tool:
+      - compound-engineering:review:architecture-strategist
+      - compound-engineering:review:security-sentinel
+      - compound-engineering:review:performance-oracle
+      - compound-engineering:review:code-simplicity-reviewer
+      - compound-engineering:review:pattern-recognition-specialist
+      Focus on Phase 3: hook system, SDK APIs, pause/resume, event channels.
+
+  - id: phase3-triage
+    stage: bug-triage
+    model: opus
+    termination:
+      type: judgment
+      consensus: 2
+      max: 5
+    inputs:
+      from: phase3-discover
+
+  - id: phase3-fix
+    stage: ralph
+    model: opus
+    termination:
+      type: queue
+      max: 15
+    inputs:
+      from: phase3-triage
+    context: |
+      Fix bugs created by bug-triage (uses default pipeline/${SESSION_NAME} label).
+      Commit after each fix: git add -A && git commit -m "fix: [bead-id] - description"
+      Tests: go test ./...
+      This completes the Go engine rewrite.

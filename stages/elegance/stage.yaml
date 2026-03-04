@@ -1,0 +1,12 @@
+# Elegance Stage - Deep exploration for simplicity and elegance
+# Agent explores freely with subagents, plateaus when nothing new to find
+
+name: elegance
+description: Explore codebase for elegance opportunities—what to simplify, remove, or recast
+
+termination:
+  type: judgment
+  min_iterations: 3
+  consensus: 2
+
+delay: 3

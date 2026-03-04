@@ -1,0 +1,8 @@
+name: hundred-to-ten-filter
+description: Generate 100 ideas, then ruthlessly filter to the 10 most brilliant
+
+termination:
+  type: fixed
+  iterations: 1
+
+delay: 3

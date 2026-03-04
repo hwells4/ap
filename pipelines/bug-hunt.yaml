@@ -1,0 +1,35 @@
+# Bug Hunt Pipeline
+# Systematic bug discovery, elegant triage, refinement, and implementation
+
+name: bug-hunt
+description: Discover bugs with fresh eyes, triage elegantly, refine tasks, implement fixes
+
+nodes:
+  # Stage 1: Explore codebase and document bugs (8 iterations)
+  - id: discover
+    stage: bug-discovery
+    runs: 8
+
+  # Stage 2: Triage bugs, find patterns, create elegant solutions as beads
+  - id: triage
+    stage: bug-triage
+    runs: 2
+    inputs:
+      from: discover
+      select: latest
+
+  # Stage 3: Refine the tasks created during triage
+  - id: refine
+    stage: refine-tasks
+    runs: 3
+    inputs:
+      from: triage
+      select: latest
+
+  # Stage 4: Implement the fixes
+  - id: fix
+    stage: ralph
+    runs: 25
+    inputs:
+      from: refine
+      select: latest

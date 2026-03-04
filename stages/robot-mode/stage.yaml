@@ -1,0 +1,8 @@
+name: robot-mode
+description: Analyze code/plans for agent-usability improvements
+
+termination:
+  type: fixed
+  iterations: 3
+
+delay: 2

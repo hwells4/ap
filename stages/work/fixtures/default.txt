@@ -1,0 +1,11 @@
+# Mock Response
+
+This is a mock response for testing purposes.
+
+## Actions Taken
+- Read progress file
+- Simulated work
+- Updated state
+
+## Status
+Written to status.json with decision: continue

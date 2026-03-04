@@ -1,0 +1,10 @@
+name: premortem
+description: Imagine failure 6 months out and revise the plan to prevent it
+
+termination:
+  type: judgment
+  min_iterations: 1
+  consensus: 2
+  max: 5
+
+delay: 3

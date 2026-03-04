@@ -1,0 +1,10 @@
+name: system-weaknesses
+description: Identify the weakest parts of the system that need fresh ideas and improvements
+
+termination:
+  type: judgment
+  min_iterations: 1
+  consensus: 2
+  max: 5
+
+delay: 3

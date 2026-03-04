@@ -1,0 +1,10 @@
+name: deep-performance-audit
+description: Systematic performance audit with profiling, proof requirements, and minimal diffs
+
+termination:
+  type: judgment
+  min_iterations: 2
+  consensus: 2
+  max: 8
+
+delay: 3

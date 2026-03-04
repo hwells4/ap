@@ -1,0 +1,10 @@
+name: stub-eliminator
+description: Replace all stubs, placeholders, and mocks with production-ready code
+
+termination:
+  type: judgment
+  min_iterations: 2
+  consensus: 2
+  max: 10
+
+delay: 3
