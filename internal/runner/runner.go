@@ -1028,16 +1028,25 @@ func retryBackoff(cfg Config) time.Duration {
 }
 
 // persistRunRequest writes run_request.json to the run directory.
+// This must include all fields needed by `ap resume` (ReadRunRequest validation),
+// specifically: session, stage, provider, model, iterations, work_dir, run_dir,
+// and prompt_template.
 func persistRunRequest(cfg Config) error {
 	if err := os.MkdirAll(cfg.RunDir, 0o755); err != nil {
 		return fmt.Errorf("create run dir: %w", err)
 	}
 	payload := map[string]any{
-		"session":    cfg.Session,
-		"stage":      cfg.StageName,
-		"provider":   cfg.Provider.Name(),
-		"model":      cfg.Model,
-		"iterations": cfg.Iterations,
+		"session":         cfg.Session,
+		"stage":           cfg.StageName,
+		"provider":        cfg.Provider.Name(),
+		"model":           cfg.Model,
+		"iterations":      cfg.Iterations,
+		"work_dir":        cfg.WorkDir,
+		"run_dir":         cfg.RunDir,
+		"prompt_template": cfg.PromptTemplate,
+	}
+	if len(cfg.Env) > 0 {
+		payload["env"] = cfg.Env
 	}
 	if cfg.Pipeline != nil && len(cfg.Pipeline.Nodes) > 0 {
 		name := strings.TrimSpace(cfg.Pipeline.Name)
@@ -1051,6 +1060,9 @@ func persistRunRequest(cfg Config) error {
 	}
 	if override := strings.TrimSpace(cfg.OnEscalate); override != "" {
 		payload["on_escalate"] = override
+	}
+	if cfg.ParentSession != "" {
+		payload["parent_session"] = cfg.ParentSession
 	}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {

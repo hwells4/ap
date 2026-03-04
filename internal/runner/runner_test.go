@@ -741,8 +741,10 @@ func TestRun_RunRequestPersisted(t *testing.T) {
 		StageName:      "my-stage",
 		Provider:       mp,
 		Iterations:     5,
-		PromptTemplate: "work",
+		PromptTemplate: "work on {{task}}",
 		Model:          "test-model",
+		WorkDir:        "/tmp/test-workdir",
+		OnEscalate:     "webhook:http://localhost/hook",
 	}
 
 	_, err := Run(context.Background(), cfg)
@@ -759,14 +761,103 @@ func TestRun_RunRequestPersisted(t *testing.T) {
 	if err := json.Unmarshal(data, &req); err != nil {
 		t.Fatalf("parse run_request.json: %v", err)
 	}
-	if req["session"] != "persist-test" {
-		t.Errorf("session = %v, want persist-test", req["session"])
+
+	// Verify all fields required by ReadRunRequest validation.
+	checks := map[string]string{
+		"session":         "persist-test",
+		"stage":           "my-stage",
+		"provider":        "mock",
+		"model":           "test-model",
+		"work_dir":        "/tmp/test-workdir",
+		"run_dir":         runDir,
+		"prompt_template": "work on {{task}}",
+		"on_escalate":     "webhook:http://localhost/hook",
 	}
-	if req["stage"] != "my-stage" {
-		t.Errorf("stage = %v, want my-stage", req["stage"])
+	for key, want := range checks {
+		got, _ := req[key].(string)
+		if got != want {
+			t.Errorf("run_request[%q] = %q, want %q", key, got, want)
+		}
 	}
 	if v, ok := req["iterations"].(float64); !ok || int(v) != 5 {
 		t.Errorf("iterations = %v, want 5", req["iterations"])
+	}
+}
+
+// TestRun_RunRequestPersisted_ResumeCompatible verifies that the run_request.json
+// written by the runner can be read back by ReadRunRequest (used by `ap resume`).
+// This is a cross-package integration contract: runner writes, internal_run reads.
+func TestRun_RunRequestPersisted_ResumeCompatible(t *testing.T) {
+	runDir := tempSession(t)
+
+	mp := mock.New(
+		mock.WithResponses(mock.StopResponse("done", "ok")),
+	)
+
+	cfg := Config{
+		Session:        "resume-compat",
+		RunDir:         runDir,
+		StageName:      "ralph",
+		Provider:       mp,
+		Iterations:     3,
+		PromptTemplate: "do work",
+		Model:          "opus",
+		WorkDir:        "/tmp/fake-project",
+	}
+
+	_, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	// Simulate what `ap resume` does: read the persisted file and validate it.
+	reqPath := filepath.Join(runDir, "run_request.json")
+	data, err := os.ReadFile(reqPath)
+	if err != nil {
+		t.Fatalf("run_request.json missing: %v", err)
+	}
+
+	// Parse into the same struct ReadRunRequest uses.
+	type RunRequestFile struct {
+		Session        string `json:"session"`
+		Stage          string `json:"stage"`
+		Provider       string `json:"provider"`
+		Model          string `json:"model"`
+		Iterations     int    `json:"iterations"`
+		PromptTemplate string `json:"prompt_template"`
+		WorkDir        string `json:"work_dir"`
+		RunDir         string `json:"run_dir"`
+		OnEscalate     string `json:"on_escalate,omitempty"`
+	}
+
+	var req RunRequestFile
+	if err := json.Unmarshal(data, &req); err != nil {
+		t.Fatalf("unmarshal run_request.json: %v", err)
+	}
+
+	// These are the validations ReadRunRequest enforces:
+	if req.Session == "" {
+		t.Error("persisted run_request missing session")
+	}
+	if req.Stage == "" {
+		t.Error("persisted run_request missing stage")
+	}
+	if req.Provider == "" {
+		t.Error("persisted run_request missing provider")
+	}
+	if req.Iterations <= 0 {
+		t.Errorf("persisted run_request iterations = %d, must be positive", req.Iterations)
+	}
+	if req.RunDir == "" {
+		t.Error("persisted run_request missing run_dir")
+	}
+
+	// Verify values match what was configured.
+	if req.WorkDir != "/tmp/fake-project" {
+		t.Errorf("work_dir = %q, want /tmp/fake-project", req.WorkDir)
+	}
+	if req.PromptTemplate != "do work" {
+		t.Errorf("prompt_template = %q, want 'do work'", req.PromptTemplate)
 	}
 }
 
