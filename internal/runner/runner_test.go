@@ -538,6 +538,98 @@ func TestRun_EventOrdering(t *testing.T) {
 	}
 }
 
+func TestRun_AgentSignalsParsedAndWarningsLogged(t *testing.T) {
+	runDir := tempSession(t)
+
+	mp := mock.New(
+		mock.WithResponses(
+			mock.Response{
+				StatusJSON: `{
+          "decision":"stop",
+          "reason":"done",
+          "summary":"signal summary",
+          "work":{"items_completed":["a"],"files_touched":["b.go"]},
+          "agent_signals":{
+            "inject":"focus auth",
+            "spawn":[{"run":"test-scanner","session":"auth-tests","n":2}],
+            "escalate":{"type":"human","reason":"choose"},
+            "checkpoint":{"name":"cp-1"},
+            "budget":{"remaining":10}
+          }
+        }`,
+			},
+		),
+	)
+
+	cfg := Config{
+		Session:        "test-agent-signals",
+		RunDir:         runDir,
+		StageName:      "test-stage",
+		Provider:       mp,
+		Iterations:     1,
+		PromptTemplate: "iteration ${ITERATION}",
+	}
+
+	_, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	st, err := state.Load(filepath.Join(runDir, "state.json"))
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if len(st.History) != 1 {
+		t.Fatalf("history entries = %d, want 1", len(st.History))
+	}
+
+	entry := st.History[0]
+	signalsMap, ok := entry["agent_signals"].(map[string]any)
+	if !ok {
+		t.Fatalf("agent_signals missing from state history: %#v", entry["agent_signals"])
+	}
+	if signalsMap["inject"] != "focus auth" {
+		t.Fatalf("inject signal mismatch: %#v", signalsMap["inject"])
+	}
+	if _, ok := signalsMap["escalate"].(map[string]any); !ok {
+		t.Fatalf("escalate signal missing: %#v", signalsMap["escalate"])
+	}
+	if spawn, ok := signalsMap["spawn"].([]any); !ok || len(spawn) != 1 {
+		t.Fatalf("spawn signal mismatch: %#v", signalsMap["spawn"])
+	}
+
+	warnings, ok := entry["signal_warnings"].([]any)
+	if !ok || len(warnings) != 2 {
+		t.Fatalf("signal warnings mismatch: %#v", entry["signal_warnings"])
+	}
+
+	eventsData, err := os.ReadFile(filepath.Join(runDir, "events.jsonl"))
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	lines := splitNonEmpty(string(eventsData))
+	signalWarningEvents := 0
+	for _, line := range lines {
+		var evt map[string]any
+		if err := json.Unmarshal([]byte(line), &evt); err != nil {
+			t.Fatalf("parse event: %v", err)
+		}
+		if evt["type"] != "error" {
+			continue
+		}
+		data, ok := evt["data"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if data["type"] == "signal.warning" {
+			signalWarningEvents++
+		}
+	}
+	if signalWarningEvents != 2 {
+		t.Fatalf("signal warning events = %d, want 2", signalWarningEvents)
+	}
+}
+
 func containsStr(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsSubstr(s, sub))
 }
