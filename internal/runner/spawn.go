@@ -152,17 +152,19 @@ func processSpawnSignals(
 			return res, err
 		}
 		if err := dispatchSignalHandlers(dispatchSignalInput{
-			Writer:       ew,
-			Session:      cfg.Session,
-			Stage:        cfg.StageName,
-			Iteration:    iteration,
-			SignalID:     sigID,
-			SignalType:   "spawn",
-			Handlers:     cfg.SpawnHandlers,
-			Timeout:      cfg.SignalHandlerTimeout,
-			Output:       cfg.SignalOutput,
-			ChildSession: childSession.Name,
-			ChildStage:   childStage,
+			Writer:        ew,
+			Session:       cfg.Session,
+			Stage:         cfg.StageName,
+			Iteration:     iteration,
+			SignalID:      sigID,
+			SignalType:    "spawn",
+			Handlers:      cfg.SpawnHandlers,
+			Timeout:       cfg.SignalHandlerTimeout,
+			Output:        cfg.SignalOutput,
+			ChildSession:  childSession.Name,
+			ChildStage:    childStage,
+			CallbackURL:   cfg.CallbackURL,
+			CallbackToken: cfg.CallbackToken,
 		}); err != nil {
 			return res, fmt.Errorf("dispatch spawn handlers: %w", err)
 		}

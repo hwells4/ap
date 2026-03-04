@@ -104,6 +104,14 @@ type Config struct {
 	// OnEscalate preserves one-off handler override metadata from run requests.
 	OnEscalate string
 
+	// CallbackURL is included in webhook payloads when an escalation callback
+	// listener is active.
+	CallbackURL string
+
+	// CallbackToken is included in webhook payloads when callback auth is
+	// enabled by the callback listener.
+	CallbackToken string
+
 	// JudgeProvider is the provider used for judgment termination.
 	// When set, the runner uses consensus-based termination instead of fixed.
 	JudgeProvider provider.Provider
@@ -449,16 +457,18 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 				return Result{}, fmt.Errorf("runner: emit signal.escalate: %w", err)
 			}
 			if err := dispatchSignalHandlers(dispatchSignalInput{
-				Writer:     ew,
-				Session:    cfg.Session,
-				Stage:      cfg.StageName,
-				Iteration:  i,
-				SignalID:   sigID,
-				SignalType: "escalate",
-				Handlers:   cfg.EscalateHandlers,
-				Timeout:    cfg.SignalHandlerTimeout,
-				Output:     cfg.SignalOutput,
-				Escalation: esc,
+				Writer:        ew,
+				Session:       cfg.Session,
+				Stage:         cfg.StageName,
+				Iteration:     i,
+				SignalID:      sigID,
+				SignalType:    "escalate",
+				Handlers:      cfg.EscalateHandlers,
+				Timeout:       cfg.SignalHandlerTimeout,
+				Output:        cfg.SignalOutput,
+				Escalation:    esc,
+				CallbackURL:   cfg.CallbackURL,
+				CallbackToken: cfg.CallbackToken,
 			}); err != nil {
 				return Result{}, fmt.Errorf("runner: dispatch escalate handlers: %w", err)
 			}
@@ -785,16 +795,18 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 					return Result{}, fmt.Errorf("runner: emit signal.escalate: %w", err)
 				}
 				if err := dispatchSignalHandlers(dispatchSignalInput{
-					Writer:     ew,
-					Session:    cfg.Session,
-					Stage:      node.StageName,
-					Iteration:  i,
-					SignalID:   sigID,
-					SignalType: "escalate",
-					Handlers:   cfg.EscalateHandlers,
-					Timeout:    cfg.SignalHandlerTimeout,
-					Output:     cfg.SignalOutput,
-					Escalation: esc,
+					Writer:        ew,
+					Session:       cfg.Session,
+					Stage:         node.StageName,
+					Iteration:     i,
+					SignalID:      sigID,
+					SignalType:    "escalate",
+					Handlers:      cfg.EscalateHandlers,
+					Timeout:       cfg.SignalHandlerTimeout,
+					Output:        cfg.SignalOutput,
+					Escalation:    esc,
+					CallbackURL:   cfg.CallbackURL,
+					CallbackToken: cfg.CallbackToken,
 				}); err != nil {
 					return Result{}, fmt.Errorf("runner: dispatch escalate handlers: %w", err)
 				}

@@ -21,30 +21,34 @@ import (
 const defaultSignalHandlerTimeout = 30 * time.Second
 
 type dispatchSignalInput struct {
-	Writer       *events.Writer
-	Session      string
-	Stage        string
-	Iteration    int
-	SignalID     string
-	SignalType   string
-	Handlers     []config.SignalHandler
-	Timeout      time.Duration
-	Output       io.Writer
-	Escalation   *signals.EscalateSignal
-	ChildSession string
-	ChildStage   string
+	Writer        *events.Writer
+	Session       string
+	Stage         string
+	Iteration     int
+	SignalID      string
+	SignalType    string
+	Handlers      []config.SignalHandler
+	Timeout       time.Duration
+	Output        io.Writer
+	Escalation    *signals.EscalateSignal
+	ChildSession  string
+	ChildStage    string
+	CallbackURL   string
+	CallbackToken string
 }
 
 type signalHandlerPayload struct {
-	Type         string   `json:"type"`
-	Session      string   `json:"session"`
-	Iteration    int      `json:"iteration"`
-	Stage        string   `json:"stage"`
-	Reason       string   `json:"reason,omitempty"`
-	Options      []string `json:"options,omitempty"`
-	ChildSession string   `json:"child_session,omitempty"`
-	ChildStage   string   `json:"child_stage,omitempty"`
-	Timestamp    string   `json:"timestamp"`
+	Type          string   `json:"type"`
+	Session       string   `json:"session"`
+	Iteration     int      `json:"iteration"`
+	Stage         string   `json:"stage"`
+	Reason        string   `json:"reason,omitempty"`
+	Options       []string `json:"options,omitempty"`
+	ChildSession  string   `json:"child_session,omitempty"`
+	ChildStage    string   `json:"child_stage,omitempty"`
+	CallbackURL   string   `json:"callback_url,omitempty"`
+	CallbackToken string   `json:"callback_token,omitempty"`
+	Timestamp     string   `json:"timestamp"`
 }
 
 func dispatchSignalHandlers(input dispatchSignalInput) error {
@@ -58,13 +62,15 @@ func dispatchSignalHandlers(input dispatchSignalInput) error {
 	}
 
 	payload := signalHandlerPayload{
-		Type:         strings.TrimSpace(input.SignalType),
-		Session:      strings.TrimSpace(input.Session),
-		Iteration:    input.Iteration,
-		Stage:        strings.TrimSpace(input.Stage),
-		ChildSession: strings.TrimSpace(input.ChildSession),
-		ChildStage:   strings.TrimSpace(input.ChildStage),
-		Timestamp:    time.Now().UTC().Format(time.RFC3339),
+		Type:          strings.TrimSpace(input.SignalType),
+		Session:       strings.TrimSpace(input.Session),
+		Iteration:     input.Iteration,
+		Stage:         strings.TrimSpace(input.Stage),
+		ChildSession:  strings.TrimSpace(input.ChildSession),
+		ChildStage:    strings.TrimSpace(input.ChildStage),
+		CallbackURL:   strings.TrimSpace(input.CallbackURL),
+		CallbackToken: strings.TrimSpace(input.CallbackToken),
+		Timestamp:     time.Now().UTC().Format(time.RFC3339),
 	}
 	if input.Escalation != nil {
 		payload.Reason = strings.TrimSpace(input.Escalation.Reason)
