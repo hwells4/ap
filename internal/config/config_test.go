@@ -141,3 +141,86 @@ signals:
 		t.Fatalf("expected webhook url validation error, got %v", err)
 	}
 }
+
+func TestLoad_InvalidLimitsError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "invalid-limits.yaml")
+	if err := os.WriteFile(path, []byte(`
+limits:
+  max_child_sessions: -1
+`), 0o644); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "limits.max_child_sessions must be >= 0") {
+		t.Fatalf("expected max_child_sessions validation error, got %v", err)
+	}
+}
+
+func TestLoad_TypedAccessorsExposeSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "typed-accessors.yaml")
+	if err := os.WriteFile(path, []byte(`
+signals:
+  callback_host: "10.0.0.5"
+  handler_timeout: 12s
+  escalate:
+    - type: stdout
+  spawn:
+    - type: exec
+      argv: ["echo", "spawned"]
+limits:
+  max_child_sessions: 17
+  max_spawn_depth: 6
+hooks:
+  on_completed: "echo done"
+  on_escalate: "echo escalate"
+  on_idle: "echo idle"
+`), 0o644); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	limits := cfg.RunnerLimits()
+	if limits.MaxChildSessions != 17 {
+		t.Fatalf("RunnerLimits().MaxChildSessions = %d, want 17", limits.MaxChildSessions)
+	}
+	if limits.MaxSpawnDepth != 6 {
+		t.Fatalf("RunnerLimits().MaxSpawnDepth = %d, want 6", limits.MaxSpawnDepth)
+	}
+
+	escalateHandlers := cfg.SignalHandlers("escalate")
+	if len(escalateHandlers) != 1 || escalateHandlers[0].Type != "stdout" {
+		t.Fatalf("SignalHandlers(escalate) = %#v, want one stdout handler", escalateHandlers)
+	}
+	spawnHandlers := cfg.SignalHandlers("spawn")
+	if len(spawnHandlers) != 1 || spawnHandlers[0].Type != "exec" {
+		t.Fatalf("SignalHandlers(spawn) = %#v, want one exec handler", spawnHandlers)
+	}
+	if got := cfg.SignalHandlers("unknown-signal"); len(got) != 0 {
+		t.Fatalf("SignalHandlers(unknown-signal) = %#v, want empty", got)
+	}
+
+	// Ensure SignalHandlers returns a copy and callers cannot mutate config internals.
+	escalateHandlers[0].Type = "mutated"
+	if cfg.SignalHandlers("escalate")[0].Type != "stdout" {
+		t.Fatalf("SignalHandlers should return a copy, got mutated value %q", cfg.SignalHandlers("escalate")[0].Type)
+	}
+
+	hooks := cfg.WatchHooks()
+	if hooks.OnCompleted != "echo done" {
+		t.Fatalf("WatchHooks().OnCompleted = %q, want %q", hooks.OnCompleted, "echo done")
+	}
+	if hooks.OnEscalate != "echo escalate" {
+		t.Fatalf("WatchHooks().OnEscalate = %q, want %q", hooks.OnEscalate, "echo escalate")
+	}
+	if hooks.OnIdle != "echo idle" {
+		t.Fatalf("WatchHooks().OnIdle = %q, want %q", hooks.OnIdle, "echo idle")
+	}
+}
