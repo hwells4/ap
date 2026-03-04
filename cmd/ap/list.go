@@ -65,7 +65,7 @@ func runList(args []string, deps cliDeps) int {
 	}
 
 	if deps.mode == output.ModeJSON {
-		payload := output.NewSuccess(map[string]any{"stages": stages}, nil)
+		payload := output.NewSuccess(map[string]any{"stages": stages}, deps.corrections)
 		serialized, err := output.MarshalSuccess(payload)
 		if err != nil {
 			_, _ = fmt.Fprintln(deps.stderr, err)
