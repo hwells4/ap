@@ -2,6 +2,7 @@ package parallel
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -105,6 +106,36 @@ func TestRun_ConcurrentExecutionIsolationAndStructure(t *testing.T) {
 	if _, err := os.Stat(res.ManifestPath); err != nil {
 		t.Fatalf("manifest missing: %v", err)
 	}
+	manifest, err := readManifest(res.ManifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if _, ok := manifest.Providers["claude"]["analyze"]; !ok {
+		t.Fatalf("manifest missing stage result for downstream reads: %#v", manifest.Providers["claude"])
+	}
+	for _, provider := range []string{"claude", "codex"} {
+		outputs := manifest.Outputs[provider]
+		if len(outputs) != 2 {
+			t.Fatalf("manifest outputs for %s = %#v, want 2 outputs", provider, outputs)
+		}
+	}
+
+	if _, err := os.Stat(res.ResumePath); err != nil {
+		t.Fatalf("resume file missing: %v", err)
+	}
+	resume := readResumeDoc(t, res.ResumePath)
+	for _, provider := range []string{"claude", "codex"} {
+		hint, ok := resume.Providers[provider]
+		if !ok {
+			t.Fatalf("resume missing provider %q", provider)
+		}
+		if hint.Status != string(statusCompleted) {
+			t.Fatalf("resume status for %s = %q, want completed", provider, hint.Status)
+		}
+		if len(hint.OutputPaths) != 2 {
+			t.Fatalf("resume output_paths for %s = %#v, want 2 outputs", provider, hint.OutputPaths)
+		}
+	}
 }
 
 func TestRun_FailurePropagatesAfterAllProvidersFinish(t *testing.T) {
@@ -161,6 +192,28 @@ func TestRun_FailurePropagatesAfterAllProvidersFinish(t *testing.T) {
 	if res.Providers["claude"].Status != string(statusCompleted) {
 		t.Fatalf("claude status = %q, want completed", res.Providers["claude"].Status)
 	}
+
+	manifest, manErr := readManifest(res.ManifestPath)
+	if manErr != nil {
+		t.Fatalf("read manifest: %v", manErr)
+	}
+	if got := manifest.Outputs["claude"]; len(got) != 1 {
+		t.Fatalf("manifest outputs for claude = %#v, want 1 output", got)
+	}
+	if got := manifest.Outputs["codex"]; len(got) != 0 {
+		t.Fatalf("manifest outputs for codex = %#v, want no outputs", got)
+	}
+
+	resume := readResumeDoc(t, res.ResumePath)
+	if resume.Providers["claude"].Status != string(statusCompleted) {
+		t.Fatalf("resume claude status = %q, want completed", resume.Providers["claude"].Status)
+	}
+	if resume.Providers["codex"].Status != string(statusFailed) {
+		t.Fatalf("resume codex status = %q, want failed", resume.Providers["codex"].Status)
+	}
+	if !strings.Contains(resume.Providers["codex"].Error, "codex failed") {
+		t.Fatalf("resume codex error = %q, want codex failed", resume.Providers["codex"].Error)
+	}
 }
 
 func TestRun_ResumeSkipsCompletedProviders(t *testing.T) {
@@ -179,6 +232,27 @@ func TestRun_ResumeSkipsCompletedProviders(t *testing.T) {
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatalf("seed claude state: %v", err)
+	}
+	existingOutput := filepath.Join(claudeDir, "stage-01-analyze", "output.md")
+	if err := os.MkdirAll(filepath.Dir(existingOutput), 0o755); err != nil {
+		t.Fatalf("mkdir existing output dir: %v", err)
+	}
+	if err := os.WriteFile(existingOutput, []byte("existing"), 0o644); err != nil {
+		t.Fatalf("write existing output: %v", err)
+	}
+	if err := writeManifest(filepath.Join(blockDir, manifestFile), "resume", map[string]ProviderResult{
+		"claude": {
+			Name: "claude",
+			Stages: map[string]StageResult{
+				"analyze": {
+					LatestOutput: existingOutput,
+					Status:       string(statusCompleted),
+					Iterations:   1,
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("seed manifest: %v", err)
 	}
 
 	var (
@@ -227,4 +301,37 @@ func TestRun_ResumeSkipsCompletedProviders(t *testing.T) {
 	if !reflect.DeepEqual(gotRuns, []string{"codex"}) {
 		t.Fatalf("provider runs = %#v, want [codex]", gotRuns)
 	}
+
+	manifest, manErr := readManifest(res.ManifestPath)
+	if manErr != nil {
+		t.Fatalf("read manifest: %v", manErr)
+	}
+	if _, ok := manifest.Providers["claude"]["analyze"]; !ok {
+		t.Fatalf("expected resumed manifest to retain skipped provider stage data: %#v", manifest.Providers["claude"])
+	}
+	if got := manifest.Outputs["claude"]; !reflect.DeepEqual(got, []string{existingOutput}) {
+		t.Fatalf("manifest outputs for skipped provider = %#v, want [%q]", got, existingOutput)
+	}
+
+	resume := readResumeDoc(t, res.ResumePath)
+	if !resume.Providers["claude"].Skipped {
+		t.Fatal("expected skipped provider hint in resume.json")
+	}
+	if got := resume.Providers["claude"].OutputPaths; !reflect.DeepEqual(got, []string{existingOutput}) {
+		t.Fatalf("resume output_paths for skipped provider = %#v, want [%q]", got, existingOutput)
+	}
+}
+
+func readResumeDoc(t *testing.T, path string) resumeDoc {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var doc resumeDoc
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	return doc
 }
