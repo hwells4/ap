@@ -86,6 +86,7 @@ type ContextPaths struct {
 	Output     string `json:"output"`
 	Status     string `json:"status"`
 	Result     string `json:"result"`
+	Messages   string `json:"messages"`
 }
 
 // Inputs contains inputs for the current iteration.
@@ -126,6 +127,7 @@ func GenerateContext(session string, iteration int, stageConfig StageConfig, run
 	outputFile := filepath.Join(iterDir, "output.md")
 	statusFile := filepath.Join(iterDir, "status.json")
 	resultFile := filepath.Join(iterDir, "result.json")
+	messagesFile := filepath.Join(runDir, "messages.jsonl")
 
 	inputs, err := BuildInputs(runDir, stageConfig, iteration)
 	if err != nil {
@@ -161,6 +163,7 @@ func GenerateContext(session string, iteration int, stageConfig StageConfig, run
 			Output:     outputFile,
 			Status:     statusFile,
 			Result:     resultFile,
+			Messages:   messagesFile,
 		},
 		Inputs: inputs,
 		Limits: Limits{

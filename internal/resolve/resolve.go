@@ -24,6 +24,7 @@ type Vars struct {
 	OUTPUT_PATH   string
 	PROGRESS_FILE string
 	CONTEXT       string
+	MESSAGES      string
 }
 
 // ResolveTemplate replaces known placeholders in template with vars values.
@@ -47,6 +48,7 @@ func ResolveTemplate(template string, vars Vars) string {
 		{"OUTPUT_PATH", vars.OUTPUT_PATH},
 		{"PROGRESS_FILE", vars.PROGRESS_FILE},
 		{"CONTEXT", vars.CONTEXT},
+		{"MESSAGES", vars.MESSAGES},
 	}
 
 	resolved := template
@@ -93,6 +95,7 @@ func VarsFromContext(path string) (Vars, error) {
 			Output   string `json:"output"`
 			Status   string `json:"status"`
 			Result   string `json:"result"`
+			Messages string `json:"messages"`
 		} `json:"paths"`
 	}
 	if err := json.Unmarshal(data, &payload); err != nil {
@@ -113,6 +116,7 @@ func VarsFromContext(path string) (Vars, error) {
 		SESSION:       payload.Session,
 		ITERATION:     iteration,
 		PROGRESS_FILE: payload.Paths.Progress,
+		MESSAGES:      payload.Paths.Messages,
 	}
 	return vars.normalized(), nil
 }
