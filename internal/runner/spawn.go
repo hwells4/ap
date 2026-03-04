@@ -49,8 +49,11 @@ func processSpawnSignals(
 	}
 
 	for idx, spawnSignal := range spawnSignals {
+		sigID := SignalID(iteration, "spawn", idx)
+
 		failure := func(reason error) error {
-			return ew.Append(events.NewEvent("signal.spawn.failed", cfg.Session, cursor, map[string]any{
+			return ew.Append(events.NewEvent(events.TypeSignalSpawnFailed, cfg.Session, cursor, map[string]any{
+				"signal_id":     sigID,
 				"iteration":     iteration,
 				"signal_index":  idx,
 				"run":           spawnSignal.Run,
@@ -98,6 +101,11 @@ func processSpawnSignals(
 			continue
 		}
 
+		// Two-phase: emit dispatching before the side effect.
+		if err := emitDispatching(ew, cfg.Session, cursor, sigID, "spawn", iteration); err != nil {
+			return spawnedChildren, fmt.Errorf("emit spawn dispatching: %w", err)
+		}
+
 		childSession, err := session.Start(parsed, spawnSignal.Session, session.StartOpts{
 			ProjectRoot:   projectRoot,
 			Provider:      cfg.Provider.Name(),
@@ -118,7 +126,8 @@ func processSpawnSignals(
 		}
 
 		spawnedChildren++
-		if err := ew.Append(events.NewEvent("signal.spawn", cfg.Session, cursor, map[string]any{
+		if err := ew.Append(events.NewEvent(events.TypeSignalSpawn, cfg.Session, cursor, map[string]any{
+			"signal_id":     sigID,
 			"iteration":     iteration,
 			"signal_index":  idx,
 			"run":           spawnSignal.Run,

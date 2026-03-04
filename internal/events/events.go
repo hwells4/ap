@@ -35,6 +35,12 @@ const (
 	TypeSignalInject = "signal.inject"
 	// TypeSignalEscalate marks an escalation signal from the agent.
 	TypeSignalEscalate = "signal.escalate"
+	// TypeSignalDispatching marks the start of a two-phase signal side effect.
+	TypeSignalDispatching = "signal.dispatching"
+	// TypeSignalSpawn marks a successful child session spawn.
+	TypeSignalSpawn = "signal.spawn"
+	// TypeSignalSpawnFailed marks a failed child session spawn.
+	TypeSignalSpawnFailed = "signal.spawn.failed"
 )
 
 var (

@@ -269,13 +269,11 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		// Escalate signal — always pauses, overrides agent decision.
 		if iterResult.AgentSignals.Escalate != nil {
 			esc := iterResult.AgentSignals.Escalate
-			if err := ew.Append(events.NewEvent(events.TypeSignalEscalate, cfg.Session, cursor, map[string]any{
-				"iteration": i,
-				"type":      esc.Type,
-				"reason":    esc.Reason,
-				"options":   esc.Options,
-			})); err != nil {
-				return Result{}, fmt.Errorf("runner: emit signal.escalate: %w", err)
+			sigID := SignalID(i, "escalate", 0)
+
+			// Two-phase: emit dispatching before the side effect.
+			if err := emitDispatching(ew, cfg.Session, cursor, sigID, "escalate", i); err != nil {
+				return Result{}, fmt.Errorf("runner: emit escalate dispatching: %w", err)
 			}
 			if _, err := state.MarkPaused(statePath, &state.EscalationInfo{
 				Type:    esc.Type,
@@ -283,6 +281,15 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 				Options: esc.Options,
 			}); err != nil {
 				return Result{}, fmt.Errorf("runner: mark paused on escalation: %w", err)
+			}
+			if err := ew.Append(events.NewEvent(events.TypeSignalEscalate, cfg.Session, cursor, map[string]any{
+				"signal_id": sigID,
+				"iteration": i,
+				"type":      esc.Type,
+				"reason":    esc.Reason,
+				"options":   esc.Options,
+			})); err != nil {
+				return Result{}, fmt.Errorf("runner: emit signal.escalate: %w", err)
 			}
 			return Result{
 				Iterations: completed,
