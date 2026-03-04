@@ -87,6 +87,8 @@ func runWithDeps(args []string, deps cliDeps) int {
 		return runRun(args[1:], deps)
 	case "kill":
 		return runKill(args[1:], deps)
+	case "status":
+		return runStatus(args[1:], deps)
 	default:
 		_, _ = fmt.Fprintf(deps.stderr, "command %q is not yet implemented\n", commandName)
 		return output.ExitGeneralError
