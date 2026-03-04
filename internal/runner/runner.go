@@ -111,7 +111,18 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	for i := 1; i <= fixed.Target(); i++ {
 		// Check context before starting iteration.
 		if err := ctx.Err(); err != nil {
-			markFailed(statePath, "context_cancelled", err.Error())
+			_ = ew.Append(events.NewEvent(events.TypeError, cfg.Session, nil, map[string]any{
+				"error":      err.Error(),
+				"type":       "signal",
+				"iteration":  completed,
+				"terminated": true,
+			}))
+			markFailed(statePath, "signal_terminated", err.Error())
+			_ = ew.Append(events.NewEvent(events.TypeSessionComplete, cfg.Session, nil, map[string]any{
+				"iterations":  completed,
+				"reason":      "signal: " + err.Error(),
+				"termination": "signal",
+			}))
 			return Result{
 				Iterations: completed,
 				Status:     state.StateFailed,
