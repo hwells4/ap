@@ -8,6 +8,7 @@ import (
 
 	"github.com/hwells4/ap/internal/lock"
 	"github.com/hwells4/ap/internal/output"
+	"github.com/hwells4/ap/internal/runner"
 	"github.com/hwells4/ap/internal/session"
 	"github.com/hwells4/ap/internal/state"
 )
@@ -78,6 +79,9 @@ func runKill(args []string, deps cliDeps) int {
 			_ = lk2.Release()
 		}
 	}
+
+	// Release in_progress beads labeled pipeline/{session} (best-effort).
+	_ = runner.ReleaseBeads(sessionName, "")
 
 	// Build response.
 	status := "killed"

@@ -164,7 +164,14 @@ type Result struct {
 }
 
 // Run executes the iteration loop for a single stage in foreground mode.
-func Run(ctx context.Context, cfg Config) (Result, error) {
+func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
+	// On crash/error, release in_progress beads for this session (best-effort).
+	defer func() {
+		if runErr != nil {
+			_ = ReleaseBeads(cfg.Session, "")
+		}
+	}()
+
 	if cfg.Pipeline != nil && len(cfg.Pipeline.Nodes) > 0 {
 		return runPipeline(ctx, cfg)
 	}
