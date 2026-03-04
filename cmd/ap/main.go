@@ -69,7 +69,7 @@ func runWithDeps(args []string, deps cliDeps) int {
 		errResp := output.NewError(
 			"UNKNOWN_COMMAND",
 			fmt.Sprintf("unknown command %q", args[0]),
-			"Supported commands: run, list, status, resume, kill, logs, clean.",
+			"Supported commands: run, list, status, resume, kill, logs, clean, watch.",
 			"ap <command> [args] [flags]",
 			suggestions,
 		)
@@ -96,6 +96,8 @@ func runWithDeps(args []string, deps cliDeps) int {
 		return runLogs(args[1:], deps)
 	case "clean":
 		return runClean(args[1:], deps)
+	case "watch":
+		return runWatch(args[1:], deps)
 	default:
 		_, _ = fmt.Fprintf(deps.stderr, "command %q is not yet implemented\n", commandName)
 		return output.ExitGeneralError

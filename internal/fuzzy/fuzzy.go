@@ -21,6 +21,7 @@ var canonicalCommands = []string{
 	"kill",
 	"logs",
 	"clean",
+	"watch",
 }
 
 var commandAliases = map[string]string{
@@ -47,7 +48,7 @@ var commandAliases = map[string]string{
 	"stop":      "kill",
 	"tail":      "logs",
 	"terminate": "kill",
-	"watch":     "logs",
+	"monitor":   "watch",
 }
 
 var destructiveCommands = map[string]struct{}{

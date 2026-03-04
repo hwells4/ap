@@ -136,7 +136,7 @@ func CommandAliases() map[string]string {
 
 // Commands returns canonical command names.
 func Commands() []string {
-	return []string{"run", "list", "status", "resume", "kill", "logs", "clean"}
+	return []string{"run", "list", "status", "resume", "kill", "logs", "clean", "watch"}
 }
 
 // NewError builds a structured error payload with normalized code and suggestions.
