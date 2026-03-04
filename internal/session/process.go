@@ -118,8 +118,25 @@ func (p *ProcessLauncher) Start(session string, runnerCmd []string, opts StartOp
 			return SessionHandle{}, err
 		}
 	case exitErr := <-exitCh:
-		r.Close()
-		return SessionHandle{}, fmt.Errorf("session: process exited before ready: %w", exitErr)
+		// Process exited. Check if ready signal was buffered before exit.
+		select {
+		case err := <-readyCh:
+			if err == nil {
+				// Process signaled ready then exited quickly. That's valid.
+				break
+			}
+			// Ready signal failed and process exited.
+			if exitErr != nil {
+				return SessionHandle{}, fmt.Errorf("session: process exited before ready: %w", exitErr)
+			}
+			return SessionHandle{}, fmt.Errorf("session: process exited before ready (exit 0)")
+		case <-time.After(100 * time.Millisecond):
+			r.Close()
+			if exitErr != nil {
+				return SessionHandle{}, fmt.Errorf("session: process exited before ready: %w", exitErr)
+			}
+			return SessionHandle{}, fmt.Errorf("session: process exited before ready (exit 0)")
+		}
 	case <-time.After(timeout):
 		r.Close()
 		killProcess(pid)
