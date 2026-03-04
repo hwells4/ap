@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/hwells4/ap/internal/stage"
 )
 
 func TestParseEmpty(t *testing.T) {
@@ -39,6 +41,12 @@ func TestParseBareStage(t *testing.T) {
 	if stage.Raw() != "ralph" {
 		t.Errorf("Raw() = %q, want ralph", stage.Raw())
 	}
+	if stage.Definition.Name != "ralph" {
+		t.Errorf("resolved stage name = %q, want ralph", stage.Definition.Name)
+	}
+	if stage.Definition.ConfigPath == "" {
+		t.Error("resolved stage config path should not be empty")
+	}
 }
 
 func TestParseBareStageWithWhitespace(t *testing.T) {
@@ -50,6 +58,9 @@ func TestParseBareStageWithWhitespace(t *testing.T) {
 	stage := spec.(StageSpec)
 	if stage.Name != "improve-plan" {
 		t.Errorf("Name = %q, want improve-plan", stage.Name)
+	}
+	if stage.Definition.Name != "improve-plan" {
+		t.Errorf("resolved stage name = %q, want improve-plan", stage.Definition.Name)
 	}
 }
 
@@ -76,13 +87,13 @@ func TestParseStageWithCount(t *testing.T) {
 
 func TestParseStageWithCountOne(t *testing.T) {
 	t.Parallel()
-	spec, err := Parse("fix-bugs:1")
+	spec, err := Parse("ralph:1")
 	if err != nil {
 		t.Fatalf("Parse error = %v", err)
 	}
 	stage := spec.(StageSpec)
-	if stage.Name != "fix-bugs" || stage.Iterations != 1 {
-		t.Errorf("got Name=%q Iterations=%d, want fix-bugs/1", stage.Name, stage.Iterations)
+	if stage.Name != "ralph" || stage.Iterations != 1 {
+		t.Errorf("got Name=%q Iterations=%d, want ralph/1", stage.Name, stage.Iterations)
 	}
 }
 
@@ -93,8 +104,10 @@ func TestParseStageInvalidCount(t *testing.T) {
 		want  string
 	}{
 		{"ralph:abc", "invalid iteration count"},
+		{"ralph:", "iteration count is empty"},
 		{"ralph:0", "iteration count must be positive"},
 		{"ralph:-5", "iteration count must be positive"},
+		{"ralph:1:2", "invalid stage iteration syntax"},
 		{":10", "stage name is empty"},
 	}
 	for _, tt := range tests {
@@ -105,6 +118,9 @@ func TestParseStageInvalidCount(t *testing.T) {
 		}
 		if !errors.Is(err, ErrInvalidSpec) {
 			t.Errorf("Parse(%q) error = %v, want ErrInvalidSpec", tt.input, err)
+		}
+		if !containsAll(err.Error(), tt.want) {
+			t.Errorf("Parse(%q) error = %q, want to contain %q", tt.input, err.Error(), tt.want)
 		}
 	}
 }
@@ -280,6 +296,77 @@ func TestParsePrecedenceOrder(t *testing.T) {
 	}
 	if spec.Kind() != KindFileYAML {
 		t.Errorf(".yaml should produce KindFileYAML, got %d", spec.Kind())
+	}
+}
+
+func TestParseWithOptionsStagePrecedenceProjectOverBuiltin(t *testing.T) {
+	t.Parallel()
+
+	projectRoot := t.TempDir()
+	stageDir := filepath.Join(projectRoot, ".claude", "stages", "ralph")
+	if err := os.MkdirAll(stageDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stageDir, "stage.yaml"), []byte("name: ralph\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stageDir, "prompt.md"), []byte("local prompt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	spec, err := ParseWithOptions("ralph", ParseOptions{
+		StageResolveOpts: stage.ResolveOptions{ProjectRoot: projectRoot},
+	})
+	if err != nil {
+		t.Fatalf("ParseWithOptions error = %v", err)
+	}
+
+	stageSpec, ok := spec.(StageSpec)
+	if !ok {
+		t.Fatalf("ParseWithOptions = %T, want StageSpec", spec)
+	}
+
+	if stageSpec.Definition.IsEmbedded() {
+		t.Fatal("expected local stage definition to override embedded builtin")
+	}
+	wantConfig := filepath.Join(stageDir, "stage.yaml")
+	if stageSpec.Definition.ConfigPath != wantConfig {
+		t.Fatalf("resolved config path = %q, want %q", stageSpec.Definition.ConfigPath, wantConfig)
+	}
+}
+
+func TestParseWithOptionsStageNotFound(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParseWithOptions("definitely-missing-stage", ParseOptions{
+		StageResolveOpts: stage.ResolveOptions{ProjectRoot: t.TempDir()},
+	})
+	if !errors.Is(err, ErrStageNotFound) {
+		t.Fatalf("ParseWithOptions error = %v, want ErrStageNotFound", err)
+	}
+	if !containsAll(err.Error(), "definitely-missing-stage", "searched:") {
+		t.Fatalf("stage not found message should include stage and search context, got: %v", err)
+	}
+}
+
+func TestChainSpecKindAndRaw(t *testing.T) {
+	t.Parallel()
+
+	chain := ChainSpec{
+		raw: "alpha:2 -> beta:3",
+		Stages: []StageSpec{
+			{Name: "alpha", Iterations: 2},
+			{Name: "beta", Iterations: 3},
+		},
+	}
+	if chain.Kind() != KindChain {
+		t.Fatalf("Kind() = %d, want KindChain", chain.Kind())
+	}
+	if chain.Raw() != "alpha:2 -> beta:3" {
+		t.Fatalf("Raw() = %q, want alpha:2 -> beta:3", chain.Raw())
+	}
+	if len(chain.Stages) != 2 {
+		t.Fatalf("len(Stages) = %d, want 2", len(chain.Stages))
 	}
 }
 

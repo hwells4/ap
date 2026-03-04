@@ -12,11 +12,13 @@ package spec
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/hwells4/ap/internal/fsutil"
+	"github.com/hwells4/ap/internal/stage"
 )
 
 var (
@@ -26,6 +28,8 @@ var (
 	ErrFileNotFound = errors.New("spec: file not found")
 	// ErrInvalidSpec is returned for malformed spec syntax.
 	ErrInvalidSpec = errors.New("spec: invalid specification")
+	// ErrStageNotFound is returned when a stage spec cannot be resolved.
+	ErrStageNotFound = errors.New("spec: stage not found")
 )
 
 // SpecKind identifies the variant of a parsed specification.
@@ -49,6 +53,7 @@ type StageSpec struct {
 	raw        string
 	Name       string // Stage name (e.g., "ralph")
 	Iterations int    // 0 = use stage default
+	Definition stage.Definition
 }
 
 // Kind returns KindStage.
@@ -56,6 +61,20 @@ func (s StageSpec) Kind() SpecKind { return KindStage }
 
 // Raw returns the original input string.
 func (s StageSpec) Raw() string { return s.raw }
+
+// ChainSpec represents a parsed chain expression.
+//
+// Chain parsing is deferred to M3, but the typed AST node is defined in M0b.
+type ChainSpec struct {
+	raw    string
+	Stages []StageSpec
+}
+
+// Kind returns KindChain.
+func (c ChainSpec) Kind() SpecKind { return KindChain }
+
+// Raw returns the original input string.
+func (c ChainSpec) Raw() string { return c.raw }
 
 // FileSpec references a file as a prompt or pipeline definition.
 type FileSpec struct {
@@ -70,11 +89,22 @@ func (f FileSpec) Kind() SpecKind { return f.FileKind }
 // Raw returns the original input string.
 func (f FileSpec) Raw() string { return f.raw }
 
+// ParseOptions controls stage-resolution behavior during parsing.
+type ParseOptions struct {
+	SkipStageLookup  bool
+	StageResolveOpts stage.ResolveOptions
+}
+
 // Parse parses a run specification string into a typed Spec.
 //
 // It follows the documented precedence order without fallthrough:
 // file paths never fall through to stage lookup on FILE_NOT_FOUND.
 func Parse(input string) (Spec, error) {
+	return ParseWithOptions(input, defaultParseOptions())
+}
+
+// ParseWithOptions parses a run specification and optionally resolves stages.
+func ParseWithOptions(input string, opts ParseOptions) (Spec, error) {
 	input = strings.TrimSpace(input)
 	if input == "" {
 		return nil, ErrEmpty
@@ -98,11 +128,31 @@ func Parse(input string) (Spec, error) {
 
 	// 4. Stage with count: contains ":"
 	if strings.Contains(input, ":") {
-		return parseStageSpec(input)
+		stageSpec, err := parseStageSpec(input)
+		if err != nil {
+			return nil, err
+		}
+		resolved, err := resolveStageSpec(stageSpec, opts)
+		if err != nil {
+			return nil, err
+		}
+		return resolved, nil
 	}
 
 	// 5. Bare stage name
-	return StageSpec{raw: input, Name: input}, nil
+	stageSpec, err := resolveStageSpec(StageSpec{raw: input, Name: input}, opts)
+	if err != nil {
+		return nil, err
+	}
+	return stageSpec, nil
+}
+
+func defaultParseOptions() ParseOptions {
+	opts := ParseOptions{}
+	if cwd, err := os.Getwd(); err == nil {
+		opts.StageResolveOpts.ProjectRoot = cwd
+	}
+	return opts
 }
 
 func parseFileSpec(input string, kind SpecKind) (FileSpec, error) {
@@ -113,12 +163,23 @@ func parseFileSpec(input string, kind SpecKind) (FileSpec, error) {
 }
 
 func parseStageSpec(input string) (StageSpec, error) {
+	if strings.Count(input, ":") != 1 {
+		return StageSpec{}, fmt.Errorf(
+			"%w: invalid stage iteration syntax %q; expected format <stage>:<positive-integer>",
+			ErrInvalidSpec,
+			input,
+		)
+	}
+
 	idx := strings.LastIndex(input, ":")
-	name := input[:idx]
-	countStr := input[idx+1:]
+	name := strings.TrimSpace(input[:idx])
+	countStr := strings.TrimSpace(input[idx+1:])
 
 	if name == "" {
 		return StageSpec{}, fmt.Errorf("%w: stage name is empty in %q", ErrInvalidSpec, input)
+	}
+	if countStr == "" {
+		return StageSpec{}, fmt.Errorf("%w: iteration count is empty in %q", ErrInvalidSpec, input)
 	}
 
 	count, err := strconv.Atoi(countStr)
@@ -140,4 +201,18 @@ func parseStageSpec(input string) (StageSpec, error) {
 		Name:       name,
 		Iterations: count,
 	}, nil
+}
+
+func resolveStageSpec(stageSpec StageSpec, opts ParseOptions) (StageSpec, error) {
+	if opts.SkipStageLookup {
+		return stageSpec, nil
+	}
+
+	definition, err := stage.ResolveStage(stageSpec.Name, opts.StageResolveOpts)
+	if err != nil {
+		return StageSpec{}, fmt.Errorf("%w: %q: %v", ErrStageNotFound, stageSpec.Name, err)
+	}
+
+	stageSpec.Definition = definition
+	return stageSpec, nil
 }
