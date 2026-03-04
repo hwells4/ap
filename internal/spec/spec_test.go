@@ -265,11 +265,164 @@ func TestParseFileNotFoundNoFallthrough(t *testing.T) {
 	}
 }
 
-func TestParseChainRejected(t *testing.T) {
+func TestParseChain(t *testing.T) {
 	t.Parallel()
-	_, err := Parse("improve-plan:5 -> refine-tasks:5")
+
+	spec, err := Parse("improve-plan:5 -> refine-tasks:5")
+	if err != nil {
+		t.Fatalf("Parse(chain) error = %v", err)
+	}
+
+	chain, ok := spec.(ChainSpec)
+	if !ok {
+		t.Fatalf("Parse(chain) = %T, want ChainSpec", spec)
+	}
+	if chain.Kind() != KindChain {
+		t.Fatalf("Kind() = %d, want KindChain", chain.Kind())
+	}
+	if len(chain.Stages) != 2 {
+		t.Fatalf("len(Stages) = %d, want 2", len(chain.Stages))
+	}
+	if chain.Stages[0].Name != "improve-plan" || chain.Stages[0].Iterations != 5 {
+		t.Fatalf("stage[0] = %#v, want improve-plan:5", chain.Stages[0])
+	}
+	if chain.Stages[1].Name != "refine-tasks" || chain.Stages[1].Iterations != 5 {
+		t.Fatalf("stage[1] = %#v, want refine-tasks:5", chain.Stages[1])
+	}
+}
+
+func TestParseChainWithWhitespace(t *testing.T) {
+	t.Parallel()
+
+	spec, err := Parse("  improve-plan:5   ->   refine-tasks:5  ")
+	if err != nil {
+		t.Fatalf("Parse(chain) error = %v", err)
+	}
+	chain := spec.(ChainSpec)
+	if len(chain.Stages) != 2 {
+		t.Fatalf("len(Stages) = %d, want 2", len(chain.Stages))
+	}
+}
+
+func TestParseChainMissingStageAfterArrow(t *testing.T) {
+	t.Parallel()
+
+	_, err := Parse("improve-plan:5 -> ")
 	if !errors.Is(err, ErrInvalidSpec) {
-		t.Fatalf("Parse(chain) error = %v, want ErrInvalidSpec", err)
+		t.Fatalf("Parse(chain missing right stage) error = %v, want ErrInvalidSpec", err)
+	}
+	if !containsAll(err.Error(), "invalid chain", "expected stage name after ->") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParseChainMissingStageBeforeArrow(t *testing.T) {
+	t.Parallel()
+
+	_, err := Parse(" -> refine-tasks:5")
+	if !errors.Is(err, ErrInvalidSpec) {
+		t.Fatalf("Parse(chain missing left stage) error = %v, want ErrInvalidSpec", err)
+	}
+	if !containsAll(err.Error(), "invalid chain", "expected stage name before ->") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParseChainInvalidCount(t *testing.T) {
+	t.Parallel()
+
+	_, err := Parse("improve-plan:abc -> refine-tasks:5")
+	if !errors.Is(err, ErrInvalidSpec) {
+		t.Fatalf("Parse(chain invalid count) error = %v, want ErrInvalidSpec", err)
+	}
+	if !containsAll(err.Error(), "invalid iteration count") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParseChainSyntaxRecoveryFromGreaterThan(t *testing.T) {
+	t.Parallel()
+
+	spec, err := ParseWithOptions("alpha:2 > beta:3", ParseOptions{SkipStageLookup: true})
+	if err != nil {
+		t.Fatalf("ParseWithOptions(>) error = %v", err)
+	}
+	chain, ok := spec.(ChainSpec)
+	if !ok {
+		t.Fatalf("ParseWithOptions(>) = %T, want ChainSpec", spec)
+	}
+	if len(chain.Stages) != 2 {
+		t.Fatalf("len(Stages) = %d, want 2", len(chain.Stages))
+	}
+	if chain.Stages[0].Name != "alpha" || chain.Stages[0].Iterations != 2 {
+		t.Fatalf("stage[0] = %#v", chain.Stages[0])
+	}
+	if chain.Stages[1].Name != "beta" || chain.Stages[1].Iterations != 3 {
+		t.Fatalf("stage[1] = %#v", chain.Stages[1])
+	}
+}
+
+func TestParseChainSyntaxRecoveryFromComma(t *testing.T) {
+	t.Parallel()
+
+	spec, err := ParseWithOptions("alpha:2, beta:3", ParseOptions{SkipStageLookup: true})
+	if err != nil {
+		t.Fatalf("ParseWithOptions(,) error = %v", err)
+	}
+	chain := spec.(ChainSpec)
+	if len(chain.Stages) != 2 {
+		t.Fatalf("len(Stages) = %d, want 2", len(chain.Stages))
+	}
+}
+
+func TestChainSpecToPipeline(t *testing.T) {
+	t.Parallel()
+
+	chain := ChainSpec{
+		raw: "improve-plan:5 -> refine-tasks:3",
+		Stages: []StageSpec{
+			{Name: "improve-plan", Iterations: 5},
+			{Name: "refine-tasks", Iterations: 3},
+		},
+	}
+
+	pipeline := chain.ToPipeline()
+	if len(pipeline.Nodes) != 2 {
+		t.Fatalf("len(pipeline.Nodes) = %d, want 2", len(pipeline.Nodes))
+	}
+	if pipeline.Nodes[0].Stage != "improve-plan" || pipeline.Nodes[0].Runs != 5 {
+		t.Fatalf("node[0] = %#v", pipeline.Nodes[0])
+	}
+	if pipeline.Nodes[1].Stage != "refine-tasks" || pipeline.Nodes[1].Runs != 3 {
+		t.Fatalf("node[1] = %#v", pipeline.Nodes[1])
+	}
+	if pipeline.Nodes[1].Inputs.From != pipeline.Nodes[0].ID {
+		t.Fatalf("node[1].inputs.from = %q, want %q", pipeline.Nodes[1].Inputs.From, pipeline.Nodes[0].ID)
+	}
+	if pipeline.Nodes[1].Inputs.Select != "latest" {
+		t.Fatalf("node[1].inputs.select = %q, want latest", pipeline.Nodes[1].Inputs.Select)
+	}
+}
+
+func TestChainSpecToPipelineDuplicateStageNames(t *testing.T) {
+	t.Parallel()
+
+	chain := ChainSpec{
+		raw: "alpha -> alpha",
+		Stages: []StageSpec{
+			{Name: "alpha"},
+			{Name: "alpha"},
+		},
+	}
+	pipeline := chain.ToPipeline()
+	if len(pipeline.Nodes) != 2 {
+		t.Fatalf("len(pipeline.Nodes) = %d, want 2", len(pipeline.Nodes))
+	}
+	if pipeline.Nodes[0].ID == pipeline.Nodes[1].ID {
+		t.Fatalf("expected unique node IDs, got %q and %q", pipeline.Nodes[0].ID, pipeline.Nodes[1].ID)
+	}
+	if pipeline.Nodes[1].Inputs.From != pipeline.Nodes[0].ID {
+		t.Fatalf("node[1].inputs.from = %q, want %q", pipeline.Nodes[1].Inputs.From, pipeline.Nodes[0].ID)
 	}
 }
 
@@ -278,10 +431,13 @@ func TestParsePrecedenceOrder(t *testing.T) {
 	// Verify documented precedence:
 	// 1. chain (->)  2. .yaml  3. .md/./  4. :N  5. bare name
 
-	// Chain always wins
-	_, err := Parse("a.yaml -> b.yaml")
-	if !errors.Is(err, ErrInvalidSpec) {
-		t.Errorf("chain should be detected before yaml; error = %v", err)
+	// Chain always wins (a chain with .yaml-looking tokens is still chain syntax)
+	spec, err := ParseWithOptions("a.yaml -> b.yaml", ParseOptions{SkipStageLookup: true})
+	if err != nil {
+		t.Fatalf("chain should be detected before yaml; error = %v", err)
+	}
+	if spec.Kind() != KindChain {
+		t.Fatalf("expected KindChain, got %d", spec.Kind())
 	}
 
 	// .yaml wins over : (e.g., "file:1.yaml" treated as yaml file)
@@ -290,7 +446,7 @@ func TestParsePrecedenceOrder(t *testing.T) {
 	if err := os.WriteFile(yamlPath, []byte("x:"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	spec, err := Parse(yamlPath)
+	spec, err = Parse(yamlPath)
 	if err != nil {
 		t.Fatalf("yaml parse error = %v", err)
 	}

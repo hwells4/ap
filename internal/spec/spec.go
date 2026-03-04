@@ -2,7 +2,7 @@
 //
 // Precedence (from AGENTS.md):
 //
-//  1. Contains "->" → ChainSpec (M3, rejected for now)
+//  1. Contains chain separators ("->", and recovered ">" / ",") → ChainSpec
 //  2. Ends .yaml/.yml → FileSpec(yaml)
 //  3. Ends .md or starts "./"/"/" → FileSpec(prompt)
 //  4. Contains ":" → StageSpec(name, count)
@@ -14,9 +14,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/hwells4/ap/internal/compile"
 	"github.com/hwells4/ap/internal/fsutil"
 	"github.com/hwells4/ap/internal/stage"
 )
@@ -63,8 +65,6 @@ func (s StageSpec) Kind() SpecKind { return KindStage }
 func (s StageSpec) Raw() string { return s.raw }
 
 // ChainSpec represents a parsed chain expression.
-//
-// Chain parsing is deferred to M3, but the typed AST node is defined in M0b.
 type ChainSpec struct {
 	raw    string
 	Stages []StageSpec
@@ -75,6 +75,44 @@ func (c ChainSpec) Kind() SpecKind { return KindChain }
 
 // Raw returns the original input string.
 func (c ChainSpec) Raw() string { return c.raw }
+
+// ToPipeline converts a chain into a sequential Pipeline representation.
+//
+// Each stage is converted into one node. For all nodes after the first,
+// inputs.from is set to the previous node id with select=latest.
+func (c ChainSpec) ToPipeline() compile.Pipeline {
+	usedIDs := map[string]int{}
+	nodes := make([]compile.Node, 0, len(c.Stages))
+
+	var prevID string
+	for i, stageSpec := range c.Stages {
+		baseID := strings.TrimSpace(stageSpec.Name)
+		if baseID == "" {
+			baseID = fmt.Sprintf("stage-%d", i+1)
+		}
+		nodeID := uniqueNodeID(baseID, usedIDs)
+
+		node := compile.Node{
+			ID:    nodeID,
+			Stage: stageSpec.Name,
+			Runs:  stageSpec.Iterations,
+		}
+		if i > 0 {
+			node.Inputs = compile.Inputs{
+				From:   prevID,
+				Select: compile.SelectLatest,
+			}
+		}
+
+		nodes = append(nodes, node)
+		prevID = nodeID
+	}
+
+	return compile.Pipeline{
+		Name:  "chain",
+		Nodes: nodes,
+	}
+}
 
 // FileSpec references a file as a prompt or pipeline definition.
 type FileSpec struct {
@@ -110,9 +148,10 @@ func ParseWithOptions(input string, opts ParseOptions) (Spec, error) {
 		return nil, ErrEmpty
 	}
 
-	// 1. Chain: contains "->"
-	if strings.Contains(input, "->") {
-		return nil, fmt.Errorf("%w: chain expressions (\"->\" syntax) are not yet supported", ErrInvalidSpec)
+	chainInput, isChain := normalizeChainInput(input)
+	// 1. Chain: contains "->" or recovered separators.
+	if isChain {
+		return parseChainSpec(input, chainInput, opts)
 	}
 
 	// 2. YAML file: ends with .yaml or .yml
@@ -215,4 +254,79 @@ func resolveStageSpec(stageSpec StageSpec, opts ParseOptions) (StageSpec, error)
 
 	stageSpec.Definition = definition
 	return stageSpec, nil
+}
+
+var (
+	chainArrowRecoveryPattern = regexp.MustCompile(`\s>\s`)
+	chainCommaRecoveryPattern = regexp.MustCompile(`\s*,\s*`)
+)
+
+func normalizeChainInput(input string) (string, bool) {
+	if strings.Contains(input, "->") {
+		return input, true
+	}
+
+	if chainArrowRecoveryPattern.MatchString(input) {
+		recovered := chainArrowRecoveryPattern.ReplaceAllString(input, " -> ")
+		return recovered, strings.Contains(recovered, "->")
+	}
+
+	if chainCommaRecoveryPattern.MatchString(input) {
+		recovered := chainCommaRecoveryPattern.ReplaceAllString(input, " -> ")
+		return recovered, strings.Contains(recovered, "->")
+	}
+
+	return input, false
+}
+
+func parseChainSpec(rawInput, chainInput string, opts ParseOptions) (ChainSpec, error) {
+	segments := strings.Split(chainInput, "->")
+	if len(segments) < 2 {
+		return ChainSpec{}, fmt.Errorf("%w: invalid chain: expected at least two stages", ErrInvalidSpec)
+	}
+
+	stages := make([]StageSpec, 0, len(segments))
+	for idx, segment := range segments {
+		stageText := strings.TrimSpace(segment)
+		if stageText == "" {
+			if idx == 0 {
+				return ChainSpec{}, fmt.Errorf("%w: invalid chain: expected stage name before ->", ErrInvalidSpec)
+			}
+			return ChainSpec{}, fmt.Errorf("%w: invalid chain: expected stage name after ->", ErrInvalidSpec)
+		}
+
+		var stageSpec StageSpec
+		var err error
+		if strings.Contains(stageText, ":") {
+			stageSpec, err = parseStageSpec(stageText)
+			if err != nil {
+				return ChainSpec{}, err
+			}
+		} else {
+			stageSpec = StageSpec{raw: stageText, Name: stageText}
+		}
+
+		stageSpec, err = resolveStageSpec(stageSpec, opts)
+		if err != nil {
+			return ChainSpec{}, err
+		}
+		stages = append(stages, stageSpec)
+	}
+
+	return ChainSpec{
+		raw:    rawInput,
+		Stages: stages,
+	}, nil
+}
+
+func uniqueNodeID(base string, used map[string]int) string {
+	count := used[base]
+	if count == 0 {
+		used[base] = 1
+		return base
+	}
+
+	count++
+	used[base] = count
+	return fmt.Sprintf("%s-%d", base, count)
 }
