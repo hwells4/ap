@@ -363,6 +363,30 @@ func FailureResponse(err error) Response {
 	}
 }
 
+// InjectResponse returns a Response with an inject signal.
+// The inject text is stored for the next iteration's ${CONTEXT}.
+func InjectResponse(decision, summary, injectText string) Response {
+	statusJSON := map[string]any{
+		"decision": decision,
+		"summary":  summary,
+		"reason":   "",
+		"work": map[string]any{
+			"items_completed": []string{},
+			"files_touched":   []string{},
+		},
+		"errors": []string{},
+		"agent_signals": map[string]any{
+			"inject": injectText,
+		},
+	}
+	data, _ := json.MarshalIndent(statusJSON, "", "  ")
+	return Response{
+		Decision:   decision,
+		Summary:    summary,
+		StatusJSON: string(data),
+	}
+}
+
 // EscalateResponse returns a Response with an escalate signal.
 // The agent's decision field is overridden by the escalation.
 func EscalateResponse(decision, summary, escalateType, reason string, options []string) Response {

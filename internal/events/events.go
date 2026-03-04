@@ -31,6 +31,8 @@ const (
 	TypeIterationFailed = "iteration.failed"
 	// TypeError marks an error event.
 	TypeError = "error"
+	// TypeSignalInject marks an inject signal from the agent.
+	TypeSignalInject = "signal.inject"
 	// TypeSignalEscalate marks an escalation signal from the agent.
 	TypeSignalEscalate = "signal.escalate"
 )

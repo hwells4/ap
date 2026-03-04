@@ -126,6 +126,7 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	var lastResult result.Result
 	completed := 0
 	spawnedChildren := 0
+	injectedContext := "" // text from inject signal, consumed once
 
 	for i := 1; i <= fixed.Target(); i++ {
 		// Check context before starting iteration.
@@ -168,8 +169,9 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 			return Result{}, fmt.Errorf("runner: generate context for iteration %d: %w", i, err)
 		}
 
-		// Resolve prompt template.
-		prompt := resolvePrompt(cfg.PromptTemplate, ctxPath, cfg.Session, i, stageConfig)
+		// Resolve prompt template. Consume injected context if present.
+		prompt := resolvePrompt(cfg.PromptTemplate, ctxPath, cfg.Session, i, stageConfig, injectedContext)
+		injectedContext = "" // consumed
 
 		// Read status path from context.json for provider request.
 		ctxVars, _ := resolve.VarsFromContext(ctxPath)
@@ -247,6 +249,15 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 			return Result{}, fmt.Errorf("runner: emit iteration_complete: %w", err)
 		}
 
+		// Inject signal — store text for next iteration's ${CONTEXT}.
+		if iterResult.AgentSignals.Inject != "" {
+			injectedContext = iterResult.AgentSignals.Inject
+			_ = ew.Append(events.NewEvent(events.TypeSignalInject, cfg.Session, cursor, map[string]any{
+				"iteration": i,
+				"length":    len(injectedContext),
+			}))
+		}
+
 		var spawnErr error
 		spawnedChildren, spawnErr = processSpawnSignals(cfg, ew, i, iterResult.AgentSignals.Spawn, spawnedChildren)
 		if spawnErr != nil {
@@ -303,7 +314,8 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 }
 
 // resolvePrompt substitutes template variables into the prompt.
-func resolvePrompt(template, ctxPath, session string, iteration int, sc apcontext.StageConfig) string {
+// injectedContext is text from a previous inject signal, set as ${CONTEXT}.
+func resolvePrompt(template, ctxPath, session string, iteration int, sc apcontext.StageConfig, injectedContext string) string {
 	vars, err := resolve.VarsFromContext(ctxPath)
 	if err != nil {
 		// Fallback: resolve with minimal vars.
@@ -311,6 +323,9 @@ func resolvePrompt(template, ctxPath, session string, iteration int, sc apcontex
 			SESSION:   session,
 			ITERATION: strconv.Itoa(iteration),
 		}
+	}
+	if injectedContext != "" {
+		vars.CONTEXT = injectedContext
 	}
 	return resolve.ResolveTemplate(template, vars)
 }

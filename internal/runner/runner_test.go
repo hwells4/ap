@@ -665,6 +665,151 @@ func containsSubstr(s, sub string) bool {
 	return false
 }
 
+func TestRun_InjectSignal_AppearsInNextPrompt(t *testing.T) {
+	runDir := tempSession(t)
+
+	mp := mock.New(
+		mock.WithResponses(
+			mock.InjectResponse("continue", "iteration 1", "focus on tests next"),
+			mock.ContinueResponse("iteration 2"),
+			mock.ContinueResponse("iteration 3"),
+		),
+	)
+
+	cfg := Config{
+		Session:        "test-inject",
+		RunDir:         runDir,
+		StageName:      "test-stage",
+		Provider:       mp,
+		Iterations:     3,
+		PromptTemplate: "Do work. Context: ${CONTEXT}",
+	}
+
+	res, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	if res.Iterations != 3 {
+		t.Errorf("iterations = %d, want 3", res.Iterations)
+	}
+
+	calls := mp.Calls()
+	if len(calls) != 3 {
+		t.Fatalf("expected 3 calls, got %d", len(calls))
+	}
+
+	// Iteration 1: no inject yet, ${CONTEXT} should be empty.
+	if containsStr(calls[0].Request.Prompt, "focus on tests next") {
+		t.Error("iteration 1 prompt should NOT contain injected text")
+	}
+
+	// Iteration 2: inject from iteration 1 should be present.
+	if !containsStr(calls[1].Request.Prompt, "focus on tests next") {
+		t.Errorf("iteration 2 prompt %q should contain injected text", calls[1].Request.Prompt)
+	}
+
+	// Iteration 3: inject consumed, should NOT appear again.
+	if containsStr(calls[2].Request.Prompt, "focus on tests next") {
+		t.Error("iteration 3 prompt should NOT contain injected text (consumed)")
+	}
+}
+
+func TestRun_InjectSignal_EventEmitted(t *testing.T) {
+	runDir := tempSession(t)
+
+	mp := mock.New(
+		mock.WithResponses(
+			mock.InjectResponse("continue", "did work", "review this change"),
+			mock.ContinueResponse("done"),
+		),
+	)
+
+	cfg := Config{
+		Session:        "test-inject-event",
+		RunDir:         runDir,
+		StageName:      "test-stage",
+		Provider:       mp,
+		Iterations:     2,
+		PromptTemplate: "iteration ${ITERATION}",
+	}
+
+	_, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(runDir, "events.jsonl"))
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+
+	lines := splitNonEmpty(string(data))
+	found := false
+	for _, line := range lines {
+		var ev map[string]any
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("parse event: %v", err)
+		}
+		if ev["type"] == "signal.inject" {
+			found = true
+			evData, ok := ev["data"].(map[string]any)
+			if !ok {
+				t.Fatal("signal.inject event missing data")
+			}
+			if evData["iteration"] != float64(1) {
+				t.Errorf("event data.iteration = %v, want 1", evData["iteration"])
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("signal.inject event not found in events.jsonl")
+	}
+}
+
+func TestRun_InjectSignal_OverwrittenByLaterInject(t *testing.T) {
+	runDir := tempSession(t)
+
+	// Both iteration 1 and 2 inject — only iteration 2's inject should appear in iteration 3.
+	mp := mock.New(
+		mock.WithResponses(
+			mock.InjectResponse("continue", "iter 1", "first inject"),
+			mock.InjectResponse("continue", "iter 2", "second inject"),
+			mock.ContinueResponse("iter 3"),
+		),
+	)
+
+	cfg := Config{
+		Session:        "test-inject-overwrite",
+		RunDir:         runDir,
+		StageName:      "test-stage",
+		Provider:       mp,
+		Iterations:     3,
+		PromptTemplate: "Context: ${CONTEXT}",
+	}
+
+	_, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	calls := mp.Calls()
+
+	// Iteration 2: should have first inject.
+	if !containsStr(calls[1].Request.Prompt, "first inject") {
+		t.Errorf("iteration 2 prompt %q should contain 'first inject'", calls[1].Request.Prompt)
+	}
+
+	// Iteration 3: should have second inject (overwritten).
+	if !containsStr(calls[2].Request.Prompt, "second inject") {
+		t.Errorf("iteration 3 prompt %q should contain 'second inject'", calls[2].Request.Prompt)
+	}
+	if containsStr(calls[2].Request.Prompt, "first inject") {
+		t.Error("iteration 3 prompt should NOT contain 'first inject'")
+	}
+}
+
 func TestRun_EscalateSignal_PausesSession(t *testing.T) {
 	runDir := tempSession(t)
 
