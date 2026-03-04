@@ -26,6 +26,7 @@ func TestIntegration_Start_Success(t *testing.T) {
 		ProjectRoot: projectRoot,
 		Provider:    "claude",
 		Model:       "opus",
+		OnEscalate:  "exec:notify-send escalated",
 		Context:     "focus auth",
 		InputFiles:  []string{"docs/plan.md"},
 		Executable:  "/usr/local/bin/ap",
@@ -81,6 +82,9 @@ func TestIntegration_Start_Success(t *testing.T) {
 	}
 	if request.Context != "focus auth" {
 		t.Fatalf("request.context = %q, want %q", request.Context, "focus auth")
+	}
+	if request.OnEscalate != "exec:notify-send escalated" {
+		t.Fatalf("request.on_escalate = %q, want %q", request.OnEscalate, "exec:notify-send escalated")
 	}
 	if request.Iterations != 3 {
 		t.Fatalf("request.iterations = %d, want 3", request.Iterations)

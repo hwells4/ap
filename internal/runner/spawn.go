@@ -17,15 +17,22 @@ const (
 	defaultMaxSpawnDepth    = 3
 )
 
+// spawnResult carries the updated child count and names of spawned sessions.
+type spawnResult struct {
+	ChildCount int
+	ChildNames []string
+}
+
 func processSpawnSignals(
 	cfg Config,
 	ew *events.Writer,
 	iteration int,
 	spawnSignals []signals.SpawnSignal,
 	spawnedChildren int,
-) (int, error) {
+) (spawnResult, error) {
+	res := spawnResult{ChildCount: spawnedChildren}
 	if len(spawnSignals) == 0 {
-		return spawnedChildren, nil
+		return res, nil
 	}
 
 	maxChildren := cfg.SpawnMaxChildren
@@ -40,7 +47,7 @@ func processSpawnSignals(
 
 	projectRoot, err := spawnProjectRoot(cfg.WorkDir)
 	if err != nil {
-		return spawnedChildren, err
+		return res, err
 	}
 
 	cursor := &events.Cursor{
@@ -64,21 +71,21 @@ func processSpawnSignals(
 
 		if cfg.SpawnDepth >= maxDepth {
 			if err := failure(fmt.Errorf("max_spawn_depth exceeded (%d)", maxDepth)); err != nil {
-				return spawnedChildren, err
+				return res, err
 			}
 			continue
 		}
 
-		if spawnedChildren >= maxChildren {
+		if res.ChildCount >= maxChildren {
 			if err := failure(fmt.Errorf("max_child_sessions reached (%d)", maxChildren)); err != nil {
-				return spawnedChildren, err
+				return res, err
 			}
 			continue
 		}
 
 		if cfg.Launcher == nil {
 			if err := failure(session.ErrLauncherRequired); err != nil {
-				return spawnedChildren, err
+				return res, err
 			}
 			continue
 		}
@@ -88,7 +95,7 @@ func processSpawnSignals(
 		})
 		if err != nil {
 			if appendErr := failure(fmt.Errorf("parse run spec: %w", err)); appendErr != nil {
-				return spawnedChildren, appendErr
+				return res, appendErr
 			}
 			continue
 		}
@@ -96,14 +103,18 @@ func processSpawnSignals(
 		parsed, err = applySpawnCountOverride(parsed, spawnSignal.N)
 		if err != nil {
 			if appendErr := failure(err); appendErr != nil {
-				return spawnedChildren, appendErr
+				return res, appendErr
 			}
 			continue
+		}
+		childStage := spawnSignal.Run
+		if stageSpec, ok := parsed.(spec.StageSpec); ok {
+			childStage = stageSpec.Name
 		}
 
 		// Two-phase: emit dispatching before the side effect.
 		if err := emitDispatching(ew, cfg.Session, cursor, sigID, "spawn", iteration); err != nil {
-			return spawnedChildren, fmt.Errorf("emit spawn dispatching: %w", err)
+			return res, fmt.Errorf("emit spawn dispatching: %w", err)
 		}
 
 		childSession, err := session.Start(parsed, spawnSignal.Session, session.StartOpts{
@@ -120,27 +131,44 @@ func processSpawnSignals(
 		})
 		if err != nil {
 			if appendErr := failure(fmt.Errorf("start child session: %w", err)); appendErr != nil {
-				return spawnedChildren, appendErr
+				return res, appendErr
 			}
 			continue
 		}
 
-		spawnedChildren++
+		res.ChildCount++
+		res.ChildNames = append(res.ChildNames, childSession.Name)
 		if err := ew.Append(events.NewEvent(events.TypeSignalSpawn, cfg.Session, cursor, map[string]any{
 			"signal_id":     sigID,
 			"iteration":     iteration,
 			"signal_index":  idx,
 			"run":           spawnSignal.Run,
+			"child_stage":   childStage,
 			"child_session": childSession.Name,
 			"child_run_dir": childSession.RunDir,
 			"pid":           childSession.Handle.PID,
 			"backend":       childSession.Handle.Backend,
 		})); err != nil {
-			return spawnedChildren, err
+			return res, err
+		}
+		if err := dispatchSignalHandlers(dispatchSignalInput{
+			Writer:       ew,
+			Session:      cfg.Session,
+			Stage:        cfg.StageName,
+			Iteration:    iteration,
+			SignalID:     sigID,
+			SignalType:   "spawn",
+			Handlers:     cfg.SpawnHandlers,
+			Timeout:      cfg.SignalHandlerTimeout,
+			Output:       cfg.SignalOutput,
+			ChildSession: childSession.Name,
+			ChildStage:   childStage,
+		}); err != nil {
+			return res, fmt.Errorf("dispatch spawn handlers: %w", err)
 		}
 	}
 
-	return spawnedChildren, nil
+	return res, nil
 }
 
 func applySpawnCountOverride(parsed spec.Spec, override int) (spec.Spec, error) {

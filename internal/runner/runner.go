@@ -18,12 +18,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"time"
 
+	"github.com/hwells4/ap/internal/config"
 	apcontext "github.com/hwells4/ap/internal/context"
 	"github.com/hwells4/ap/internal/events"
+	"github.com/hwells4/ap/internal/judge"
 	"github.com/hwells4/ap/internal/resolve"
 	"github.com/hwells4/ap/internal/result"
 	"github.com/hwells4/ap/internal/session"
@@ -78,6 +83,44 @@ type Config struct {
 
 	// SpawnDepth is the current nesting depth for this session (root = 0).
 	SpawnDepth int
+
+	// EscalateHandlers dispatch escalation side effects in configured order.
+	EscalateHandlers []config.SignalHandler
+
+	// SpawnHandlers dispatch spawn side effects in configured order.
+	SpawnHandlers []config.SignalHandler
+
+	// SignalHandlerTimeout bounds webhook/exec handler runtime.
+	SignalHandlerTimeout time.Duration
+
+	// SignalOutput receives stdout handler output. Defaults to os.Stdout.
+	SignalOutput io.Writer
+
+	// OnEscalate preserves one-off handler override metadata from run requests.
+	OnEscalate string
+
+	// JudgeProvider is the provider used for judgment termination.
+	// When set, the runner uses consensus-based termination instead of fixed.
+	JudgeProvider provider.Provider
+
+	// JudgeModel overrides the judge provider's default model.
+	JudgeModel string
+
+	// JudgeConsensus is the number of consecutive stop verdicts required.
+	// Zero uses the default (2).
+	JudgeConsensus int
+
+	// JudgeMinIterations is the minimum iteration count before judgment
+	// can trigger a stop. Zero uses the default (3).
+	JudgeMinIterations int
+
+	// JudgeMaxRetries is the maximum retry count for malformed judge output.
+	// Zero uses the default (3).
+	JudgeMaxRetries int
+
+	// ParentSession is the name of the parent session that spawned this one.
+	// Empty for root sessions.
+	ParentSession string
 }
 
 // Result captures the outcome of a run.
@@ -107,26 +150,55 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	}
 
 	// Initialize session state.
-	if _, err := state.Init(statePath, cfg.Session, "stage", cfg.StageName); err != nil {
+	initState, err := state.Init(statePath, cfg.Session, "stage", cfg.StageName)
+	if err != nil {
 		return Result{}, fmt.Errorf("runner: init state: %w", err)
 	}
 
+	// Record parent session lineage if this is a child session.
+	if cfg.ParentSession != "" {
+		initState.ParentSession = cfg.ParentSession
+		if err := state.Write(statePath, initState); err != nil {
+			return Result{}, fmt.Errorf("runner: write parent session: %w", err)
+		}
+	}
+
 	// Emit session_start event.
-	if err := ew.Append(events.NewEvent(events.TypeSessionStart, cfg.Session, nil, map[string]any{
+	startData := map[string]any{
 		"stage":      cfg.StageName,
 		"iterations": cfg.Iterations,
 		"provider":   cfg.Provider.Name(),
-	})); err != nil {
+	}
+	if cfg.ParentSession != "" {
+		startData["parent_session"] = cfg.ParentSession
+	}
+	if err := ew.Append(events.NewEvent(events.TypeSessionStart, cfg.Session, nil, startData)); err != nil {
 		return Result{}, fmt.Errorf("runner: emit session_start: %w", err)
 	}
 
 	fixed := termination.NewFixed(termination.FixedConfig{Iterations: &cfg.Iterations})
 	stageConfig := buildStageConfig(cfg)
 
+	// Initialize judgment strategy if a judge provider is configured.
+	var judgment *termination.Judgment
+	var judgeEval termination.Evaluator
+	if cfg.JudgeProvider != nil {
+		judgment = termination.NewJudgment(termination.JudgmentConfig{
+			ConsensusRequired: cfg.JudgeConsensus,
+			MinIterations:     cfg.JudgeMinIterations,
+		})
+		judgeEval = judge.New(judge.Config{
+			Provider:   cfg.JudgeProvider,
+			Model:      cfg.JudgeModel,
+			MaxRetries: cfg.JudgeMaxRetries,
+		})
+	}
+
 	var lastResult result.Result
 	completed := 0
 	spawnedChildren := 0
 	injectedContext := "" // text from inject signal, consumed once
+	var summaries []string
 
 	for i := 1; i <= fixed.Target(); i++ {
 		// Check context before starting iteration.
@@ -258,10 +330,25 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 			}))
 		}
 
-		var spawnErr error
-		spawnedChildren, spawnErr = processSpawnSignals(cfg, ew, i, iterResult.AgentSignals.Spawn, spawnedChildren)
+		// Collect summary for judgment history.
+		summaries = append(summaries, iterResult.Summary)
+
+		spawnRes, spawnErr := processSpawnSignals(cfg, ew, i, iterResult.AgentSignals.Spawn, spawnedChildren)
 		if spawnErr != nil {
 			return Result{}, fmt.Errorf("runner: process spawn signals: %w", spawnErr)
+		}
+		spawnedChildren = spawnRes.ChildCount
+
+		// Record child sessions in state for lineage tracking.
+		if len(spawnRes.ChildNames) > 0 {
+			if _, err := state.Update(statePath, func(s *state.SessionState) error {
+				for _, child := range spawnRes.ChildNames {
+					s.AddChildSession(child)
+				}
+				return nil
+			}); err != nil {
+				return Result{}, fmt.Errorf("runner: record child sessions: %w", err)
+			}
 		}
 
 		completed = i
@@ -291,6 +378,20 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 			})); err != nil {
 				return Result{}, fmt.Errorf("runner: emit signal.escalate: %w", err)
 			}
+			if err := dispatchSignalHandlers(dispatchSignalInput{
+				Writer:     ew,
+				Session:    cfg.Session,
+				Stage:      cfg.StageName,
+				Iteration:  i,
+				SignalID:   sigID,
+				SignalType: "escalate",
+				Handlers:   cfg.EscalateHandlers,
+				Timeout:    cfg.SignalHandlerTimeout,
+				Output:     cfg.SignalOutput,
+				Escalation: esc,
+			}); err != nil {
+				return Result{}, fmt.Errorf("runner: dispatch escalate handlers: %w", err)
+			}
 			return Result{
 				Iterations: completed,
 				Status:     state.StatePaused,
@@ -298,7 +399,38 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 			}, nil
 		}
 
-		// Evaluate termination.
+		// Evaluate judgment termination if configured.
+		if judgment != nil && judgeEval != nil && !judgment.InFallback() {
+			judgeStop, judgeReason := judgment.ShouldStop(ctx, i, lastResult, judgeEval, summaries)
+			cursor := &events.Cursor{Iteration: i, Provider: cfg.Provider.Name()}
+
+			// Emit judge verdict event.
+			_ = ew.Append(events.NewEvent(events.TypeJudgeVerdict, cfg.Session, cursor, map[string]any{
+				"iteration":         i,
+				"consecutive_stops": judgment.ConsecutiveStops(),
+				"in_fallback":       judgment.InFallback(),
+				"stop":              judgeStop,
+			}))
+
+			// Emit fallback warning if triggered.
+			if judgment.InFallback() {
+				_ = ew.Append(events.NewEvent(events.TypeJudgeFallback, cfg.Session, cursor, map[string]any{
+					"iteration": i,
+					"reason":    "judge failed 3 consecutive times, falling back to fixed-iteration termination",
+				}))
+			}
+
+			if judgeStop {
+				finishSession(statePath, ew, cfg.Session, completed, judgeReason)
+				return Result{
+					Iterations: completed,
+					Status:     state.StateCompleted,
+					Reason:     judgeReason,
+				}, nil
+			}
+		}
+
+		// Evaluate fixed termination.
 		shouldStop, reason := fixed.ShouldStop(i, lastResult)
 		if shouldStop {
 			finishSession(statePath, ew, cfg.Session, completed, reason)
@@ -395,6 +527,9 @@ func persistRunRequest(cfg Config) error {
 		"provider":   cfg.Provider.Name(),
 		"model":      cfg.Model,
 		"iterations": cfg.Iterations,
+	}
+	if override := strings.TrimSpace(cfg.OnEscalate); override != "" {
+		payload["on_escalate"] = override
 	}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {

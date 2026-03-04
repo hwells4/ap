@@ -41,6 +41,12 @@ const (
 	TypeSignalSpawn = "signal.spawn"
 	// TypeSignalSpawnFailed marks a failed child session spawn.
 	TypeSignalSpawnFailed = "signal.spawn.failed"
+	// TypeSignalHandlerError marks a non-fatal signal handler failure.
+	TypeSignalHandlerError = "signal.handler.error"
+	// TypeJudgeVerdict marks a judgment termination evaluation result.
+	TypeJudgeVerdict = "judge.verdict"
+	// TypeJudgeFallback marks that the judge has entered fallback mode.
+	TypeJudgeFallback = "judge.fallback"
 )
 
 var (

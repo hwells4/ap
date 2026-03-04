@@ -236,6 +236,7 @@ func TestRunRequestFile_RoundTrip(t *testing.T) {
 		WorkDir:        "/home/user/project",
 		Env:            map[string]string{"KEY": "val", "FOO": "bar"},
 		RunDir:         filepath.Join(dir, "runs", "my-session"),
+		OnEscalate:     "webhook:http://localhost:8123/hooks/escalate",
 	}
 
 	if err := WriteRunRequest(path, original); err != nil {
@@ -254,7 +255,8 @@ func TestRunRequestFile_RoundTrip(t *testing.T) {
 		loaded.Iterations != original.Iterations ||
 		loaded.PromptTemplate != original.PromptTemplate ||
 		loaded.WorkDir != original.WorkDir ||
-		loaded.RunDir != original.RunDir {
+		loaded.RunDir != original.RunDir ||
+		loaded.OnEscalate != original.OnEscalate {
 		t.Errorf("round-trip mismatch:\n  original: %+v\n  loaded:   %+v", original, loaded)
 	}
 
@@ -310,4 +312,35 @@ func TestRunRequestFile_JSONSchema(t *testing.T) {
 
 func hasSubstring(s, sub string) bool {
 	return len(s) >= len(sub) && bytes.Contains([]byte(s), []byte(sub))
+}
+
+func TestParseOnEscalateOverride(t *testing.T) {
+	t.Run("webhook", func(t *testing.T) {
+		handler, err := parseOnEscalateOverride("webhook:https://example.com/hook")
+		if err != nil {
+			t.Fatalf("parseOnEscalateOverride() error: %v", err)
+		}
+		if handler.Type != "webhook" || handler.URL != "https://example.com/hook" {
+			t.Fatalf("handler = %#v, want webhook URL", handler)
+		}
+	})
+
+	t.Run("exec", func(t *testing.T) {
+		handler, err := parseOnEscalateOverride("exec:notify-send escalation")
+		if err != nil {
+			t.Fatalf("parseOnEscalateOverride() error: %v", err)
+		}
+		if handler.Type != "exec" {
+			t.Fatalf("handler.Type = %q, want exec", handler.Type)
+		}
+		if len(handler.Argv) != 2 || handler.Argv[0] != "notify-send" || handler.Argv[1] != "escalation" {
+			t.Fatalf("handler.Argv = %#v, want [notify-send escalation]", handler.Argv)
+		}
+	})
+
+	t.Run("invalid", func(t *testing.T) {
+		if _, err := parseOnEscalateOverride("wat"); err == nil {
+			t.Fatal("expected parse error")
+		}
+	})
 }

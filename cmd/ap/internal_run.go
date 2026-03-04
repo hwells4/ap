@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/hwells4/ap/internal/config"
 	"github.com/hwells4/ap/internal/engine"
 	"github.com/hwells4/ap/internal/lock"
 	"github.com/hwells4/ap/internal/output"
@@ -27,6 +29,7 @@ type RunRequestFile struct {
 	WorkDir        string            `json:"work_dir"`
 	Env            map[string]string `json:"env"`
 	RunDir         string            `json:"run_dir"`
+	OnEscalate     string            `json:"on_escalate,omitempty"`
 }
 
 // WriteRunRequest atomically writes a run_request.json file.
@@ -163,17 +166,37 @@ func runInternalRun(args []string, deps cliDeps) int {
 
 	_ = resume // TODO: resume support reads existing state
 
+	loadedConfig, cfgErr := config.Load("")
+	if cfgErr != nil {
+		return internalRunError(deps, fmt.Sprintf("load config: %v", cfgErr))
+	}
+	escalateHandlers := loadedConfig.SignalHandlers("escalate")
+	if override := strings.TrimSpace(req.OnEscalate); override != "" {
+		handler, err := parseOnEscalateOverride(override)
+		if err != nil {
+			return internalRunError(deps, fmt.Sprintf("parse --on-escalate override: %v", err))
+		}
+		escalateHandlers = append(escalateHandlers, handler)
+	}
+	limits := loadedConfig.RunnerLimits()
+
 	// Build runner config.
 	cfg := runner.Config{
-		Session:        req.Session,
-		RunDir:         req.RunDir,
-		StageName:      req.Stage,
-		Provider:       prov,
-		Iterations:     req.Iterations,
-		PromptTemplate: promptTemplate,
-		Model:          req.Model,
-		WorkDir:        req.WorkDir,
-		Env:            req.Env,
+		Session:              req.Session,
+		RunDir:               req.RunDir,
+		StageName:            req.Stage,
+		Provider:             prov,
+		Iterations:           req.Iterations,
+		PromptTemplate:       promptTemplate,
+		Model:                req.Model,
+		WorkDir:              req.WorkDir,
+		Env:                  req.Env,
+		OnEscalate:           req.OnEscalate,
+		SpawnMaxChildren:     limits.MaxChildSessions,
+		SpawnMaxDepth:        limits.MaxSpawnDepth,
+		EscalateHandlers:     escalateHandlers,
+		SpawnHandlers:        loadedConfig.SignalHandlers("spawn"),
+		SignalHandlerTimeout: loadedConfig.Signals.HandlerTimeout,
 	}
 
 	// Execute runner.
@@ -230,4 +253,42 @@ func resolveProvider(eng *engine.Engine, name string) (provider.Provider, error)
 func internalRunError(deps cliDeps, msg string) int {
 	_, _ = fmt.Fprintf(deps.stderr, "_run: %s\n", msg)
 	return output.ExitGeneralError
+}
+
+func parseOnEscalateOverride(raw string) (config.SignalHandler, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return config.SignalHandler{}, fmt.Errorf("value is required")
+	}
+
+	parts := strings.SplitN(raw, ":", 2)
+	if len(parts) != 2 {
+		return config.SignalHandler{}, fmt.Errorf("expected format TYPE:VALUE")
+	}
+	kind := strings.ToLower(strings.TrimSpace(parts[0]))
+	value := strings.TrimSpace(parts[1])
+	if value == "" {
+		return config.SignalHandler{}, fmt.Errorf("override target is required")
+	}
+
+	switch kind {
+	case "webhook":
+		return config.SignalHandler{
+			Type:    "webhook",
+			URL:     value,
+			Headers: map[string]string{},
+		}, nil
+	case "exec":
+		argv := strings.Fields(value)
+		if len(argv) == 0 {
+			return config.SignalHandler{}, fmt.Errorf("exec override must include a command")
+		}
+		return config.SignalHandler{
+			Type:    "exec",
+			Argv:    argv,
+			Headers: map[string]string{},
+		}, nil
+	default:
+		return config.SignalHandler{}, fmt.Errorf("unsupported override type %q (expected webhook or exec)", kind)
+	}
 }

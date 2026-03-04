@@ -130,6 +130,7 @@ type runRequest struct {
 	Iterations  *int
 	Provider    string
 	Model       string
+	OnEscalate  string
 	InputFiles  []string
 	Context     string
 	Force       bool
@@ -226,6 +227,13 @@ func parseRunArgs(args []string, getwd func() (string, error)) (runRequest, spec
 			}
 			i = next
 			req.Model = strings.TrimSpace(value)
+		case arg == "--on-escalate" || strings.HasPrefix(arg, "--on-escalate="):
+			value, next, err := readFlagValue(arg, args, i)
+			if err != nil {
+				return runParseError(err.Error(), "")
+			}
+			i = next
+			req.OnEscalate = strings.TrimSpace(value)
 		case arg == "-i" || arg == "--input" || strings.HasPrefix(arg, "-i=") || strings.HasPrefix(arg, "--input="):
 			value, next, err := readFlagValue(arg, args, i)
 			if err != nil {
@@ -242,7 +250,7 @@ func parseRunArgs(args []string, getwd func() (string, error)) (runRequest, spec
 			req.Context = value
 		case strings.HasPrefix(arg, "-"):
 			return runParseError(fmt.Sprintf("unknown flag %q", arg),
-				"Supported flags: -n, --iterations, --provider, -m/--model, -i/--input, -c/--context, -f/--force, --fg, --json, --explain-spec")
+				"Supported flags: -n, --iterations, --provider, -m/--model, --on-escalate, -i/--input, -c/--context, -f/--force, --fg, --json, --explain-spec")
 		default:
 			positional = append(positional, arg)
 		}
@@ -262,6 +270,11 @@ func parseRunArgs(args []string, getwd func() (string, error)) (runRequest, spec
 	req.Session = strings.TrimSpace(positional[1])
 	if req.SpecRaw == "" || req.Session == "" {
 		return runParseError("run requires non-empty <spec> and <session>", "")
+	}
+	if req.OnEscalate != "" {
+		if _, err := parseOnEscalateOverride(req.OnEscalate); err != nil {
+			return runParseError(fmt.Sprintf("invalid --on-escalate value %q: %v", req.OnEscalate, err), "")
+		}
 	}
 	parsedSpec, err := spec.Parse(req.SpecRaw)
 	if err != nil {
@@ -287,7 +300,7 @@ func parseRunArgs(args []string, getwd func() (string, error)) (runRequest, spec
 
 func runParseError(message, detail string) (runRequest, spec.Spec, []output.Correction, *output.ErrorResponse) {
 	errResp := output.NewError("INVALID_ARGUMENT", message, detail,
-		"ap run <spec> <session> [-n COUNT] [--provider NAME] [-m MODEL] [-i INPUT...] [-c CONTEXT] [-f] [--fg] [--explain-spec] [--json]",
+		"ap run <spec> <session> [-n COUNT] [--provider NAME] [-m MODEL] [--on-escalate HANDLER] [-i INPUT...] [-c CONTEXT] [-f] [--fg] [--explain-spec] [--json]",
 		[]string{"ap run ralph my-session", "ap run ralph:25 my-session -n 10", "ap run --explain-spec ./prompt.md my-session"})
 	return runRequest{}, nil, nil, &errResp
 }
@@ -454,6 +467,9 @@ func serializeRunRequest(req runRequest) map[string]any {
 	}
 	if req.Model != "" {
 		out["model"] = req.Model
+	}
+	if req.OnEscalate != "" {
+		out["on_escalate"] = req.OnEscalate
 	}
 	if req.Context != "" {
 		out["context"] = req.Context

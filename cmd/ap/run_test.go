@@ -253,6 +253,54 @@ func TestRun_ModelFlag(t *testing.T) {
 	}
 }
 
+func TestRun_OnEscalateFlag(t *testing.T) {
+	dir := setupStageDir(t)
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd: func() (string, error) {
+			return dir, nil
+		},
+	}
+
+	code := runWithDeps([]string{"run", "ralph", "my-session", "--on-escalate", "webhook:http://localhost:8123/hook", "--explain-spec", "--json"}, deps)
+	if code != output.ExitSuccess {
+		t.Fatalf("exit code = %d; stderr: %s", code, stderr.String())
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	request, ok := result["request"].(map[string]any)
+	if !ok {
+		t.Fatal("missing request object")
+	}
+	if request["on_escalate"] != "webhook:http://localhost:8123/hook" {
+		t.Errorf("request.on_escalate = %v, want webhook override", request["on_escalate"])
+	}
+}
+
+func TestRun_OnEscalateFlag_Invalid(t *testing.T) {
+	dir := setupStageDir(t)
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd: func() (string, error) {
+			return dir, nil
+		},
+	}
+
+	code := runWithDeps([]string{"run", "ralph", "my-session", "--on-escalate", "wat", "--json"}, deps)
+	if code != output.ExitInvalidArgs {
+		t.Fatalf("exit code = %d, want %d", code, output.ExitInvalidArgs)
+	}
+}
+
 func TestRun_JSONError(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{

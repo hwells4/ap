@@ -35,6 +35,7 @@ type StartOpts struct {
 	ProjectRoot   string
 	Provider      string
 	Model         string
+	OnEscalate    string
 	Context       string
 	InputFiles    []string
 	ParentSession string
@@ -56,6 +57,7 @@ type runRequestFile struct {
 	Env            map[string]string `json:"env,omitempty"`
 	RunDir         string            `json:"run_dir"`
 	InputFiles     []string          `json:"input_files,omitempty"`
+	OnEscalate     string            `json:"on_escalate,omitempty"`
 	Context        string            `json:"context,omitempty"`
 	Force          bool              `json:"force,omitempty"`
 	ParentSession  string            `json:"parent_session,omitempty"`
@@ -114,6 +116,7 @@ func Start(parsed spec.Spec, session string, opts StartOpts) (*Session, error) {
 		Env:            cloneStringMap(opts.Env),
 		RunDir:         layout.SessionDir,
 		InputFiles:     inputFiles,
+		OnEscalate:     strings.TrimSpace(opts.OnEscalate),
 		Context:        opts.Context,
 		Force:          opts.Force,
 		ParentSession:  strings.TrimSpace(opts.ParentSession),
