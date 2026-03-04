@@ -63,6 +63,8 @@ type Termination struct {
 	Consensus     int    `yaml:"consensus,omitempty" json:"consensus,omitempty"`
 	Max           int    `yaml:"max,omitempty" json:"max,omitempty"`
 	MinIterations int    `yaml:"min_iterations,omitempty" json:"min_iterations,omitempty"`
+	Agents        int    `yaml:"agents,omitempty" json:"agents,omitempty"`
+	Accept        string `yaml:"accept,omitempty" json:"accept,omitempty"`
 }
 
 // ParallelBlock describes a parallel provider execution block.
