@@ -209,22 +209,6 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 			"decision": iterResult.Decision,
 			"summary":  iterResult.Summary,
 		}
-		signalSummary, hasSignals := summarizeAgentSignals(iterResult)
-		if hasSignals {
-			outputVars["agent_signals"] = signalSummary
-		}
-		if len(iterResult.AgentSignals.Warnings) > 0 {
-			outputVars["signal_warnings"] = append([]string(nil), iterResult.AgentSignals.Warnings...)
-			for _, warning := range iterResult.AgentSignals.Warnings {
-				if err := ew.Append(events.NewEvent(events.TypeError, cfg.Session, cursor, map[string]any{
-					"type":      "signal.warning",
-					"iteration": i,
-					"warning":   warning,
-				})); err != nil {
-					return Result{}, fmt.Errorf("runner: emit signal warning: %w", err)
-				}
-			}
-		}
 		if _, err := state.UpdateIteration(statePath, i, outputVars, cfg.StageName); err != nil {
 			return Result{}, fmt.Errorf("runner: update iteration %d state: %w", i, err)
 		}
@@ -240,7 +224,6 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 			"decision":  iterResult.Decision,
 			"summary":   iterResult.Summary,
 			"duration":  provResult.Duration.String(),
-			"signals":   signalSummary,
 		})); err != nil {
 			return Result{}, fmt.Errorf("runner: emit iteration_complete: %w", err)
 		}
@@ -303,23 +286,6 @@ func buildEnv(cfg Config, iteration int) map[string]string {
 	env["AP_STAGE"] = cfg.StageName
 	env["AP_ITERATION"] = strconv.Itoa(iteration)
 	return env
-}
-
-func summarizeAgentSignals(iterResult result.Result) (map[string]any, bool) {
-	summary := map[string]any{}
-	if iterResult.AgentSignals.Inject != "" {
-		summary["inject"] = iterResult.AgentSignals.Inject
-	}
-	if len(iterResult.AgentSignals.Spawn) > 0 {
-		summary["spawn"] = iterResult.AgentSignals.Spawn
-	}
-	if iterResult.AgentSignals.Escalate != nil {
-		summary["escalate"] = iterResult.AgentSignals.Escalate
-	}
-	if len(summary) == 0 {
-		return map[string]any{}, false
-	}
-	return summary, true
 }
 
 // finishSession marks the session completed and emits session_complete.
