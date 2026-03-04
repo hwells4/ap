@@ -16,12 +16,13 @@ type testProvider struct {
 	validateErr error
 }
 
-func (t *testProvider) Name() string { return t.name }
+func (t *testProvider) Name() string         { return t.name }
+func (t *testProvider) DefaultModel() string { return "" }
 func (t *testProvider) Init(ctx context.Context) error {
 	return t.initErr
 }
-func (t *testProvider) Execute(ctx context.Context, req provider.ExecuteRequest) (*provider.ExecuteResult, error) {
-	return &provider.ExecuteResult{}, nil
+func (t *testProvider) Execute(ctx context.Context, req provider.Request) (provider.Result, error) {
+	return provider.Result{}, nil
 }
 func (t *testProvider) Shutdown(ctx context.Context) error { return nil }
 func (t *testProvider) Capabilities() provider.Capabilities {

@@ -1,3 +1,9 @@
+// Package provider re-exports the canonical pkg/provider types and provides
+// an enhanced Registry with validation and descriptive error messages.
+//
+// All provider type definitions live in pkg/provider. This package adds
+// type aliases so internal call sites can import one path and get both
+// the frozen contract types and the richer registry.
 package provider
 
 import (
@@ -7,7 +13,27 @@ import (
 	"strings"
 	"sync"
 
+	pkgprovider "github.com/hwells4/ap/pkg/provider"
+
 	"github.com/hwells4/ap/internal/validate"
+)
+
+// Type aliases for pkg/provider types. These are the canonical definitions;
+// internal/provider no longer defines competing interfaces or structs.
+type (
+	Provider     = pkgprovider.Provider
+	Capabilities = pkgprovider.Capabilities
+	Capability   = pkgprovider.Capability
+	Request      = pkgprovider.Request
+	Result       = pkgprovider.Result
+)
+
+// Re-export capability constants for convenience.
+const (
+	CapabilityNone      = pkgprovider.CapabilityNone
+	CapabilityStreaming  = pkgprovider.CapabilityStreaming
+	CapabilityTools     = pkgprovider.CapabilityTools
+	CapabilityVision    = pkgprovider.CapabilityVision
 )
 
 var (

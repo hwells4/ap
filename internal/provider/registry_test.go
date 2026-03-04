@@ -13,14 +13,15 @@ type stubProvider struct {
 	name string
 }
 
-func (s *stubProvider) Name() string                   { return s.name }
-func (s *stubProvider) Init(ctx context.Context) error { return nil }
-func (s *stubProvider) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult, error) {
-	return &ExecuteResult{}, nil
+func (s *stubProvider) Name() string                                          { return s.name }
+func (s *stubProvider) DefaultModel() string                                  { return "" }
+func (s *stubProvider) Init(ctx context.Context) error                        { return nil }
+func (s *stubProvider) Execute(ctx context.Context, req Request) (Result, error) {
+	return Result{}, nil
 }
-func (s *stubProvider) Shutdown(ctx context.Context) error { return nil }
-func (s *stubProvider) Capabilities() Capabilities         { return Capabilities{} }
-func (s *stubProvider) Validate() error                    { return nil }
+func (s *stubProvider) Shutdown(ctx context.Context) error  { return nil }
+func (s *stubProvider) Capabilities() Capabilities          { return Capabilities{} }
+func (s *stubProvider) Validate() error                     { return nil }
 
 func TestRegistryRegisterAndGet(t *testing.T) {
 	registry := NewRegistry()
