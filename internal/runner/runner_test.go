@@ -366,6 +366,191 @@ func splitLines(s string) []string {
 	return lines
 }
 
+func TestRun_ProviderEnvVars(t *testing.T) {
+	runDir := tempSession(t)
+
+	mp := mock.New(
+		mock.WithResponses(mock.StopResponse("done", "ok")),
+	)
+
+	cfg := Config{
+		Session:        "test-env",
+		RunDir:         runDir,
+		StageName:      "my-stage",
+		Provider:       mp,
+		Iterations:     1,
+		PromptTemplate: "work",
+	}
+
+	_, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	calls := mp.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	env := calls[0].Request.Env
+	if env["AP_AGENT"] != "1" {
+		t.Errorf("AP_AGENT = %q, want %q", env["AP_AGENT"], "1")
+	}
+	if env["AP_SESSION"] != "test-env" {
+		t.Errorf("AP_SESSION = %q, want %q", env["AP_SESSION"], "test-env")
+	}
+	if env["AP_STAGE"] != "my-stage" {
+		t.Errorf("AP_STAGE = %q, want %q", env["AP_STAGE"], "my-stage")
+	}
+	if env["AP_ITERATION"] != "1" {
+		t.Errorf("AP_ITERATION = %q, want %q", env["AP_ITERATION"], "1")
+	}
+}
+
+func TestRun_PromptResolution(t *testing.T) {
+	runDir := tempSession(t)
+
+	mp := mock.New(
+		mock.WithResponses(mock.StopResponse("done", "ok")),
+	)
+
+	cfg := Config{
+		Session:        "resolve-test",
+		RunDir:         runDir,
+		StageName:      "test-stage",
+		Provider:       mp,
+		Iterations:     1,
+		PromptTemplate: "Session=${SESSION_NAME} Iter=${ITERATION}",
+	}
+
+	_, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	calls := mp.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	prompt := calls[0].Request.Prompt
+	if prompt == "Session=${SESSION_NAME} Iter=${ITERATION}" {
+		t.Error("prompt template was not resolved")
+	}
+	// The resolved prompt should contain the session name and iteration number.
+	if !containsStr(prompt, "resolve-test") {
+		t.Errorf("prompt %q does not contain session name", prompt)
+	}
+	if !containsStr(prompt, "1") {
+		t.Errorf("prompt %q does not contain iteration number", prompt)
+	}
+}
+
+func TestRun_RunRequestPersisted(t *testing.T) {
+	runDir := tempSession(t)
+
+	mp := mock.New(
+		mock.WithResponses(mock.StopResponse("done", "ok")),
+	)
+
+	cfg := Config{
+		Session:        "persist-test",
+		RunDir:         runDir,
+		StageName:      "my-stage",
+		Provider:       mp,
+		Iterations:     5,
+		PromptTemplate: "work",
+		Model:          "test-model",
+	}
+
+	_, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	reqPath := filepath.Join(runDir, "run_request.json")
+	data, err := os.ReadFile(reqPath)
+	if err != nil {
+		t.Fatalf("run_request.json missing: %v", err)
+	}
+	var req map[string]any
+	if err := json.Unmarshal(data, &req); err != nil {
+		t.Fatalf("parse run_request.json: %v", err)
+	}
+	if req["session"] != "persist-test" {
+		t.Errorf("session = %v, want persist-test", req["session"])
+	}
+	if req["stage"] != "my-stage" {
+		t.Errorf("stage = %v, want my-stage", req["stage"])
+	}
+	if v, ok := req["iterations"].(float64); !ok || int(v) != 5 {
+		t.Errorf("iterations = %v, want 5", req["iterations"])
+	}
+}
+
+func TestRun_EventOrdering(t *testing.T) {
+	runDir := tempSession(t)
+
+	mp := mock.New(
+		mock.WithResponses(
+			mock.ContinueResponse("iter 1"),
+			mock.StopResponse("iter 2", "done"),
+		),
+	)
+
+	cfg := Config{
+		Session:        "test-ordering",
+		RunDir:         runDir,
+		StageName:      "test-stage",
+		Provider:       mp,
+		Iterations:     5,
+		PromptTemplate: "iteration ${ITERATION}",
+	}
+
+	_, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	evPath := filepath.Join(runDir, "events.jsonl")
+	data, err := os.ReadFile(evPath)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+
+	lines := splitNonEmpty(string(data))
+	// Expected: session_start, iter1_start, iter1_complete, iter2_start, iter2_complete, session_complete
+	expectedTypes := []string{
+		"session_start",
+		"iteration_start", "iteration_complete",
+		"iteration_start", "iteration_complete",
+		"session_complete",
+	}
+	if len(lines) != len(expectedTypes) {
+		t.Fatalf("event count = %d, want %d", len(lines), len(expectedTypes))
+	}
+	for i, line := range lines {
+		var ev map[string]any
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("parse event %d: %v", i, err)
+		}
+		if ev["type"] != expectedTypes[i] {
+			t.Errorf("event[%d] type = %q, want %q", i, ev["type"], expectedTypes[i])
+		}
+	}
+}
+
+func containsStr(s, sub string) bool {
+	return len(s) >= len(sub) && (s == sub || len(s) > 0 && containsSubstr(s, sub))
+}
+
+func containsSubstr(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
 // These keep the imports valid even if not all are used in every test.
 var _ provider.Provider = (*mock.Provider)(nil)
 var _ result.Source = result.SourceStatus

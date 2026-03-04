@@ -16,7 +16,10 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 
 	apcontext "github.com/hwells4/ap/internal/context"
@@ -79,6 +82,11 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	statePath := statePath(cfg.RunDir)
 	eventsPath := eventsPath(cfg.RunDir)
 	ew := events.NewWriter(eventsPath)
+
+	// Persist run request for crash recovery and auditing.
+	if err := persistRunRequest(cfg); err != nil {
+		return Result{}, fmt.Errorf("runner: persist run request: %w", err)
+	}
 
 	// Initialize session state.
 	if _, err := state.Init(statePath, cfg.Session, "stage", cfg.StageName); err != nil {
@@ -291,4 +299,23 @@ func statePath(runDir string) string {
 // eventsPath returns the events.jsonl path for a run directory.
 func eventsPath(runDir string) string {
 	return runDir + "/events.jsonl"
+}
+
+// persistRunRequest writes run_request.json to the run directory.
+func persistRunRequest(cfg Config) error {
+	if err := os.MkdirAll(cfg.RunDir, 0o755); err != nil {
+		return fmt.Errorf("create run dir: %w", err)
+	}
+	payload := map[string]any{
+		"session":    cfg.Session,
+		"stage":      cfg.StageName,
+		"provider":   cfg.Provider.Name(),
+		"model":      cfg.Model,
+		"iterations": cfg.Iterations,
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal run request: %w", err)
+	}
+	return os.WriteFile(filepath.Join(cfg.RunDir, "run_request.json"), append(data, '\n'), 0o644)
 }
