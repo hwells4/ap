@@ -360,6 +360,165 @@ func TestRun_ForegroundFlag(t *testing.T) {
 	}
 }
 
+func TestRun_ProviderFlag_Codex(t *testing.T) {
+	dir := setupStageDir(t)
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd: func() (string, error) {
+			return dir, nil
+		},
+	}
+
+	code := runWithDeps([]string{"run", "ralph", "my-session", "--provider", "codex", "--explain-spec", "--json"}, deps)
+	if code != output.ExitSuccess {
+		t.Fatalf("exit code = %d; stderr: %s", code, stderr.String())
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	request, ok := result["request"].(map[string]any)
+	if !ok {
+		t.Fatal("missing request object")
+	}
+	if request["provider"] != "codex" {
+		t.Errorf("request.provider = %v, want codex", request["provider"])
+	}
+}
+
+func TestRun_ProviderFlag_OpenAIAlias(t *testing.T) {
+	dir := setupStageDir(t)
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd: func() (string, error) {
+			return dir, nil
+		},
+	}
+
+	code := runWithDeps([]string{"run", "ralph", "my-session", "--provider", "openai", "--explain-spec", "--json"}, deps)
+	if code != output.ExitSuccess {
+		t.Fatalf("exit code = %d; stderr: %s", code, stderr.String())
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	request, ok := result["request"].(map[string]any)
+	if !ok {
+		t.Fatal("missing request object")
+	}
+	// "openai" should be normalized to "codex".
+	if request["provider"] != "codex" {
+		t.Errorf("request.provider = %v, want codex", request["provider"])
+	}
+}
+
+func TestRun_ProviderFlag_Invalid(t *testing.T) {
+	dir := setupStageDir(t)
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeHuman,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd: func() (string, error) {
+			return dir, nil
+		},
+	}
+
+	code := runWithDeps([]string{"run", "ralph", "my-session", "--provider", "gpt-x", "--fg"}, deps)
+	if code != output.ExitInvalidArgs {
+		t.Fatalf("exit code = %d, want %d; stderr: %s", code, output.ExitInvalidArgs, stderr.String())
+	}
+	if !containsSubstring(stderr.String(), "UNKNOWN_PROVIDER") {
+		t.Errorf("expected UNKNOWN_PROVIDER in stderr: %s", stderr.String())
+	}
+}
+
+func TestRun_ProviderFlag_Invalid_JSON(t *testing.T) {
+	dir := setupStageDir(t)
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd: func() (string, error) {
+			return dir, nil
+		},
+	}
+
+	code := runWithDeps([]string{"run", "ralph", "my-session", "--provider", "gpt-x", "--json"}, deps)
+	if code != output.ExitInvalidArgs {
+		t.Fatalf("exit code = %d, want %d", code, output.ExitInvalidArgs)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	errObj, ok := result["error"].(map[string]any)
+	if !ok {
+		t.Fatal("missing error object")
+	}
+	if errObj["code"] != "UNKNOWN_PROVIDER" {
+		t.Errorf("error code = %v, want UNKNOWN_PROVIDER", errObj["code"])
+	}
+	// Output layer flattens Available map: {"providers": [...]} → "available_providers" key.
+	providers, ok := errObj["available_providers"]
+	if !ok {
+		t.Fatal("missing available_providers field in error")
+	}
+	provList, ok := providers.([]any)
+	if !ok || len(provList) < 2 {
+		t.Errorf("expected at least 2 providers in available_providers, got: %v", providers)
+	}
+}
+
+func TestResolveProviderName_Precedence(t *testing.T) {
+	tests := []struct {
+		name     string
+		cli      string
+		stage    string
+		config   string
+		want     string
+	}{
+		{"cli wins over all", "codex", "claude", "claude", "codex"},
+		{"stage wins over config", "", "codex", "claude", "codex"},
+		{"config wins over default", "", "", "codex", "codex"},
+		{"default is claude", "", "", "", "claude"},
+		{"cli empty falls through", "", "codex", "", "codex"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveProviderName(tt.cli, tt.stage, tt.config)
+			if got != tt.want {
+				t.Errorf("resolveProviderName(%q, %q, %q) = %q, want %q",
+					tt.cli, tt.stage, tt.config, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateProviderName(t *testing.T) {
+	// Valid providers return nil.
+	for _, name := range []string{"claude", "codex", "anthropic", "openai"} {
+		if err := validateProviderName(name); err != nil {
+			t.Errorf("validateProviderName(%q) returned error, want nil", name)
+		}
+	}
+	// Invalid provider returns error.
+	if err := validateProviderName("gpt-x"); err == nil {
+		t.Error("validateProviderName(gpt-x) returned nil, want error")
+	}
+}
+
 // setupStageDir creates a minimal project directory with a ralph stage
 // so the spec parser can resolve stage names.
 func setupStageDir(t *testing.T) string {

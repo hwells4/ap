@@ -16,6 +16,7 @@ import (
 	"github.com/hwells4/ap/internal/stage"
 	"github.com/hwells4/ap/pkg/provider"
 	"github.com/hwells4/ap/pkg/provider/claude"
+	"github.com/hwells4/ap/pkg/provider/codex"
 )
 
 // RunRequestFile is the on-disk format for run_request.json.
@@ -236,18 +237,64 @@ func runInternalRun(args []string, deps cliDeps) int {
 	return output.ExitSuccess
 }
 
+// availableProviders is the set of known provider names for error messages.
+var availableProviders = []string{"claude", "codex"}
+
 // resolveProvider creates and registers a provider by name.
 func resolveProvider(eng *engine.Engine, name string) (provider.Provider, error) {
-	switch name {
+	normalized := provider.NormalizeName(name)
+	switch normalized {
 	case "claude":
 		cp := claude.New()
 		if err := eng.RegisterProvider("claude", cp); err != nil {
 			return nil, err
 		}
 		return cp, nil
+	case "codex":
+		cp := codex.New()
+		if err := eng.RegisterProvider("codex", cp); err != nil {
+			return nil, err
+		}
+		return cp, nil
 	default:
-		return nil, fmt.Errorf("unknown provider %q; supported: claude", name)
+		return nil, fmt.Errorf("unknown provider %q; available: %s", name, strings.Join(availableProviders, ", "))
 	}
+}
+
+// resolveProviderName implements precedence: CLI flag > stage.yaml > config.yaml > default.
+func resolveProviderName(cliFlag, stageProvider, configProvider string) string {
+	if cliFlag != "" {
+		return cliFlag
+	}
+	if stageProvider != "" {
+		return stageProvider
+	}
+	if configProvider != "" {
+		return configProvider
+	}
+	return "claude"
+}
+
+// validateProviderName checks if the provider is known and returns a structured error if not.
+func validateProviderName(name string) *output.ErrorResponse {
+	normalized := provider.NormalizeName(name)
+	for _, known := range availableProviders {
+		if normalized == known {
+			return nil
+		}
+	}
+	errResp := output.NewError(
+		"UNKNOWN_PROVIDER",
+		fmt.Sprintf("unknown provider %q", name),
+		fmt.Sprintf("Provider %q is not registered. Available providers: %s.", name, strings.Join(availableProviders, ", ")),
+		"ap run <spec> <session> --provider NAME",
+		[]string{
+			"ap run ralph my-session --provider claude",
+			"ap run ralph my-session --provider codex",
+		},
+	)
+	errResp.Error.Available = map[string]any{"providers": availableProviders}
+	return &errResp
 }
 
 func internalRunError(deps cliDeps, msg string) int {

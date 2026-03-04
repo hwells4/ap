@@ -13,6 +13,7 @@ import (
 	"github.com/hwells4/ap/internal/output"
 	"github.com/hwells4/ap/internal/spec"
 	"github.com/hwells4/ap/internal/stage"
+	"github.com/hwells4/ap/pkg/provider"
 )
 
 const version = "0.1.0"
@@ -144,6 +145,15 @@ func runRun(args []string, deps cliDeps) int {
 		return renderError(deps, output.ExitInvalidArgs, *errResp)
 	}
 	deps.corrections = append(deps.corrections, corrections...)
+
+	// Validate and normalize provider name if explicitly set.
+	if req.Provider != "" {
+		if provErr := validateProviderName(req.Provider); provErr != nil {
+			return renderError(deps, output.ExitInvalidArgs, *provErr)
+		}
+		req.Provider = provider.NormalizeName(req.Provider)
+	}
+
 	payload := map[string]any{
 		"request":     serializeRunRequest(req),
 		"parsed_spec": summarizeSpec(parsedSpec),
