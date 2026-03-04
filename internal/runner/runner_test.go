@@ -10,10 +10,7 @@ import (
 
 	"github.com/hwells4/ap/internal/events"
 	"github.com/hwells4/ap/internal/mock"
-	"github.com/hwells4/ap/internal/result"
 	"github.com/hwells4/ap/internal/state"
-	"github.com/hwells4/ap/internal/termination"
-	"github.com/hwells4/ap/pkg/provider"
 )
 
 func tempSession(t *testing.T) string {
@@ -979,8 +976,3 @@ func TestRun_EscalateSignal_EventEmitted(t *testing.T) {
 		t.Error("signal.escalate event not found in events.jsonl")
 	}
 }
-
-// These keep the imports valid even if not all are used in every test.
-var _ provider.Provider = (*mock.Provider)(nil)
-var _ result.Source = result.SourceStatus
-var _ = termination.DefaultFixedIterations
