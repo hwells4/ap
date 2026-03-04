@@ -212,6 +212,88 @@ func TestJudgment_DefaultConfig(t *testing.T) {
 	}
 }
 
+func TestJudgment_InFallback_AlwaysReturnsFalse(t *testing.T) {
+	j := NewJudgment(JudgmentConfig{
+		ConsensusRequired: 1,
+		MinIterations:     1,
+	})
+	// Force into fallback via 3 failures.
+	fj := &fakeJudge{errors: []error{
+		fmt.Errorf("fail 1"),
+		fmt.Errorf("fail 2"),
+		fmt.Errorf("fail 3"),
+	}}
+	j.ShouldStop(context.Background(), 2, result.Result{}, fj, buildSummaries(2))
+	j.ShouldStop(context.Background(), 3, result.Result{}, fj, buildSummaries(3))
+	j.ShouldStop(context.Background(), 4, result.Result{}, fj, buildSummaries(4))
+	if !j.InFallback() {
+		t.Fatal("expected fallback after 3 failures")
+	}
+
+	// Now provide a stop verdict — should still return false because in fallback.
+	fj2 := &fakeJudge{verdicts: []judge.Verdict{
+		{Decision: "stop", Confidence: 0.99, Rationale: "done"},
+	}}
+	stop, _ := j.ShouldStop(context.Background(), 5, result.Result{}, fj2, buildSummaries(5))
+	if stop {
+		t.Error("should not stop while in fallback mode")
+	}
+}
+
+func TestJudgment_ConsensusNotReached_ExhaustsIterations(t *testing.T) {
+	// Simulates that judgment can't prevent reaching max iterations:
+	// alternate stop/continue so consensus is never reached.
+	j := NewJudgment(JudgmentConfig{
+		ConsensusRequired: 3,
+		MinIterations:     1,
+	})
+	fj := &fakeJudge{verdicts: []judge.Verdict{
+		{Decision: "stop", Confidence: 0.8, Rationale: "maybe"},
+		{Decision: "stop", Confidence: 0.85, Rationale: "close"},
+		{Decision: "continue", Confidence: 0.6, Rationale: "not sure"},
+		{Decision: "stop", Confidence: 0.9, Rationale: "done"},
+		{Decision: "stop", Confidence: 0.9, Rationale: "done"},
+	}}
+
+	stopped := false
+	for i := 1; i <= 5; i++ {
+		s, _ := j.ShouldStop(context.Background(), i, result.Result{}, fj, buildSummaries(i))
+		if s {
+			stopped = true
+			break
+		}
+	}
+	if stopped {
+		t.Error("should not stop — consensus of 3 never reached (reset by continue at iter 3)")
+	}
+}
+
+func TestJudgment_ConsensusExactlyAtMinIterations(t *testing.T) {
+	// Consensus reached exactly at min_iterations boundary.
+	j := NewJudgment(JudgmentConfig{
+		ConsensusRequired: 2,
+		MinIterations:     4,
+	})
+	fj := &fakeJudge{verdicts: []judge.Verdict{
+		{Decision: "continue", Confidence: 0.5, Rationale: "warming up"},
+		{Decision: "continue", Confidence: 0.6, Rationale: "progressing"},
+		{Decision: "stop", Confidence: 0.8, Rationale: "close"},
+		{Decision: "stop", Confidence: 0.9, Rationale: "done"},
+	}}
+
+	var stoppedAt int
+	for i := 1; i <= 6; i++ {
+		s, _ := j.ShouldStop(context.Background(), i, result.Result{}, fj, buildSummaries(i))
+		if s {
+			stoppedAt = i
+			break
+		}
+	}
+	if stoppedAt != 4 {
+		t.Errorf("stopped at iteration %d, want 4", stoppedAt)
+	}
+}
+
 func buildSummaries(n int) []string {
 	summaries := make([]string, n)
 	for i := range summaries {

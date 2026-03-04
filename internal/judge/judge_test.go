@@ -265,4 +265,115 @@ func contains(s, substr string) bool {
 	return false
 }
 
+func TestJudge_ExtractJSONFromProse(t *testing.T) {
+	// Judge model wraps JSON in explanation text.
+	prov := mock.New(mock.WithResponses(mock.Response{
+		Stdout: `Based on my analysis, I think we should stop:
+{"decision":"stop","confidence":0.85,"rationale":"task is done"}
+That's my verdict.`,
+	}))
+
+	j := New(Config{Provider: prov})
+	verdict, err := j.Evaluate(context.Background(), Request{
+		Session:   "test-session",
+		Stage:     "test",
+		Iteration: 3,
+		Summaries: []string{"work"},
+	})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if verdict.Decision != "stop" {
+		t.Errorf("decision = %q, want stop", verdict.Decision)
+	}
+	if verdict.Confidence != 0.85 {
+		t.Errorf("confidence = %v, want 0.85", verdict.Confidence)
+	}
+}
+
+func TestJudge_ModelOverridePassedToProvider(t *testing.T) {
+	prov := mock.New(mock.WithResponses(mock.Response{
+		Stdout: marshalVerdict(Verdict{Decision: "continue", Confidence: 0.6, Rationale: "ok"}),
+	}))
+
+	j := New(Config{Provider: prov, Model: "haiku-custom"})
+	_, err := j.Evaluate(context.Background(), Request{
+		Session:   "test",
+		Stage:     "test",
+		Iteration: 1,
+		Summaries: []string{"stuff"},
+	})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+
+	calls := prov.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("call count = %d, want 1", len(calls))
+	}
+	if calls[0].Request.Model != "haiku-custom" {
+		t.Errorf("model = %q, want haiku-custom", calls[0].Request.Model)
+	}
+}
+
+func TestJudge_NestedJSONExtraction(t *testing.T) {
+	// JSON with nested braces (e.g. in rationale).
+	prov := mock.New(mock.WithResponses(mock.Response{
+		Stdout: `{"decision":"continue","confidence":0.7,"rationale":"agent output {was good}"}`,
+	}))
+
+	j := New(Config{Provider: prov})
+	verdict, err := j.Evaluate(context.Background(), Request{
+		Session:   "test",
+		Stage:     "test",
+		Iteration: 1,
+		Summaries: []string{"work"},
+	})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if verdict.Decision != "continue" {
+		t.Errorf("decision = %q, want continue", verdict.Decision)
+	}
+}
+
+func TestJudge_RetryOnProviderError_DoesNotRetry(t *testing.T) {
+	// Provider errors (not malformed output) should NOT retry.
+	prov := mock.New(mock.WithResponses(
+		mock.FailureResponse(fmt.Errorf("network error")),
+	))
+
+	j := New(Config{Provider: prov, MaxRetries: 3})
+	_, err := j.Evaluate(context.Background(), Request{
+		Session:   "test",
+		Stage:     "test",
+		Iteration: 1,
+		Summaries: []string{"stuff"},
+	})
+	if err == nil {
+		t.Fatal("expected error for provider failure")
+	}
+	// Should fail immediately on first provider error, not retry.
+	if prov.CallCount() != 1 {
+		t.Errorf("call count = %d, want 1 (should not retry provider errors)", prov.CallCount())
+	}
+}
+
+func TestJudge_UnbalancedBraces_ReturnsError(t *testing.T) {
+	prov := mock.New(mock.WithFallback(mock.Response{
+		Stdout: `{"decision":"stop","confidence":0.9`,
+	}))
+
+	j := New(Config{Provider: prov, MaxRetries: 1})
+	_, err := j.Evaluate(context.Background(), Request{
+		Session:   "test",
+		Stage:     "test",
+		Iteration: 1,
+		Summaries: []string{"stuff"},
+	})
+	if err == nil {
+		t.Fatal("expected error for unbalanced braces")
+	}
+}
+
 var _ provider.Provider = (*mock.Provider)(nil)
