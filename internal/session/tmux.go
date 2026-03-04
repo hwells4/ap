@@ -60,10 +60,10 @@ func (t *TmuxLauncher) Start(session string, runnerCmd []string, opts StartOptio
 	// Build tmux new-session command.
 	tmuxArgs := []string{
 		"new-session",
-		"-d",        // detached
+		"-d", // detached
 		"-s", tmuxName,
 		"-x", "200", // width
-		"-y", "50",  // height
+		"-y", "50", // height
 	}
 
 	// Set working directory if specified.

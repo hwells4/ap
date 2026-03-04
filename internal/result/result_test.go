@@ -21,6 +21,9 @@ func TestNormalizeDefaults(t *testing.T) {
 	if normalized.Artifacts.Outputs == nil || normalized.Artifacts.Paths == nil {
 		t.Fatalf("artifact slices should be initialized")
 	}
+	if normalized.AgentSignals.Spawn == nil || normalized.AgentSignals.Warnings == nil {
+		t.Fatalf("agent signal slices should be initialized")
+	}
 }
 
 func TestFromStatusConversion(t *testing.T) {
@@ -36,7 +39,10 @@ func TestFromStatusConversion(t *testing.T) {
 		},
 		Errors: []string{"boom"},
 	}
-	normalized := FromStatus(status)
+	normalized, err := FromStatus(status)
+	if err != nil {
+		t.Fatalf("FromStatus: %v", err)
+	}
 
 	if normalized.Summary != "wrapped" {
 		t.Fatalf("summary mismatch: got %q", normalized.Summary)
@@ -58,6 +64,45 @@ func TestFromStatusConversion(t *testing.T) {
 	}
 	if normalized.Artifacts.Outputs == nil || len(normalized.Artifacts.Outputs) != 0 {
 		t.Fatalf("outputs should default to empty slice")
+	}
+}
+
+func TestFromStatusParsesAgentSignals(t *testing.T) {
+	t.Parallel()
+
+	status := Status{
+		Decision: "continue",
+		Reason:   "keep going",
+		Summary:  "did work",
+		Work: WorkInfo{
+			ItemsCompleted: []string{"x"},
+			FilesTouched:   []string{"a.go"},
+		},
+		AgentSignals: json.RawMessage(`{
+      "inject": "focus auth",
+      "spawn": [{"run":"test-scanner","session":"auth-tests","context":"scan auth","n":2}],
+      "escalate": {"type":"human","reason":"need decision","options":["A","B"]},
+      "checkpoint": {"name":"cp-1"},
+      "budget": {"remaining": 10}
+    }`),
+	}
+
+	normalized, err := FromStatus(status)
+	if err != nil {
+		t.Fatalf("FromStatus: %v", err)
+	}
+
+	if normalized.AgentSignals.Inject != "focus auth" {
+		t.Fatalf("inject = %q", normalized.AgentSignals.Inject)
+	}
+	if len(normalized.AgentSignals.Spawn) != 1 {
+		t.Fatalf("spawn count = %d, want 1", len(normalized.AgentSignals.Spawn))
+	}
+	if normalized.AgentSignals.Escalate == nil {
+		t.Fatalf("expected escalate signal")
+	}
+	if len(normalized.AgentSignals.Warnings) != 2 {
+		t.Fatalf("warning count = %d, want 2", len(normalized.AgentSignals.Warnings))
 	}
 }
 
@@ -161,6 +206,30 @@ func TestNormalizeFilesMissing(t *testing.T) {
 	}
 	if !errors.Is(err, ErrResultMissing) {
 		t.Fatalf("expected ErrResultMissing, got %v", err)
+	}
+}
+
+func TestNormalizeFilesRejectsInvalidAgentSignals(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	resultPath := filepath.Join(tempDir, "result.json")
+	statusPath := filepath.Join(tempDir, "status.json")
+
+	if err := os.WriteFile(statusPath, []byte(`{
+    "decision":"continue",
+    "summary":"x",
+    "agent_signals":{"spawn":[{"run":"stage-only"}]}
+  }`), 0o644); err != nil {
+		t.Fatalf("write status.json: %v", err)
+	}
+
+	_, _, err := NormalizeFiles(resultPath, statusPath)
+	if err == nil {
+		t.Fatalf("expected invalid status signal error")
+	}
+	if !errors.Is(err, ErrStatusInvalid) {
+		t.Fatalf("expected ErrStatusInvalid, got %v", err)
 	}
 }
 

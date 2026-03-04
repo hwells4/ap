@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/hwells4/ap/internal/signals"
 )
 
 var (
@@ -31,13 +33,14 @@ const (
 
 // Result is the v3 result schema with optional legacy fields.
 type Result struct {
-	Summary   string       `json:"summary"`
-	Work      WorkInfo     `json:"work"`
-	Artifacts ArtifactInfo `json:"artifacts"`
-	Signals   SignalInfo   `json:"signals"`
-	Errors    []string     `json:"errors,omitempty"`
-	Decision  string       `json:"decision,omitempty"`
-	Reason    string       `json:"reason,omitempty"`
+	Summary      string               `json:"summary"`
+	Work         WorkInfo             `json:"work"`
+	Artifacts    ArtifactInfo         `json:"artifacts"`
+	Signals      SignalInfo           `json:"signals"`
+	AgentSignals signals.AgentSignals `json:"agent_signals"`
+	Errors       []string             `json:"errors,omitempty"`
+	Decision     string               `json:"decision,omitempty"`
+	Reason       string               `json:"reason,omitempty"`
 }
 
 // WorkInfo captures work completed by an agent.
@@ -61,11 +64,12 @@ type SignalInfo struct {
 
 // Status is the legacy v2 status.json schema.
 type Status struct {
-	Decision string   `json:"decision"`
-	Reason   string   `json:"reason"`
-	Summary  string   `json:"summary"`
-	Work     WorkInfo `json:"work"`
-	Errors   []string `json:"errors,omitempty"`
+	Decision     string          `json:"decision"`
+	Reason       string          `json:"reason"`
+	Summary      string          `json:"summary"`
+	Work         WorkInfo        `json:"work"`
+	Errors       []string        `json:"errors,omitempty"`
+	AgentSignals json.RawMessage `json:"agent_signals,omitempty"`
 }
 
 // Normalize ensures a Result uses defaults for missing fields and slices.
@@ -75,6 +79,11 @@ func Normalize(input Result) Result {
 	normalized.Work.FilesTouched = normalizeSlice(normalized.Work.FilesTouched)
 	normalized.Artifacts.Outputs = normalizeSlice(normalized.Artifacts.Outputs)
 	normalized.Artifacts.Paths = normalizeSlice(normalized.Artifacts.Paths)
+	normalized.AgentSignals.Spawn = normalizeSpawnSlice(normalized.AgentSignals.Spawn)
+	normalized.AgentSignals.Warnings = normalizeSlice(normalized.AgentSignals.Warnings)
+	if normalized.AgentSignals.Escalate != nil {
+		normalized.AgentSignals.Escalate.Options = normalizeSlice(normalized.AgentSignals.Escalate.Options)
+	}
 
 	normalized.Signals.Risk = strings.TrimSpace(normalized.Signals.Risk)
 	if normalized.Signals.Risk == "" {
@@ -84,13 +93,19 @@ func Normalize(input Result) Result {
 }
 
 // FromStatus converts a legacy status.json payload into a normalized Result.
-func FromStatus(status Status) Result {
+func FromStatus(status Status) (Result, error) {
+	agentSignals, err := signals.Parse(status.AgentSignals)
+	if err != nil {
+		return Result{}, fmt.Errorf("%w: %v", ErrStatusInvalid, err)
+	}
+
 	result := Result{
-		Summary:  status.Summary,
-		Work:     status.Work,
-		Errors:   status.Errors,
-		Decision: status.Decision,
-		Reason:   status.Reason,
+		Summary:      status.Summary,
+		Work:         status.Work,
+		Errors:       status.Errors,
+		Decision:     status.Decision,
+		Reason:       status.Reason,
+		AgentSignals: agentSignals,
 		Artifacts: ArtifactInfo{
 			Outputs: []string{},
 			Paths:   []string{},
@@ -101,7 +116,7 @@ func FromStatus(status Status) Result {
 			Notes:            status.Reason,
 		},
 	}
-	return Normalize(result)
+	return Normalize(result), nil
 }
 
 // Load resolves a normalized Result from result.json or status.json, preferring result.json.
@@ -127,7 +142,11 @@ func Load(resultPath, statusPath string) (Result, Source, error) {
 		}
 		return Result{}, SourceStatus, fmt.Errorf("read status: %w", err)
 	}
-	return FromStatus(status), SourceStatus, nil
+	normalized, convErr := FromStatus(status)
+	if convErr != nil {
+		return Result{}, SourceStatus, fmt.Errorf("read status: %w", convErr)
+	}
+	return normalized, SourceStatus, nil
 }
 
 // NormalizeFiles loads, normalizes, and writes result.json if a path is supplied.
@@ -191,6 +210,13 @@ func readStatusFile(path string) (Status, error) {
 func normalizeSlice(values []string) []string {
 	if values == nil {
 		return []string{}
+	}
+	return values
+}
+
+func normalizeSpawnSlice(values []signals.SpawnSignal) []signals.SpawnSignal {
+	if values == nil {
+		return []signals.SpawnSignal{}
 	}
 	return values
 }
