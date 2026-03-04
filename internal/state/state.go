@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/hwells4/ap/internal/fsutil"
 )
 
 // State represents the session lifecycle state.
@@ -94,7 +96,7 @@ func Init(path, session, kind, pipeline string) (*SessionState, error) {
 		return nil, ErrMissingPath
 	}
 
-	if fileExists(path) {
+	if fsutil.FileExists(path) {
 		return Load(path)
 	}
 
@@ -347,9 +349,4 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("rename temp state: %w", err)
 	}
 	return nil
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }

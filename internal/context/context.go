@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/hwells4/ap/internal/fsutil"
 )
 
 const (
@@ -114,9 +116,9 @@ func GenerateContext(session string, iteration int, stageConfig StageConfig, run
 	}
 
 	progressFile := filepath.Join(stageDir, "progress.md")
-	if !fileExists(progressFile) {
+	if !fsutil.FileExists(progressFile) {
 		sessionProgress := filepath.Join(runDir, fmt.Sprintf("progress-%s.md", session))
-		if fileExists(sessionProgress) {
+		if fsutil.FileExists(sessionProgress) {
 			progressFile = sessionProgress
 		}
 	}
@@ -193,7 +195,7 @@ func CalculateRemainingSeconds(runDir string, stageConfig StageConfig) (int, err
 	}
 
 	statePath := filepath.Join(runDir, "state.json")
-	if !fileExists(statePath) {
+	if !fsutil.FileExists(statePath) {
 		return maxRuntime, nil
 	}
 
@@ -260,7 +262,7 @@ func BuildInputs(runDir string, stageConfig StageConfig, iteration int) (Inputs,
 		stageDir := filepath.Join(runDir, fmt.Sprintf(stageDirFormat, stageIndex(stageConfig), stageIdentifier(stageConfig)))
 		for i := 1; i < iteration; i++ {
 			output := filepath.Join(stageDir, "iterations", fmt.Sprintf(iterationDirFormat, i), "output.md")
-			if fileExists(output) {
+			if fsutil.FileExists(output) {
 				inputs.FromPreviousIterations = append(inputs.FromPreviousIterations, output)
 			}
 		}
@@ -269,7 +271,7 @@ func BuildInputs(runDir string, stageConfig StageConfig, iteration int) (Inputs,
 	planFile := filepath.Join(runDir, "plan.json")
 	if stageConfig.ParallelScope != nil && stageConfig.ParallelScope.PipelineRoot != "" {
 		pipelinePlan := filepath.Join(stageConfig.ParallelScope.PipelineRoot, "plan.json")
-		if fileExists(pipelinePlan) {
+		if fsutil.FileExists(pipelinePlan) {
 			planFile = pipelinePlan
 		}
 	}
@@ -358,7 +360,7 @@ func listStageOutputs(stageDir string) []string {
 	var outputs []string
 	for _, name := range names {
 		output := filepath.Join(iterDir, name, "output.md")
-		if fileExists(output) {
+		if fsutil.FileExists(output) {
 			outputs = append(outputs, output)
 		}
 	}
@@ -383,14 +385,14 @@ func latestStageOutput(stageDir string) string {
 	}
 	latest := names[len(names)-1]
 	output := filepath.Join(iterDir, latest, "output.md")
-	if fileExists(output) {
+	if fsutil.FileExists(output) {
 		return output
 	}
 	return ""
 }
 
 func loadPlanInputs(planFile string) []string {
-	if !fileExists(planFile) {
+	if !fsutil.FileExists(planFile) {
 		return []string{}
 	}
 	data, err := os.ReadFile(planFile)
@@ -602,7 +604,7 @@ func resolveManifestPath(stageConfig StageConfig, runDir, stageName, blockName s
 		manifestPath = stageConfig.ParallelBlocks[keys[0]].ManifestPath
 	}
 
-	if manifestPath != "" && fileExists(manifestPath) {
+	if manifestPath != "" && fsutil.FileExists(manifestPath) {
 		return manifestPath
 	}
 
@@ -628,7 +630,7 @@ func findManifestForStage(root, stageName string) string {
 	sort.Strings(matches)
 	for _, dir := range matches {
 		manifestPath := filepath.Join(dir, "manifest.json")
-		if !fileExists(manifestPath) {
+		if !fsutil.FileExists(manifestPath) {
 			continue
 		}
 		if manifestHasStage(manifestPath, stageName) {
@@ -658,7 +660,7 @@ func manifestHasStage(manifestPath, stageName string) bool {
 }
 
 func readPipelineName(statePath string) string {
-	if !fileExists(statePath) {
+	if !fsutil.FileExists(statePath) {
 		return ""
 	}
 	data, err := os.ReadFile(statePath)
@@ -676,11 +678,6 @@ func readPipelineName(statePath string) string {
 		return state.Pipeline
 	}
 	return state.Type
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }
 
 func containsString(values []string, value string) bool {

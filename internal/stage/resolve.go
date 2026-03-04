@@ -4,10 +4,14 @@ package stage
 import (
 	"bufio"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/hwells4/ap/internal/fsutil"
 )
 
 // Definition describes a resolved stage configuration.
@@ -16,6 +20,31 @@ type Definition struct {
 	Dir        string
 	ConfigPath string
 	PromptPath string
+
+	embeddedFS         fs.FS
+	embeddedConfigPath string
+	embeddedPromptPath string
+}
+
+// IsEmbedded reports whether this definition is backed by an embedded filesystem.
+func (d Definition) IsEmbedded() bool {
+	return d.embeddedFS != nil
+}
+
+// ReadConfig loads stage.yaml content from filesystem or embedded assets.
+func (d Definition) ReadConfig() ([]byte, error) {
+	if d.embeddedFS != nil {
+		return fs.ReadFile(d.embeddedFS, d.embeddedConfigPath)
+	}
+	return os.ReadFile(d.ConfigPath)
+}
+
+// ReadPrompt loads prompt content from filesystem or embedded assets.
+func (d Definition) ReadPrompt() ([]byte, error) {
+	if d.embeddedFS != nil {
+		return fs.ReadFile(d.embeddedFS, d.embeddedPromptPath)
+	}
+	return os.ReadFile(d.PromptPath)
 }
 
 // ResolveOptions defines search roots for stage resolution.
@@ -55,15 +84,21 @@ func ResolveStage(name string, opts ResolveOptions) (Definition, error) {
 	}
 
 	for _, candidate := range candidates {
-		if fileExists(candidate) {
+		if fsutil.FileExists(candidate) {
 			return definitionFromPath(name, candidate)
 		}
 	}
 
-	if opts.BuiltinDefinitions != nil {
-		if def, ok := opts.BuiltinDefinitions[name]; ok {
-			return def, nil
+	builtinDefinitions := opts.BuiltinDefinitions
+	if builtinDefinitions == nil {
+		loaded, err := LoadBuiltinDefinitions()
+		if err != nil {
+			return Definition{}, fmt.Errorf("load built-in stages: %w", err)
 		}
+		builtinDefinitions = loaded
+	}
+	if def, ok := builtinDefinitions[name]; ok {
+		return def, nil
 	}
 
 	if len(candidates) == 0 {
@@ -104,7 +139,7 @@ func resolvePromptPath(stageDir, configPath, stageName string) (string, error) {
 	candidates = append(candidates, filepath.Join(stageDir, "prompt.md"))
 
 	for _, candidate := range candidates {
-		if fileExists(candidate) {
+		if fsutil.FileExists(candidate) {
 			return candidate, nil
 		}
 	}
@@ -119,7 +154,11 @@ func readPromptField(path string) (string, error) {
 	}
 	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
+	return readPromptFieldReader(file)
+}
+
+func readPromptFieldReader(reader io.Reader) (string, error) {
+	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
 		line := scanner.Text()
 		trimmed := strings.TrimSpace(line)
@@ -182,9 +221,4 @@ func unquoteSingle(value string) string {
 	}
 	inner := value[1 : len(value)-1]
 	return strings.ReplaceAll(inner, "''", "'")
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }

@@ -1,6 +1,7 @@
 package stage
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,6 +106,86 @@ func TestResolveStageNotFoundListsPaths(t *testing.T) {
 	}
 }
 
+func TestResolveStageFallsBackToEmbeddedBuiltin(t *testing.T) {
+	builtins, err := LoadBuiltinDefinitions()
+	if err != nil {
+		t.Fatalf("LoadBuiltinDefinitions: %v", err)
+	}
+
+	def, err := ResolveStage("ralph", ResolveOptions{BuiltinDefinitions: builtins})
+	if err != nil {
+		t.Fatalf("ResolveStage: %v", err)
+	}
+
+	if !def.IsEmbedded() {
+		t.Fatalf("expected embedded definition for ralph")
+	}
+	if !strings.HasPrefix(def.ConfigPath, embeddedPathPrefix) {
+		t.Fatalf("expected embedded config path, got %q", def.ConfigPath)
+	}
+
+	prompt, err := def.ReadPrompt()
+	if err != nil {
+		t.Fatalf("ReadPrompt: %v", err)
+	}
+	if len(bytes.TrimSpace(prompt)) == 0 {
+		t.Fatal("expected non-empty embedded prompt")
+	}
+}
+
+func TestResolveStageUsesEmbeddedBuiltinsByDefault(t *testing.T) {
+	def, err := ResolveStage("ralph", ResolveOptions{})
+	if err != nil {
+		t.Fatalf("ResolveStage: %v", err)
+	}
+	if !def.IsEmbedded() {
+		t.Fatalf("expected embedded definition when no local stage is provided")
+	}
+}
+
+func TestResolveStageLocalOverridesBuiltin(t *testing.T) {
+	tempDir := t.TempDir()
+	projectRoot := filepath.Join(tempDir, "project")
+	projectStages := filepath.Join(projectRoot, ".claude", "stages")
+
+	localStageDir := writeStage(t, projectStages, "ralph", "", "prompt.md")
+
+	builtins, err := LoadBuiltinDefinitions()
+	if err != nil {
+		t.Fatalf("LoadBuiltinDefinitions: %v", err)
+	}
+
+	def, err := ResolveStage("ralph", ResolveOptions{
+		ProjectRoot:        projectRoot,
+		BuiltinDefinitions: builtins,
+	})
+	if err != nil {
+		t.Fatalf("ResolveStage: %v", err)
+	}
+
+	if def.IsEmbedded() {
+		t.Fatalf("expected local stage to override embedded builtin")
+	}
+
+	wantConfig := filepath.Join(localStageDir, "stage.yaml")
+	if def.ConfigPath != wantConfig {
+		t.Fatalf("ConfigPath mismatch: got %q want %q", def.ConfigPath, wantConfig)
+	}
+}
+
+func TestBuiltinStageNames(t *testing.T) {
+	names, err := BuiltinStageNames()
+	if err != nil {
+		t.Fatalf("BuiltinStageNames: %v", err)
+	}
+	if len(names) == 0 {
+		t.Fatal("expected built-in stage names")
+	}
+	if !contains(names, "ralph") {
+		t.Fatalf("expected built-ins to contain ralph, got %v", names)
+	}
+}
+
 func writeStage(t *testing.T, stagesRoot, name, promptField, promptFile string) string {
 	t.Helper()
 
@@ -142,4 +223,13 @@ func writeFile(t *testing.T, path string) {
 	if err := os.WriteFile(path, []byte("prompt"), 0o644); err != nil {
 		t.Fatalf("write prompt file: %v", err)
 	}
+}
+
+func contains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }

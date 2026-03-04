@@ -139,7 +139,7 @@ The `work/gorewrite` branch has **10 production-ready packages**:
 
 **New packages** (not in original codebase): `internal/runner` (iteration loop orchestrator), `internal/signals` (~250 lines, agent signal parsing + dispatch + handler chain), `internal/session` (session launcher — delegates to Launcher for process creation, used by both CLI and spawn), `internal/spec` (unified spec parser → typed AST).
 
-**`cmd/agent-pipelines/main.go`**: Empty. This is where it all starts.
+**`cmd/ap/main.go`**: Empty. This is where it all starts.
 
 ---
 
@@ -167,9 +167,9 @@ The code reviews found structural defects that will block M0. Fix these first.
 
 ### P4. Rename Entry Point
 
-**Problem:** `cmd/agent-pipelines/main.go` will produce a binary called `agent-pipelines`, not `ap`. Go convention derives binary name from directory name.
+**Problem:** A legacy entrypoint directory name would produce a binary called `agent-pipelines`, not `ap`. Go convention derives binary name from directory name.
 
-**Fix:** Rename `cmd/agent-pipelines/` → `cmd/ap/`.
+**Fix:** Keep the entrypoint under `cmd/ap/`.
 
 ### P5. Extract Shared Utility
 
@@ -1430,7 +1430,7 @@ Only use signals when genuinely useful. Most iterations just need `decision` and
 - [ ] P1: Unify Provider interface (delete `internal/provider` types, use `pkg/provider`)
 - [ ] P2: Fix Claude provider to use `internal/exec.Run()`
 - [ ] P3: Add `gopkg.in/yaml.v3` to go.mod
-- [ ] P4: Rename `cmd/agent-pipelines/` → `cmd/ap/`
+- [ ] P4: Keep entrypoint under `cmd/ap/`
 - [ ] P5: Extract `fileExists` to `internal/fsutil`
 - [ ] P6: Implement `internal/mock` (MockProvider with canned responses)
 - [ ] Freeze the `Provider` interface — this is the contract all agents build against

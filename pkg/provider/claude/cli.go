@@ -1,16 +1,15 @@
 package claude
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
+	osexec "os/exec"
 	"sort"
 	"strings"
 	"time"
 
+	internalexec "github.com/hwells4/ap/internal/exec"
 	"github.com/hwells4/ap/internal/validate"
 	"github.com/hwells4/ap/pkg/provider"
 )
@@ -99,7 +98,7 @@ func (c *CLI) Init(ctx context.Context) error {
 	if binary == "" {
 		binary = DefaultBinary
 	}
-	if _, err := exec.LookPath(binary); err != nil {
+	if _, err := osexec.LookPath(binary); err != nil {
 		return fmt.Errorf("claude binary not found: %w", err)
 	}
 	c.initialized = true
@@ -170,7 +169,7 @@ func (c *CLI) Execute(ctx context.Context, req provider.Request) (provider.Resul
 		args = append(args, "--dangerously-skip-permissions")
 	}
 
-	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd := internalexec.Command(ctx, binary, args...)
 	if req.WorkDir != "" {
 		cmd.Dir = req.WorkDir
 	}
@@ -179,23 +178,30 @@ func (c *CLI) Execute(ctx context.Context, req provider.Request) (provider.Resul
 	}
 	cmd.Stdin = strings.NewReader(req.Prompt)
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
 	started := time.Now()
-	err := cmd.Run()
+	execResult, err := internalexec.Run(ctx, cmd, internalexec.DefaultOptions())
 	finished := time.Now()
 
+	stdout := ""
+	stderr := ""
+	exitCode := -1
+	duration := finished.Sub(started)
+	if execResult != nil {
+		stdout = string(execResult.Stdout)
+		stderr = string(execResult.Stderr)
+		exitCode = execResult.ExitCode
+		duration = execResult.Duration
+	}
+
 	result := provider.Result{
-		Output:     stdout.String(), // Legacy compatibility
-		Stdout:     stdout.String(),
-		Stderr:     stderr.String(),
-		ExitCode:   exitCode(err),
+		Output:     stdout, // Legacy compatibility
+		Stdout:     stdout,
+		Stderr:     stderr,
+		ExitCode:   exitCode,
 		Model:      model,
 		StartedAt:  started,
 		FinishedAt: finished,
-		Duration:   finished.Sub(started),
+		Duration:   duration,
 	}
 	if err != nil {
 		return result, err
@@ -214,17 +220,6 @@ func normalizeModel(model string) string {
 	default:
 		return model
 	}
-}
-
-func exitCode(err error) int {
-	if err == nil {
-		return 0
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return exitErr.ExitCode()
-	}
-	return -1
 }
 
 func formatEnv(env map[string]string) []string {
