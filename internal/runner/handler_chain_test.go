@@ -97,3 +97,26 @@ func TestRun_EscalateHandlerChain_MixedSuccessAndFailure(t *testing.T) {
 		t.Fatalf("stdout fallback output missing escalate payload: %q", stdout.String())
 	}
 }
+
+func TestHandlersWithStdoutFallback_AlwaysTerminalStdout(t *testing.T) {
+	handlers := []config.SignalHandler{
+		{Type: "stdout"},
+		{Type: "webhook", URL: "https://example.com/hook"},
+		{Type: "stdout"},
+		{Type: "exec", Argv: []string{"echo", "hi"}},
+	}
+
+	chain := handlersWithStdoutFallback(handlers)
+	if len(chain) != 3 {
+		t.Fatalf("len(chain) = %d, want 3", len(chain))
+	}
+	if chain[0].Type != "webhook" {
+		t.Fatalf("chain[0].Type = %q, want webhook", chain[0].Type)
+	}
+	if chain[1].Type != "exec" {
+		t.Fatalf("chain[1].Type = %q, want exec", chain[1].Type)
+	}
+	if chain[2].Type != "stdout" {
+		t.Fatalf("chain[2].Type = %q, want stdout", chain[2].Type)
+	}
+}

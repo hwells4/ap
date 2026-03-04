@@ -77,6 +77,8 @@ type SessionState struct {
 	Error              *string          `json:"error"`
 	ErrorType          *string          `json:"error_type"`
 	Escalation         *EscalationInfo  `json:"escalation,omitempty"`
+	ParentSession      string           `json:"parent_session,omitempty"`
+	ChildSessions      []string         `json:"child_sessions,omitempty"`
 }
 
 // Transition attempts a state change, returning error if invalid.
@@ -329,6 +331,19 @@ func (s *SessionState) MarkFailed(errType, errMessage string) error {
 		s.ErrorType = &etype
 	}
 	return nil
+}
+
+// AddChildSession appends a child session name if not already present.
+func (s *SessionState) AddChildSession(child string) {
+	if s == nil || child == "" {
+		return
+	}
+	for _, existing := range s.ChildSessions {
+		if existing == child {
+			return
+		}
+	}
+	s.ChildSessions = append(s.ChildSessions, child)
 }
 
 func newSessionState(session, kind, pipeline string, startedAt time.Time) *SessionState {

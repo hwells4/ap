@@ -81,6 +81,12 @@ func renderStatusHuman(s *state.SessionState) string {
 	if s.Error != nil {
 		b.WriteString(fmt.Sprintf("Error:      %s\n", *s.Error))
 	}
+	if s.ParentSession != "" {
+		b.WriteString(fmt.Sprintf("Parent:     %s\n", s.ParentSession))
+	}
+	if len(s.ChildSessions) > 0 {
+		b.WriteString(fmt.Sprintf("Children:   %s\n", strings.Join(s.ChildSessions, ", ")))
+	}
 	return b.String()
 }
 
