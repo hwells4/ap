@@ -92,3 +92,23 @@ func TestParseUnknownSignal(t *testing.T) {
 		t.Fatalf("error = %q", got)
 	}
 }
+
+func TestParseInvalidTopLevelType(t *testing.T) {
+	_, err := Parse(json.RawMessage(`"bad"`))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got := err.Error(); got != "signals: agent_signals: must be a JSON object" {
+		t.Fatalf("error = %q", got)
+	}
+}
+
+func TestParseInvalidSpawnUnknownField(t *testing.T) {
+	_, err := Parse(json.RawMessage(`{"spawn":[{"run":"x","session":"y","extra":1}]}`))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got := err.Error(); got != "signals: agent_signals.spawn[0].extra: unknown field" {
+		t.Fatalf("error = %q", got)
+	}
+}
