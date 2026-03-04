@@ -198,3 +198,38 @@ func TestMarkFailed(t *testing.T) {
 		t.Fatalf("error_type mismatch: %v", state.ErrorType)
 	}
 }
+
+func TestMarkPausedWithEscalation(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "state.json")
+	if _, err := Init(path, "session-5", "loop", ""); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	if _, err := MarkPaused(path, &EscalationInfo{
+		Type:    "human",
+		Reason:  "need choice",
+		Options: []string{"A", "B"},
+	}); err != nil {
+		t.Fatalf("mark paused: %v", err)
+	}
+
+	snapshot, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if snapshot.Status != StatePaused {
+		t.Fatalf("status mismatch: %q", snapshot.Status)
+	}
+	if snapshot.Escalation == nil {
+		t.Fatalf("expected escalation info, got nil")
+	}
+	if snapshot.Escalation.Reason != "need choice" {
+		t.Fatalf("escalation reason mismatch: %q", snapshot.Escalation.Reason)
+	}
+	if len(snapshot.Escalation.Options) != 2 || snapshot.Escalation.Options[0] != "A" || snapshot.Escalation.Options[1] != "B" {
+		t.Fatalf("escalation options mismatch: %#v", snapshot.Escalation.Options)
+	}
+}
