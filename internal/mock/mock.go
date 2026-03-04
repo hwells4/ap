@@ -363,6 +363,37 @@ func FailureResponse(err error) Response {
 	}
 }
 
+// EscalateResponse returns a Response with an escalate signal.
+// The agent's decision field is overridden by the escalation.
+func EscalateResponse(decision, summary, escalateType, reason string, options []string) Response {
+	if options == nil {
+		options = []string{}
+	}
+	statusJSON := map[string]any{
+		"decision": decision,
+		"summary":  summary,
+		"reason":   "",
+		"work": map[string]any{
+			"items_completed": []string{},
+			"files_touched":   []string{},
+		},
+		"errors": []string{},
+		"agent_signals": map[string]any{
+			"escalate": map[string]any{
+				"type":    escalateType,
+				"reason":  reason,
+				"options": options,
+			},
+		},
+	}
+	data, _ := json.MarshalIndent(statusJSON, "", "  ")
+	return Response{
+		Decision:   decision,
+		Summary:    summary,
+		StatusJSON: string(data),
+	}
+}
+
 // NoStatusResponse returns a Response where no status.json is written.
 func NoStatusResponse() Response {
 	writeStatus := false

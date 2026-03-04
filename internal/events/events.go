@@ -31,6 +31,8 @@ const (
 	TypeIterationFailed = "iteration.failed"
 	// TypeError marks an error event.
 	TypeError = "error"
+	// TypeSignalEscalate marks an escalation signal from the agent.
+	TypeSignalEscalate = "signal.escalate"
 )
 
 var (

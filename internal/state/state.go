@@ -52,6 +52,13 @@ type StageState struct {
 	CompletedAt *string `json:"completed_at"`
 }
 
+// EscalationInfo captures the details of an escalation signal.
+type EscalationInfo struct {
+	Type    string   `json:"type"`
+	Reason  string   `json:"reason"`
+	Options []string `json:"options"`
+}
+
 // SessionState matches the state.json schema from the PRD.
 type SessionState struct {
 	Session            string           `json:"session"`
@@ -69,6 +76,7 @@ type SessionState struct {
 	EventOffset        int              `json:"event_offset"`
 	Error              *string          `json:"error"`
 	ErrorType          *string          `json:"error_type"`
+	Escalation         *EscalationInfo  `json:"escalation,omitempty"`
 }
 
 // Transition attempts a state change, returning error if invalid.
@@ -197,6 +205,13 @@ func MarkCompleted(path string) (*SessionState, error) {
 	})
 }
 
+// MarkPaused transitions the session to paused with optional escalation info.
+func MarkPaused(path string, escalation *EscalationInfo) (*SessionState, error) {
+	return Update(path, func(state *SessionState) error {
+		return state.MarkPaused(escalation)
+	})
+}
+
 // MarkFailed transitions the session to failed with error details.
 func MarkFailed(path, errType, errMessage string) (*SessionState, error) {
 	return Update(path, func(state *SessionState) error {
@@ -272,6 +287,28 @@ func (s *SessionState) MarkCompleted(completedAt time.Time) error {
 	ts := completedAt.UTC().Format(time.RFC3339)
 	s.CompletedAt = &ts
 	s.IterationStarted = nil
+	return nil
+}
+
+// MarkPaused marks the session as paused with optional escalation info.
+func (s *SessionState) MarkPaused(escalation *EscalationInfo) error {
+	if s == nil {
+		return errors.New("state is nil")
+	}
+	if err := s.Transition(StatePaused); err != nil {
+		return err
+	}
+	if escalation != nil {
+		opts := escalation.Options
+		if opts == nil {
+			opts = []string{}
+		}
+		s.Escalation = &EscalationInfo{
+			Type:    escalation.Type,
+			Reason:  escalation.Reason,
+			Options: opts,
+		}
+	}
 	return nil
 }
 

@@ -26,6 +26,7 @@ import (
 	"github.com/hwells4/ap/internal/events"
 	"github.com/hwells4/ap/internal/resolve"
 	"github.com/hwells4/ap/internal/result"
+	"github.com/hwells4/ap/internal/session"
 	"github.com/hwells4/ap/internal/state"
 	"github.com/hwells4/ap/internal/termination"
 	"github.com/hwells4/ap/pkg/provider"
@@ -60,6 +61,23 @@ type Config struct {
 
 	// Env contains additional environment variables for the provider.
 	Env map[string]string
+
+	// Launcher is used for spawn signal child-session starts.
+	Launcher session.Launcher
+
+	// ExecutablePath overrides the binary used to launch child sessions.
+	ExecutablePath string
+
+	// SpawnMaxChildren limits successful child spawns per parent session.
+	// Zero or negative uses the default (10).
+	SpawnMaxChildren int
+
+	// SpawnMaxDepth limits parent->child nesting depth. Zero or negative uses
+	// the default (3).
+	SpawnMaxDepth int
+
+	// SpawnDepth is the current nesting depth for this session (root = 0).
+	SpawnDepth int
 }
 
 // Result captures the outcome of a run.
@@ -107,6 +125,7 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 
 	var lastResult result.Result
 	completed := 0
+	spawnedChildren := 0
 
 	for i := 1; i <= fixed.Target(); i++ {
 		// Check context before starting iteration.
@@ -228,7 +247,34 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 			return Result{}, fmt.Errorf("runner: emit iteration_complete: %w", err)
 		}
 
+		var spawnErr error
+		spawnedChildren, spawnErr = processSpawnSignals(cfg, ew, i, iterResult.AgentSignals.Spawn, spawnedChildren)
+		if spawnErr != nil {
+			return Result{}, fmt.Errorf("runner: process spawn signals: %w", spawnErr)
+		}
+
 		completed = i
+
+		// Escalate signal — always pauses, overrides agent decision.
+		if iterResult.AgentSignals.Escalate != nil {
+			esc := iterResult.AgentSignals.Escalate
+			_ = ew.Append(events.NewEvent(events.TypeSignalEscalate, cfg.Session, cursor, map[string]any{
+				"iteration": i,
+				"type":      esc.Type,
+				"reason":    esc.Reason,
+				"options":   esc.Options,
+			}))
+			_, _ = state.MarkPaused(statePath, &state.EscalationInfo{
+				Type:    esc.Type,
+				Reason:  esc.Reason,
+				Options: esc.Options,
+			})
+			return Result{
+				Iterations: completed,
+				Status:     state.StatePaused,
+				Reason:     "escalation: " + esc.Reason,
+			}, nil
+		}
 
 		// Evaluate termination.
 		shouldStop, reason := fixed.ShouldStop(i, lastResult)
