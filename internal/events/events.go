@@ -43,6 +43,8 @@ const (
 	TypeSignalSpawnFailed = "signal.spawn.failed"
 	// TypeSignalHandlerError marks a non-fatal signal handler failure.
 	TypeSignalHandlerError = "signal.handler.error"
+	// TypeIterationRetried marks an iteration retry attempt after failure.
+	TypeIterationRetried = "iteration.retried"
 	// TypeJudgeVerdict marks a judgment termination evaluation result.
 	TypeJudgeVerdict = "judge.verdict"
 	// TypeJudgeFallback marks that the judge has entered fallback mode.

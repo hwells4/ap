@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hwells4/ap/internal/compile"
 	"github.com/hwells4/ap/internal/config"
 	apcontext "github.com/hwells4/ap/internal/context"
 	"github.com/hwells4/ap/internal/events"
@@ -47,6 +48,10 @@ type Config struct {
 
 	// StageName is the stage identifier.
 	StageName string
+
+	// Pipeline is an optional multi-stage pipeline plan.
+	// When set with nodes, it takes precedence over StageName/Iterations.
+	Pipeline *compile.Pipeline
 
 	// Provider executes each iteration.
 	Provider provider.Provider
@@ -121,6 +126,18 @@ type Config struct {
 	// ParentSession is the name of the parent session that spawned this one.
 	// Empty for root sessions.
 	ParentSession string
+
+	// RetryMaxAttempts is the maximum number of attempts per iteration.
+	// 1 means no retry (default). Values > 1 enable retry with backoff.
+	RetryMaxAttempts int
+
+	// RetryBackoff is the initial backoff duration between retries.
+	// Each subsequent retry doubles the wait. Zero uses default (5s).
+	RetryBackoff time.Duration
+
+	// RetryOnExhausted controls behavior when all retries are exhausted.
+	// "abort" (default) fails the session. "pause" pauses for investigation.
+	RetryOnExhausted string
 }
 
 // Result captures the outcome of a run.
@@ -140,6 +157,10 @@ type Result struct {
 
 // Run executes the iteration loop for a single stage in foreground mode.
 func Run(ctx context.Context, cfg Config) (Result, error) {
+	if cfg.Pipeline != nil && len(cfg.Pipeline.Nodes) > 0 {
+		return runPipeline(ctx, cfg)
+	}
+
 	statePath := statePath(cfg.RunDir)
 	eventsPath := eventsPath(cfg.RunDir)
 	ew := events.NewWriter(eventsPath)
@@ -260,38 +281,83 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 			ResultPath: resultFilePath,
 		}
 
-		// Execute provider.
-		provResult, provErr := cfg.Provider.Execute(ctx, req)
+		// Execute provider with retry.
+		maxAttempts := retryMaxAttempts(cfg)
+		backoff := retryBackoff(cfg)
+		var provResult provider.Result
+		var provErr error
+		var iterResult result.Result
+
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			provResult, provErr = cfg.Provider.Execute(ctx, req)
+			if provErr == nil {
+				// Provider succeeded — try to load result.
+				var loadErr error
+				iterResult, _, loadErr = result.Load(resultFilePath, statusFilePath)
+				if loadErr == nil {
+					break // success
+				}
+				provErr = fmt.Errorf("result load: %w", loadErr)
+			}
+
+			// On last attempt, don't retry.
+			if attempt >= maxAttempts {
+				break
+			}
+
+			// Emit retry event.
+			_ = ew.Append(events.NewEvent(events.TypeIterationRetried, cfg.Session, cursor, map[string]any{
+				"iteration":    i,
+				"attempt":      attempt,
+				"max_attempts": maxAttempts,
+				"error":        provErr.Error(),
+				"backoff_ms":   backoff.Milliseconds(),
+			}))
+
+			// Wait with exponential backoff, respecting context cancellation.
+			select {
+			case <-ctx.Done():
+				provErr = ctx.Err()
+				break
+			case <-time.After(backoff):
+			}
+			if ctx.Err() != nil {
+				provErr = ctx.Err()
+				break
+			}
+			backoff *= 2
+		}
+
 		if provErr != nil {
-			// Provider failure: emit iteration.failed and mark session failed.
+			// All attempts exhausted or context canceled.
 			_ = ew.Append(events.NewEvent(events.TypeIterationFailed, cfg.Session, cursor, map[string]any{
 				"iteration": i,
 				"error":     provErr.Error(),
 				"exit_code": provResult.ExitCode,
+				"attempts":  retryMaxAttempts(cfg),
 			}))
 			completed = i
+
+			// Check on_exhausted policy.
+			if strings.ToLower(strings.TrimSpace(cfg.RetryOnExhausted)) == "pause" {
+				if _, err := state.MarkPaused(statePath, &state.EscalationInfo{
+					Type:   "retry_exhausted",
+					Reason: fmt.Sprintf("retry exhausted after %d attempts: %s", retryMaxAttempts(cfg), provErr.Error()),
+				}); err != nil {
+					return Result{}, fmt.Errorf("runner: mark paused on retry exhaustion: %w", err)
+				}
+				return Result{
+					Iterations: completed,
+					Status:     state.StatePaused,
+					Reason:     "retry exhausted: " + provErr.Error(),
+				}, nil
+			}
+
 			markFailed(statePath, "provider_error", provErr.Error())
 			return Result{
 				Iterations: completed,
 				Status:     state.StateFailed,
 				Error:      provErr.Error(),
-			}, nil
-		}
-
-		// Parse result from status.json / result.json.
-		iterResult, _, loadErr := result.Load(resultFilePath, statusFilePath)
-		if loadErr != nil {
-			// Missing or invalid status.json: emit iteration.failed and fail.
-			_ = ew.Append(events.NewEvent(events.TypeIterationFailed, cfg.Session, cursor, map[string]any{
-				"iteration": i,
-				"error":     fmt.Sprintf("result load: %v", loadErr),
-			}))
-			completed = i
-			markFailed(statePath, "missing_status", loadErr.Error())
-			return Result{
-				Iterations: completed,
-				Status:     state.StateFailed,
-				Error:      loadErr.Error(),
 			}, nil
 		}
 
@@ -452,6 +518,361 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 	}, nil
 }
 
+type pipelineRunNode struct {
+	ID         string
+	StageName  string
+	Iterations int
+	Index      int
+}
+
+func runPipeline(ctx context.Context, cfg Config) (Result, error) {
+	statePath := statePath(cfg.RunDir)
+	eventsPath := eventsPath(cfg.RunDir)
+	ew := events.NewWriter(eventsPath)
+
+	if err := persistRunRequest(cfg); err != nil {
+		return Result{}, fmt.Errorf("runner: persist run request: %w", err)
+	}
+
+	nodes, err := pipelineNodes(cfg.Pipeline)
+	if err != nil {
+		return Result{}, err
+	}
+
+	pipelineName := strings.TrimSpace(cfg.Pipeline.Name)
+	if pipelineName == "" {
+		pipelineName = "pipeline"
+	}
+
+	if _, err := state.Init(statePath, cfg.Session, "pipeline", pipelineName); err != nil {
+		return Result{}, fmt.Errorf("runner: init state: %w", err)
+	}
+
+	stageStates := make([]state.StageState, len(nodes))
+	for i, node := range nodes {
+		stageStates[i] = state.StageState{
+			Name:       node.StageName,
+			Index:      i,
+			Iterations: node.Iterations,
+		}
+	}
+	if _, err := state.Update(statePath, func(s *state.SessionState) error {
+		s.Pipeline = pipelineName
+		s.Stages = stageStates
+		s.CurrentStage = nodes[0].StageName
+		s.NodeID = nodes[0].ID
+		return nil
+	}); err != nil {
+		return Result{}, fmt.Errorf("runner: initialize pipeline state: %w", err)
+	}
+
+	if err := ew.Append(events.NewEvent(events.TypeSessionStart, cfg.Session, nil, map[string]any{
+		"stage":      nodes[0].StageName,
+		"iterations": totalPlannedIterations(nodes),
+		"provider":   cfg.Provider.Name(),
+		"pipeline": map[string]any{
+			"name":  pipelineName,
+			"nodes": len(nodes),
+		},
+	})); err != nil {
+		return Result{}, fmt.Errorf("runner: emit session_start: %w", err)
+	}
+
+	completed := 0
+	spawnedChildren := 0
+	injectedContext := ""
+
+	for nodeIdx, node := range nodes {
+		if _, err := state.Update(statePath, func(s *state.SessionState) error {
+			s.CurrentStage = node.StageName
+			s.NodeID = node.ID
+			s.Iteration = 0
+			s.IterationCompleted = 0
+			return nil
+		}); err != nil {
+			return Result{}, fmt.Errorf("runner: set current node: %w", err)
+		}
+
+		nodeCfg := cfg
+		nodeCfg.StageName = node.StageName
+		nodeCfg.Iterations = node.Iterations
+
+		stageConfig := buildStageConfig(nodeCfg)
+		fixed := termination.NewFixed(termination.FixedConfig{Iterations: &node.Iterations})
+		var lastResult result.Result
+
+		for i := 1; i <= fixed.Target(); i++ {
+			if err := ctx.Err(); err != nil {
+				_ = ew.Append(events.NewEvent(events.TypeError, cfg.Session, nil, map[string]any{
+					"error":      err.Error(),
+					"type":       "signal",
+					"iteration":  completed,
+					"terminated": true,
+					"stage":      node.StageName,
+					"node_id":    node.ID,
+				}))
+				markFailed(statePath, "signal_terminated", err.Error())
+				_ = ew.Append(events.NewEvent(events.TypeSessionComplete, cfg.Session, nil, map[string]any{
+					"iterations":       completed,
+					"total_iterations": completed,
+					"reason":           "signal: " + err.Error(),
+					"termination":      "signal",
+				}))
+				return Result{
+					Iterations: completed,
+					Status:     state.StateFailed,
+					Error:      err.Error(),
+				}, nil
+			}
+
+			if _, err := state.MarkIterationStarted(statePath, i); err != nil {
+				return Result{}, fmt.Errorf("runner: mark iteration %d started: %w", i, err)
+			}
+
+			cursor := &events.Cursor{
+				NodePath:  node.ID,
+				NodeRun:   nodeIdx + 1,
+				Iteration: i,
+				Provider:  cfg.Provider.Name(),
+			}
+			if err := ew.Append(events.NewEvent(events.TypeIterationStart, cfg.Session, cursor, map[string]any{
+				"iteration": i,
+				"stage":     node.StageName,
+				"node_id":   node.ID,
+			})); err != nil {
+				return Result{}, fmt.Errorf("runner: emit iteration_start: %w", err)
+			}
+
+			ctxPath, err := apcontext.GenerateContext(cfg.Session, i, stageConfig, cfg.RunDir)
+			if err != nil {
+				return Result{}, fmt.Errorf("runner: generate context for iteration %d: %w", i, err)
+			}
+
+			prompt := resolvePrompt(nodeCfg.PromptTemplate, ctxPath, cfg.Session, i, stageConfig, injectedContext)
+			injectedContext = ""
+
+			ctxVars, _ := resolve.VarsFromContext(ctxPath)
+			statusFilePath := ctxVars.STATUS
+			resultFilePath := ctxVars.RESULT
+
+			req := provider.Request{
+				Prompt:     prompt,
+				Model:      nodeCfg.Model,
+				WorkDir:    nodeCfg.WorkDir,
+				Env:        buildEnv(nodeCfg, i),
+				StatusPath: statusFilePath,
+				ResultPath: resultFilePath,
+			}
+
+			provResult, provErr := nodeCfg.Provider.Execute(ctx, req)
+			if provErr != nil {
+				_ = ew.Append(events.NewEvent(events.TypeIterationFailed, cfg.Session, cursor, map[string]any{
+					"iteration": i,
+					"stage":     node.StageName,
+					"node_id":   node.ID,
+					"error":     provErr.Error(),
+					"exit_code": provResult.ExitCode,
+				}))
+				markFailed(statePath, "provider_error", provErr.Error())
+				return Result{
+					Iterations: completed,
+					Status:     state.StateFailed,
+					Error:      provErr.Error(),
+				}, nil
+			}
+
+			iterResult, _, loadErr := result.Load(resultFilePath, statusFilePath)
+			if loadErr != nil {
+				_ = ew.Append(events.NewEvent(events.TypeIterationFailed, cfg.Session, cursor, map[string]any{
+					"iteration": i,
+					"stage":     node.StageName,
+					"node_id":   node.ID,
+					"error":     fmt.Sprintf("result load: %v", loadErr),
+				}))
+				markFailed(statePath, "missing_status", loadErr.Error())
+				return Result{
+					Iterations: completed,
+					Status:     state.StateFailed,
+					Error:      loadErr.Error(),
+				}, nil
+			}
+			lastResult = iterResult
+
+			outputVars := map[string]any{
+				"decision": iterResult.Decision,
+				"summary":  iterResult.Summary,
+				"node_id":  node.ID,
+			}
+			if _, err := state.UpdateIteration(statePath, i, outputVars, node.StageName); err != nil {
+				return Result{}, fmt.Errorf("runner: update iteration %d state: %w", i, err)
+			}
+			if _, err := state.MarkIterationCompleted(statePath, i); err != nil {
+				return Result{}, fmt.Errorf("runner: mark iteration %d completed: %w", i, err)
+			}
+
+			if err := ew.Append(events.NewEvent(events.TypeIterationComplete, cfg.Session, cursor, map[string]any{
+				"iteration": i,
+				"stage":     node.StageName,
+				"node_id":   node.ID,
+				"decision":  iterResult.Decision,
+				"summary":   iterResult.Summary,
+				"duration":  provResult.Duration.String(),
+			})); err != nil {
+				return Result{}, fmt.Errorf("runner: emit iteration_complete: %w", err)
+			}
+
+			if iterResult.AgentSignals.Inject != "" {
+				injectedContext = iterResult.AgentSignals.Inject
+				_ = ew.Append(events.NewEvent(events.TypeSignalInject, cfg.Session, cursor, map[string]any{
+					"iteration": i,
+					"stage":     node.StageName,
+					"node_id":   node.ID,
+					"length":    len(injectedContext),
+				}))
+			}
+
+			spawnRes, spawnErr := processSpawnSignals(nodeCfg, ew, i, iterResult.AgentSignals.Spawn, spawnedChildren)
+			if spawnErr != nil {
+				return Result{}, fmt.Errorf("runner: process spawn signals: %w", spawnErr)
+			}
+			spawnedChildren = spawnRes.ChildCount
+
+			if len(spawnRes.ChildNames) > 0 {
+				if _, err := state.Update(statePath, func(s *state.SessionState) error {
+					for _, child := range spawnRes.ChildNames {
+						s.AddChildSession(child)
+					}
+					return nil
+				}); err != nil {
+					return Result{}, fmt.Errorf("runner: record child sessions: %w", err)
+				}
+			}
+
+			completed++
+
+			if iterResult.AgentSignals.Escalate != nil {
+				esc := iterResult.AgentSignals.Escalate
+				sigID := SignalID(i, "escalate", 0)
+
+				if err := emitDispatching(ew, cfg.Session, cursor, sigID, "escalate", i); err != nil {
+					return Result{}, fmt.Errorf("runner: emit escalate dispatching: %w", err)
+				}
+				if _, err := state.MarkPaused(statePath, &state.EscalationInfo{
+					Type:    esc.Type,
+					Reason:  esc.Reason,
+					Options: esc.Options,
+				}); err != nil {
+					return Result{}, fmt.Errorf("runner: mark paused on escalation: %w", err)
+				}
+				if err := ew.Append(events.NewEvent(events.TypeSignalEscalate, cfg.Session, cursor, map[string]any{
+					"signal_id": sigID,
+					"iteration": i,
+					"stage":     node.StageName,
+					"node_id":   node.ID,
+					"type":      esc.Type,
+					"reason":    esc.Reason,
+					"options":   esc.Options,
+				})); err != nil {
+					return Result{}, fmt.Errorf("runner: emit signal.escalate: %w", err)
+				}
+				if err := dispatchSignalHandlers(dispatchSignalInput{
+					Writer:     ew,
+					Session:    cfg.Session,
+					Stage:      node.StageName,
+					Iteration:  i,
+					SignalID:   sigID,
+					SignalType: "escalate",
+					Handlers:   cfg.EscalateHandlers,
+					Timeout:    cfg.SignalHandlerTimeout,
+					Output:     cfg.SignalOutput,
+					Escalation: esc,
+				}); err != nil {
+					return Result{}, fmt.Errorf("runner: dispatch escalate handlers: %w", err)
+				}
+				return Result{
+					Iterations: completed,
+					Status:     state.StatePaused,
+					Reason:     "escalation: " + esc.Reason,
+				}, nil
+			}
+
+			decision := strings.ToLower(strings.TrimSpace(lastResult.Decision))
+			if decision == "error" {
+				markFailed(statePath, "agent_error", fmt.Sprintf("agent requested error at stage %s iteration %d", node.StageName, i))
+				return Result{
+					Iterations: completed,
+					Status:     state.StateFailed,
+					Error:      "agent requested error",
+				}, nil
+			}
+			if decision == "stop" || i >= fixed.Target() {
+				break
+			}
+		}
+
+		if _, err := state.Update(statePath, func(s *state.SessionState) error {
+			if nodeIdx < len(s.Stages) {
+				completedAt := time.Now().UTC().Format(time.RFC3339)
+				s.Stages[nodeIdx].CompletedAt = &completedAt
+			}
+			return nil
+		}); err != nil {
+			return Result{}, fmt.Errorf("runner: mark stage complete: %w", err)
+		}
+	}
+
+	reason := fmt.Sprintf("Completed %d iterations across %d stages", completed, len(nodes))
+	finishSession(statePath, ew, cfg.Session, completed, reason)
+	return Result{
+		Iterations: completed,
+		Status:     state.StateCompleted,
+		Reason:     reason,
+	}, nil
+}
+
+func pipelineNodes(pipeline *compile.Pipeline) ([]pipelineRunNode, error) {
+	if pipeline == nil {
+		return nil, fmt.Errorf("runner: pipeline is nil")
+	}
+	if len(pipeline.Nodes) == 0 {
+		return nil, fmt.Errorf("runner: pipeline has no nodes")
+	}
+
+	nodes := make([]pipelineRunNode, 0, len(pipeline.Nodes))
+	for idx, node := range pipeline.Nodes {
+		if node.Parallel != nil {
+			return nil, fmt.Errorf("runner: node %q parallel blocks are not supported in sequential runner", strings.TrimSpace(node.ID))
+		}
+		stageName := strings.TrimSpace(node.Stage)
+		if stageName == "" {
+			return nil, fmt.Errorf("runner: node[%d] stage is required", idx)
+		}
+		nodeID := strings.TrimSpace(node.ID)
+		if nodeID == "" {
+			nodeID = stageName
+		}
+		iterations := node.Runs
+		if iterations <= 0 {
+			iterations = 1
+		}
+		nodes = append(nodes, pipelineRunNode{
+			ID:         nodeID,
+			StageName:  stageName,
+			Iterations: iterations,
+			Index:      idx,
+		})
+	}
+	return nodes, nil
+}
+
+func totalPlannedIterations(nodes []pipelineRunNode) int {
+	total := 0
+	for _, node := range nodes {
+		total += node.Iterations
+	}
+	return total
+}
+
 // resolvePrompt substitutes template variables into the prompt.
 // injectedContext is text from a previous inject signal, set as ${CONTEXT}.
 func resolvePrompt(template, ctxPath, session string, iteration int, sc apcontext.StageConfig, injectedContext string) string {
@@ -496,8 +917,9 @@ func buildEnv(cfg Config, iteration int) map[string]string {
 func finishSession(statePath string, ew *events.Writer, session string, iterations int, reason string) {
 	_, _ = state.MarkCompleted(statePath)
 	_ = ew.Append(events.NewEvent(events.TypeSessionComplete, session, nil, map[string]any{
-		"iterations": iterations,
-		"reason":     reason,
+		"iterations":       iterations,
+		"total_iterations": iterations,
+		"reason":           reason,
 	}))
 }
 
@@ -516,6 +938,27 @@ func eventsPath(runDir string) string {
 	return runDir + "/events.jsonl"
 }
 
+const (
+	defaultRetryMaxAttempts = 1               // no retry by default
+	defaultRetryBackoff     = 5 * time.Second // 5s initial backoff
+)
+
+// retryMaxAttempts returns the effective max attempts (minimum 1).
+func retryMaxAttempts(cfg Config) int {
+	if cfg.RetryMaxAttempts > 1 {
+		return cfg.RetryMaxAttempts
+	}
+	return defaultRetryMaxAttempts
+}
+
+// retryBackoff returns the effective initial backoff duration.
+func retryBackoff(cfg Config) time.Duration {
+	if cfg.RetryBackoff > 0 {
+		return cfg.RetryBackoff
+	}
+	return defaultRetryBackoff
+}
+
 // persistRunRequest writes run_request.json to the run directory.
 func persistRunRequest(cfg Config) error {
 	if err := os.MkdirAll(cfg.RunDir, 0o755); err != nil {
@@ -527,6 +970,16 @@ func persistRunRequest(cfg Config) error {
 		"provider":   cfg.Provider.Name(),
 		"model":      cfg.Model,
 		"iterations": cfg.Iterations,
+	}
+	if cfg.Pipeline != nil && len(cfg.Pipeline.Nodes) > 0 {
+		name := strings.TrimSpace(cfg.Pipeline.Name)
+		if name == "" {
+			name = "pipeline"
+		}
+		payload["pipeline"] = map[string]any{
+			"name":  name,
+			"nodes": len(cfg.Pipeline.Nodes),
+		}
 	}
 	if override := strings.TrimSpace(cfg.OnEscalate); override != "" {
 		payload["on_escalate"] = override
