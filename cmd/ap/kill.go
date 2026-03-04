@@ -34,11 +34,16 @@ func runKill(args []string, deps cliDeps) int {
 	wasRunning := false
 	var childrenKilled []string
 
-	// Try to kill via TmuxLauncher (primary backend). Kill is idempotent,
+	// Resolve launcher: use injected launcher or default to tmux.
+	launcher := deps.launcher
+	if launcher == nil {
+		launcher = session.NewTmuxLauncher()
+	}
+
+	// Try to kill via launcher (primary backend). Kill is idempotent,
 	// so success does not imply the session was running.
-	tmux := session.NewTmuxLauncher()
-	if tmux.Available() {
-		_ = tmux.Kill(sessionName)
+	if launcher.Available() {
+		_ = launcher.Kill(sessionName)
 	}
 
 	// Update state.json if it exists.
@@ -58,7 +63,7 @@ func runKill(args []string, deps cliDeps) int {
 
 			// Cascade kill to child sessions.
 			for _, child := range st.ChildSessions {
-				if killChildSession(runsDir, locksDir, child, tmux) {
+				if killChildSession(runsDir, locksDir, child, launcher) {
 					childrenKilled = append(childrenKilled, child)
 				}
 			}
@@ -121,7 +126,7 @@ func runKill(args []string, deps cliDeps) int {
 
 // killChildSession attempts to abort a child session. Returns true if the
 // child was running and was successfully aborted.
-func killChildSession(runsDir, locksDir, child string, tmux *session.TmuxLauncher) bool {
+func killChildSession(runsDir, locksDir, child string, launcher session.Launcher) bool {
 	childStatePath := filepath.Join(runsDir, child, "state.json")
 	if _, err := os.Stat(childStatePath); err != nil {
 		return false
@@ -134,8 +139,8 @@ func killChildSession(runsDir, locksDir, child string, tmux *session.TmuxLaunche
 	case state.StateCompleted, state.StateFailed, state.StateAborted:
 		return false // already terminal
 	}
-	if tmux != nil && tmux.Available() {
-		_ = tmux.Kill(child)
+	if launcher != nil && launcher.Available() {
+		_ = launcher.Kill(child)
 	}
 	_, _ = state.Update(childStatePath, func(s *state.SessionState) error {
 		s.Status = state.StateAborted
