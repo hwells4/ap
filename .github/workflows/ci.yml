@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  lane1-fast:
+    name: Lane 1 - Fast PR
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./...
+
+  lane2-integration:
+    name: Lane 2 - Integration
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: integration tests
+        run: go test -run Integration ./...
+
+  lane3-race:
+    name: Lane 3 - Race
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: race tests
+        run: go test -race ./...
+
+  lane4-e2e:
+    name: Lane 4 - E2E
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/heads/release/')
+    runs-on: ubuntu-latest
+    env:
+      AP_E2E: "1"
+      AP_TMUX_E2E: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: E2E tests
+        run: go test -run E2E ./...
+      - name: tmux E2E tests
+        run: go test -run Tmux ./...
+
+  lane5-fuzz:
+    name: Lane 5 - Fuzz
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: fuzz spec
+        run: go test ./internal/spec -fuzz=FuzzParse -fuzztime=30s
+      - name: fuzz signals
+        run: go test ./internal/signals -fuzz=FuzzSignal -fuzztime=30s
+      - name: fuzz fuzzy
+        run: go test ./internal/fuzzy -fuzz=FuzzMatch -fuzztime=30s
+      - name: fuzz compile
+        run: go test ./internal/compile -fuzz=FuzzCompile -fuzztime=30s
