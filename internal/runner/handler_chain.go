@@ -109,17 +109,16 @@ func dispatchSignalHandlers(input dispatchSignalInput) error {
 }
 
 func handlersWithStdoutFallback(handlers []config.SignalHandler) []config.SignalHandler {
-	chain := append([]config.SignalHandler(nil), handlers...)
-	hasStdout := false
-	for _, handler := range chain {
+	// Preserve configured order for non-stdout handlers, and always keep a
+	// single stdout handler as the terminal backstop.
+	chain := make([]config.SignalHandler, 0, len(handlers)+1)
+	for _, handler := range handlers {
 		if strings.EqualFold(strings.TrimSpace(handler.Type), "stdout") {
-			hasStdout = true
-			break
+			continue
 		}
+		chain = append(chain, handler)
 	}
-	if !hasStdout {
-		chain = append(chain, config.SignalHandler{Type: "stdout"})
-	}
+	chain = append(chain, config.SignalHandler{Type: "stdout"})
 	return chain
 }
 
