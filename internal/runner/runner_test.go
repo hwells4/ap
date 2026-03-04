@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hwells4/ap/internal/compile"
 	"github.com/hwells4/ap/internal/events"
 	"github.com/hwells4/ap/internal/mock"
 	"github.com/hwells4/ap/internal/state"
@@ -103,6 +104,102 @@ func TestRun_EarlyStop(t *testing.T) {
 	}
 	if mp.CallCount() != 2 {
 		t.Errorf("provider calls = %d, want 2", mp.CallCount())
+	}
+}
+
+func TestRun_Pipeline_SequentialStages(t *testing.T) {
+	runDir := tempSession(t)
+
+	mp := mock.New(
+		mock.WithResponses(
+			mock.ContinueResponse("stage 1 iter 1"),
+			mock.ContinueResponse("stage 1 iter 2"),
+			mock.StopResponse("stage 2 done", "stop stage 2"),
+		),
+	)
+
+	pipeline := &compile.Pipeline{
+		Name: "demo-pipeline",
+		Nodes: []compile.Node{
+			{ID: "plan", Stage: "improve-plan", Runs: 2},
+			{ID: "refine", Stage: "refine-tasks", Runs: 3},
+		},
+	}
+
+	res, err := Run(context.Background(), Config{
+		Session:        "pipeline-session",
+		RunDir:         runDir,
+		Provider:       mp,
+		Pipeline:       pipeline,
+		PromptTemplate: "iteration ${ITERATION}",
+		WorkDir:        filepath.Dir(filepath.Dir(runDir)),
+	})
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	if res.Status != state.StateCompleted {
+		t.Fatalf("status = %q, want %q", res.Status, state.StateCompleted)
+	}
+	if res.Iterations != 3 {
+		t.Fatalf("iterations = %d, want 3", res.Iterations)
+	}
+	if mp.CallCount() != 3 {
+		t.Fatalf("provider calls = %d, want 3", mp.CallCount())
+	}
+
+	calls := mp.Calls()
+	stageSequence := []string{
+		calls[0].Request.Env["AP_STAGE"],
+		calls[1].Request.Env["AP_STAGE"],
+		calls[2].Request.Env["AP_STAGE"],
+	}
+	wantStages := []string{"improve-plan", "improve-plan", "refine-tasks"}
+	for i := range wantStages {
+		if stageSequence[i] != wantStages[i] {
+			t.Fatalf("call %d AP_STAGE = %q, want %q", i, stageSequence[i], wantStages[i])
+		}
+	}
+
+	iterSequence := []string{
+		calls[0].Request.Env["AP_ITERATION"],
+		calls[1].Request.Env["AP_ITERATION"],
+		calls[2].Request.Env["AP_ITERATION"],
+	}
+	wantIterations := []string{"1", "2", "1"}
+	for i := range wantIterations {
+		if iterSequence[i] != wantIterations[i] {
+			t.Fatalf("call %d AP_ITERATION = %q, want %q", i, iterSequence[i], wantIterations[i])
+		}
+	}
+
+	st, err := state.Load(filepath.Join(runDir, "state.json"))
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if st.Type != "pipeline" {
+		t.Fatalf("state type = %q, want pipeline", st.Type)
+	}
+	if st.CurrentStage != "refine-tasks" {
+		t.Fatalf("current_stage = %q, want refine-tasks", st.CurrentStage)
+	}
+	if st.NodeID != "refine" {
+		t.Fatalf("node_id = %q, want refine", st.NodeID)
+	}
+	if len(st.Stages) != 2 {
+		t.Fatalf("len(stages) = %d, want 2", len(st.Stages))
+	}
+	if st.Stages[0].CompletedAt == nil || st.Stages[1].CompletedAt == nil {
+		t.Fatalf("expected completed_at on both stages: %#v", st.Stages)
+	}
+
+	evts := readEvents(t, runDir)
+	completed := filterByType(evts, events.TypeSessionComplete)
+	if len(completed) != 1 {
+		t.Fatalf("session.completed count = %d, want 1", len(completed))
+	}
+	if got := completed[0].Data["total_iterations"]; got != float64(3) && got != 3 {
+		t.Fatalf("session.completed total_iterations = %v, want 3", got)
 	}
 }
 

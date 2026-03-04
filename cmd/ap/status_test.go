@@ -247,6 +247,43 @@ func TestStatusHumanMode(t *testing.T) {
 	}
 }
 
+func TestStatusHumanMode_ShowsPipelineStageProgress(t *testing.T) {
+	dir := setupStatusSession(t, "pipeline-human", &state.SessionState{
+		Session:            "pipeline-human",
+		Type:               "pipeline",
+		Pipeline:           "refine",
+		Status:             state.StateRunning,
+		NodeID:             "refine-tasks",
+		Iteration:          2,
+		IterationCompleted: 1,
+		StartedAt:          "2026-03-04T00:00:00Z",
+		CurrentStage:       "refine-tasks",
+		Stages: []state.StageState{
+			{Name: "improve-plan", Index: 0, Iterations: 3},
+			{Name: "refine-tasks", Index: 1, Iterations: 5},
+		},
+		History: []map[string]any{},
+	})
+
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeHuman,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd:  func() (string, error) { return dir, nil },
+	}
+
+	code := runWithDeps([]string{"status", "pipeline-human"}, deps)
+	if code != output.ExitSuccess {
+		t.Fatalf("exit code = %d; stderr: %s", code, stderr.String())
+	}
+
+	out := stdout.String()
+	if !containsAll(out, "Pipeline:   stage 2 of 2", "Node:       refine-tasks") {
+		t.Fatalf("pipeline progress missing from human output: %s", out)
+	}
+}
+
 func TestStatusFailedSession(t *testing.T) {
 	errMsg := "provider exited with code 1"
 	errType := "provider_failed"
