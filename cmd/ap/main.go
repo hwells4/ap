@@ -57,6 +57,8 @@ func runWithDeps(args []string, deps cliDeps) int {
 		return runList(args[1:], deps)
 	case "run":
 		return runRun(args[1:], deps)
+	case "_run":
+		return runInternalRun(args[1:], deps)
 	}
 
 	return renderError(deps, output.ExitInvalidArgs, output.NewError(
