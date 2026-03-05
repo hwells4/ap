@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/hwells4/ap/internal/controlplane"
 	"github.com/hwells4/ap/internal/output"
 	"github.com/hwells4/ap/internal/store"
 )
@@ -257,5 +261,60 @@ func TestKill_PausedSession_MarksAborted(t *testing.T) {
 	}
 	if result["status"] != "killed" {
 		t.Errorf("status = %v, want %q", result["status"], "killed")
+	}
+}
+
+func TestKill_StaleGlobalIndexUsesResolvedProjectRootForLocks(t *testing.T) {
+	t.Setenv("AP_CONTROL_DB", filepath.Join(t.TempDir(), "control.db"))
+
+	projectRoot := t.TempDir()
+	projectStore, err := store.Open(filepath.Join(projectRoot, ".ap", "ap.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = projectStore.Close()
+
+	cp, err := controlplane.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cp.Close()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := cp.UpsertSession(controlplane.SessionRecord{
+		ProjectKey:  filepath.Clean(projectRoot),
+		ProjectRoot: projectRoot,
+		SessionName: "stale-session",
+		Status:      "running",
+		StartedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	outsideRoot := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd:  func() (string, error) { return outsideRoot, nil },
+	}
+
+	code := runKill([]string{"stale-session", "--json"}, deps)
+	if code != output.ExitSuccess {
+		t.Fatalf("exit code = %d, want %d; stderr: %s; stdout: %s", code, output.ExitSuccess, stderr.String(), stdout.String())
+	}
+
+	targetLock := filepath.Join(projectRoot, ".ap", "locks", "stale-session.lock")
+	if _, err := os.Stat(targetLock); err != nil {
+		t.Fatalf("expected lock file at resolved project root: %v", err)
+	}
+
+	cwdLock := filepath.Join(outsideRoot, ".ap", "locks", "stale-session.lock")
+	if _, err := os.Stat(cwdLock); err == nil {
+		t.Fatalf("did not expect lock file in cwd: %s", cwdLock)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("unexpected stat error for cwd lock: %v", err)
 	}
 }

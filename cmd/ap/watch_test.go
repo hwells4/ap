@@ -263,7 +263,7 @@ func TestIsSessionEndType(t *testing.T) {
 
 func TestParseWatchArgs_Basic(t *testing.T) {
 	t.Parallel()
-	session, hooks, errResp := parseWatchArgs([]string{"my-session", "--on", "completed", "echo done"})
+	session, hooks, _, errResp := parseWatchArgs([]string{"my-session", "--on", "completed", "echo done"})
 	if errResp != nil {
 		t.Fatalf("unexpected error: %v", errResp)
 	}
@@ -283,7 +283,7 @@ func TestParseWatchArgs_Basic(t *testing.T) {
 
 func TestParseWatchArgs_MultipleHooks(t *testing.T) {
 	t.Parallel()
-	session, hooks, errResp := parseWatchArgs([]string{
+	session, hooks, _, errResp := parseWatchArgs([]string{
 		"my-session",
 		"--on", "completed", "echo done",
 		"--on", "escalate", "echo escalated",
@@ -307,7 +307,7 @@ func TestParseWatchArgs_MultipleHooks(t *testing.T) {
 
 func TestParseWatchArgs_ThreeHooks(t *testing.T) {
 	t.Parallel()
-	_, hooks, errResp := parseWatchArgs([]string{
+	_, hooks, _, errResp := parseWatchArgs([]string{
 		"sess",
 		"--on", "completed", "cmd1",
 		"--on", "failed", "cmd2",
@@ -323,7 +323,7 @@ func TestParseWatchArgs_ThreeHooks(t *testing.T) {
 
 func TestParseWatchArgs_MissingSession(t *testing.T) {
 	t.Parallel()
-	_, _, errResp := parseWatchArgs([]string{"--on", "completed", "echo done"})
+	_, _, _, errResp := parseWatchArgs([]string{"--on", "completed", "echo done"})
 	if errResp == nil {
 		t.Fatal("expected error for missing session")
 	}
@@ -331,7 +331,7 @@ func TestParseWatchArgs_MissingSession(t *testing.T) {
 
 func TestParseWatchArgs_IncompleteOn(t *testing.T) {
 	t.Parallel()
-	_, _, errResp := parseWatchArgs([]string{"my-session", "--on", "completed"})
+	_, _, _, errResp := parseWatchArgs([]string{"my-session", "--on", "completed"})
 	if errResp == nil {
 		t.Fatal("expected error for incomplete --on")
 	}
@@ -339,7 +339,7 @@ func TestParseWatchArgs_IncompleteOn(t *testing.T) {
 
 func TestParseWatchArgs_OnWithNoArgs(t *testing.T) {
 	t.Parallel()
-	_, _, errResp := parseWatchArgs([]string{"my-session", "--on"})
+	_, _, _, errResp := parseWatchArgs([]string{"my-session", "--on"})
 	if errResp == nil {
 		t.Fatal("expected error for --on with no arguments")
 	}
@@ -347,7 +347,7 @@ func TestParseWatchArgs_OnWithNoArgs(t *testing.T) {
 
 func TestParseWatchArgs_UnknownFlag(t *testing.T) {
 	t.Parallel()
-	_, _, errResp := parseWatchArgs([]string{"my-session", "--bad-flag"})
+	_, _, _, errResp := parseWatchArgs([]string{"my-session", "--bad-flag"})
 	if errResp == nil {
 		t.Fatal("expected error for unknown flag")
 	}
@@ -358,7 +358,7 @@ func TestParseWatchArgs_UnknownFlag(t *testing.T) {
 
 func TestParseWatchArgs_DuplicateSession(t *testing.T) {
 	t.Parallel()
-	_, _, errResp := parseWatchArgs([]string{"session1", "session2"})
+	_, _, _, errResp := parseWatchArgs([]string{"session1", "session2"})
 	if errResp == nil {
 		t.Fatal("expected error for duplicate session")
 	}
@@ -369,7 +369,7 @@ func TestParseWatchArgs_DuplicateSession(t *testing.T) {
 
 func TestParseWatchArgs_JSONFlagSkipped(t *testing.T) {
 	t.Parallel()
-	session, hooks, errResp := parseWatchArgs([]string{
+	session, hooks, _, errResp := parseWatchArgs([]string{
 		"my-session", "--json", "--on", "completed", "echo done",
 	})
 	if errResp != nil {
@@ -385,7 +385,7 @@ func TestParseWatchArgs_JSONFlagSkipped(t *testing.T) {
 
 func TestParseWatchArgs_EmptyArgs(t *testing.T) {
 	t.Parallel()
-	_, _, errResp := parseWatchArgs([]string{})
+	_, _, _, errResp := parseWatchArgs([]string{})
 	if errResp == nil {
 		t.Fatal("expected error for empty args")
 	}
@@ -394,7 +394,7 @@ func TestParseWatchArgs_EmptyArgs(t *testing.T) {
 func TestParseWatchArgs_SessionBeforeAndAfterOn(t *testing.T) {
 	t.Parallel()
 	// Session appears before --on — valid.
-	session, hooks, errResp := parseWatchArgs([]string{
+	session, hooks, _, errResp := parseWatchArgs([]string{
 		"sess", "--on", "escalate", "notify",
 	})
 	if errResp != nil {
@@ -402,6 +402,25 @@ func TestParseWatchArgs_SessionBeforeAndAfterOn(t *testing.T) {
 	}
 	if session != "sess" {
 		t.Fatalf("session = %q, want sess", session)
+	}
+	if len(hooks) != 1 {
+		t.Fatalf("hooks len = %d, want 1", len(hooks))
+	}
+}
+
+func TestParseWatchArgs_ProjectRootFlag(t *testing.T) {
+	t.Parallel()
+	session, hooks, projectRoot, errResp := parseWatchArgs([]string{
+		"sess", "--project-root", "/tmp/repo", "--on", "completed", "echo done",
+	})
+	if errResp != nil {
+		t.Fatalf("unexpected error: %v", errResp)
+	}
+	if session != "sess" {
+		t.Fatalf("session = %q, want sess", session)
+	}
+	if projectRoot != "/tmp/repo" {
+		t.Fatalf("projectRoot = %q, want /tmp/repo", projectRoot)
 	}
 	if len(hooks) != 1 {
 		t.Fatalf("hooks len = %d, want 1", len(hooks))
@@ -824,5 +843,93 @@ func TestRunWatch_InvalidArgs_ReturnsInvalidArgs(t *testing.T) {
 	code := runWatch([]string{}, deps)
 	if code != output.ExitInvalidArgs {
 		t.Fatalf("exit code = %d, want %d", code, output.ExitInvalidArgs)
+	}
+}
+
+func TestRunWatch_ResolvesSessionFromGlobalIndex(t *testing.T) {
+	t.Setenv("AP_CONTROL_DB", filepath.Join(t.TempDir(), "control.db"))
+	projectRoot := t.TempDir()
+	s, err := store.Open(filepath.Join(projectRoot, ".ap", "ap.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := s.CreateSession(ctx, "global-watch", "loop", "", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateSession(ctx, "global-watch", map[string]any{
+		"project_root": projectRoot,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendEvent(ctx, "global-watch", "session.completed", "{}", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+	}
+
+	code := runWatch([]string{"global-watch", "--on", "completed", "true", "--json"}, deps)
+	if code != output.ExitSuccess {
+		t.Fatalf("exit code = %d, want %d; stdout=%s stderr=%s", code, output.ExitSuccess, stdout.String(), stderr.String())
+	}
+}
+
+func TestRunWatch_AmbiguousAcrossProjects(t *testing.T) {
+	t.Setenv("AP_CONTROL_DB", filepath.Join(t.TempDir(), "control.db"))
+	ctx := context.Background()
+
+	projectA := t.TempDir()
+	a, err := store.Open(filepath.Join(projectA, ".ap", "ap.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.CreateSession(ctx, "dup-watch", "loop", "", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.UpdateSession(ctx, "dup-watch", map[string]any{"project_root": projectA}); err != nil {
+		t.Fatal(err)
+	}
+	_ = a.Close()
+
+	projectB := t.TempDir()
+	b, err := store.Open(filepath.Join(projectB, ".ap", "ap.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.CreateSession(ctx, "dup-watch", "loop", "", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.UpdateSession(ctx, "dup-watch", map[string]any{"project_root": projectB}); err != nil {
+		t.Fatal(err)
+	}
+	_ = b.Close()
+
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+	}
+
+	code := runWatch([]string{"dup-watch", "--on", "completed", "true", "--json"}, deps)
+	if code != output.ExitInvalidArgs {
+		t.Fatalf("exit code = %d, want %d; stdout=%s stderr=%s", code, output.ExitInvalidArgs, stdout.String(), stderr.String())
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("invalid JSON: %v\nraw: %s", err, stdout.String())
+	}
+	errObj := result["error"].(map[string]any)
+	if errObj["code"] != "SESSION_AMBIGUOUS" {
+		t.Fatalf("error.code = %v, want SESSION_AMBIGUOUS", errObj["code"])
 	}
 }

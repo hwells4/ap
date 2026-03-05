@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"testing"
 
 	"github.com/hwells4/ap/internal/output"
@@ -190,6 +191,101 @@ func TestStatusUnknownFlag(t *testing.T) {
 	code := runStatus([]string{"--verbose", "--json"}, deps)
 	if code != output.ExitInvalidArgs {
 		t.Fatalf("exit code = %d, want %d", code, output.ExitInvalidArgs)
+	}
+}
+
+func TestStatusResolvesSessionFromGlobalIndex(t *testing.T) {
+	t.Setenv("AP_CONTROL_DB", filepath.Join(t.TempDir(), "control.db"))
+	projectRoot := t.TempDir()
+	s, err := store.Open(filepath.Join(projectRoot, ".ap", "ap.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := s.CreateSession(ctx, "global-session", "loop", "", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateSession(ctx, "global-session", map[string]any{
+		"project_root": projectRoot,
+		"status":       "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+	}
+
+	code := runStatus([]string{"global-session", "--json"}, deps)
+	if code != output.ExitSuccess {
+		t.Fatalf("exit code = %d; stderr: %s", code, stderr.String())
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("invalid JSON: %v\nraw: %s", err, stdout.String())
+	}
+	snap := result["snapshot"].(map[string]any)
+	if snap["session"] != "global-session" {
+		t.Fatalf("snapshot.session = %v, want global-session", snap["session"])
+	}
+}
+
+func TestStatusAmbiguousAcrossProjects(t *testing.T) {
+	t.Setenv("AP_CONTROL_DB", filepath.Join(t.TempDir(), "control.db"))
+	ctx := context.Background()
+
+	projectA := t.TempDir()
+	a, err := store.Open(filepath.Join(projectA, ".ap", "ap.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.CreateSession(ctx, "dup-session", "loop", "", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.UpdateSession(ctx, "dup-session", map[string]any{"project_root": projectA}); err != nil {
+		t.Fatal(err)
+	}
+	_ = a.Close()
+
+	projectB := t.TempDir()
+	b, err := store.Open(filepath.Join(projectB, ".ap", "ap.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.CreateSession(ctx, "dup-session", "loop", "", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.UpdateSession(ctx, "dup-session", map[string]any{"project_root": projectB}); err != nil {
+		t.Fatal(err)
+	}
+	_ = b.Close()
+
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+	}
+
+	code := runStatus([]string{"dup-session", "--json"}, deps)
+	if code != output.ExitInvalidArgs {
+		t.Fatalf("exit code = %d, want %d; stdout=%s stderr=%s", code, output.ExitInvalidArgs, stdout.String(), stderr.String())
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("invalid JSON: %v\nraw: %s", err, stdout.String())
+	}
+	errObj := result["error"].(map[string]any)
+	if errObj["code"] != "SESSION_AMBIGUOUS" {
+		t.Fatalf("error.code = %v, want SESSION_AMBIGUOUS", errObj["code"])
 	}
 }
 

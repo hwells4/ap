@@ -21,7 +21,7 @@ type watchHook struct {
 }
 
 func runWatch(args []string, deps cliDeps) int {
-	sessionName, hooks, errResp := parseWatchArgs(args)
+	sessionName, hooks, projectRootFlag, errResp := parseWatchArgs(args)
 	if errResp != nil {
 		return renderError(deps, output.ExitInvalidArgs, *errResp)
 	}
@@ -56,15 +56,53 @@ func runWatch(args []string, deps cliDeps) int {
 
 	ctx := context.Background()
 
+	selectedStore, cleanup, lookupErr := resolveSessionStore(ctx, deps, sessionName, projectRootFlag)
+	if lookupErr != nil {
+		if errors.Is(lookupErr, errSessionLookupNotFound) {
+			return renderError(deps, output.ExitNotFound, output.NewError(
+				"SESSION_NOT_FOUND",
+				fmt.Sprintf("session %q not found", sessionName),
+				"No session with that name in local or machine-wide index.",
+				"ap watch <session> --on <event> <cmd> [--project-root DIR] [--json]",
+				[]string{"ap query sessions --status running --json"},
+			))
+		}
+		var ambiguous *sessionLookupAmbiguousError
+		if errors.As(lookupErr, &ambiguous) {
+			suggestions := []string{}
+			for _, match := range ambiguous.Matches {
+				suggestions = append(suggestions, fmt.Sprintf("ap watch %s --project-root %s --on completed \"echo done\" --json", sessionName, match.ProjectRoot))
+				if len(suggestions) >= 3 {
+					break
+				}
+			}
+			return renderError(deps, output.ExitInvalidArgs, output.NewError(
+				"SESSION_AMBIGUOUS",
+				lookupErr.Error(),
+				"Use --project-root to select the project explicitly.",
+				"ap watch <session> --on <event> <cmd> [--project-root DIR] [--json]",
+				suggestions,
+			))
+		}
+		return renderError(deps, output.ExitGeneralError, output.NewError(
+			"EVENTS_READ_FAILED",
+			fmt.Sprintf("failed to resolve store for session %q", sessionName),
+			lookupErr.Error(),
+			"ap watch <session> --on <event> <cmd> [--project-root DIR] [--json]",
+			nil,
+		))
+	}
+	defer cleanup()
+
 	// Verify session exists.
-	_, err := deps.store.GetSession(ctx, sessionName)
+	_, err := selectedStore.GetSession(ctx, sessionName)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return renderError(deps, output.ExitNotFound, output.NewError(
 				"SESSION_NOT_FOUND",
 				fmt.Sprintf("session %q not found", sessionName),
 				"No session with that name in the store.",
-				"ap watch <session> --on <event> <cmd> [--json]",
+				"ap watch <session> --on <event> <cmd> [--project-root DIR] [--json]",
 				[]string{"ap list"},
 			))
 		}
@@ -72,18 +110,18 @@ func runWatch(args []string, deps cliDeps) int {
 			"EVENTS_READ_FAILED",
 			"failed to check session",
 			err.Error(),
-			"ap watch <session> --on <event> <cmd>",
+			"ap watch <session> --on <event> <cmd> [--project-root DIR]",
 			nil,
 		))
 	}
 
-	return watchEventsStore(ctx, sessionName, hooks, deps)
+	return watchEventsStore(ctx, sessionName, hooks, selectedStore, deps)
 }
 
-func watchEventsStore(ctx context.Context, session string, hooks []watchHook, deps cliDeps) int {
+func watchEventsStore(ctx context.Context, session string, hooks []watchHook, sessionStore *store.Store, deps cliDeps) int {
 	lastSeq := 0
 	for {
-		events, err := deps.store.TailEvents(ctx, session, lastSeq)
+		events, err := sessionStore.TailEvents(ctx, session, lastSeq)
 		if err != nil {
 			_, _ = fmt.Fprintf(deps.stderr, "error watching events: %v\n", err)
 			return output.ExitGeneralError
@@ -192,9 +230,10 @@ func isSessionEndType(eventType string) bool {
 	return false
 }
 
-func parseWatchArgs(args []string) (string, []watchHook, *output.ErrorResponse) {
+func parseWatchArgs(args []string) (string, []watchHook, string, *output.ErrorResponse) {
 	var sessionName string
 	var hooks []watchHook
+	var projectRoot string
 
 	i := 0
 	for i < len(args) {
@@ -209,35 +248,49 @@ func parseWatchArgs(args []string) (string, []watchHook, *output.ErrorResponse) 
 					"INVALID_ARGUMENT",
 					"--on requires two arguments: <event> <command>",
 					"Example: --on completed \"notify-send done\"",
-					"ap watch <session> --on <event> <cmd> [--json]",
+					"ap watch <session> --on <event> <cmd> [--project-root DIR] [--json]",
 					[]string{`ap watch my-session --on completed "echo done"`},
 				)
-				return "", nil, &errResp
+				return "", nil, "", &errResp
 			}
 			hooks = append(hooks, watchHook{
 				EventType: args[i+1],
 				Command:   args[i+2],
 			})
 			i += 3
+		case arg == "--project-root" || strings.HasPrefix(arg, "--project-root=") || arg == "--workdir" || strings.HasPrefix(arg, "--workdir="):
+			value, next, err := readFlagValue(arg, args, i)
+			if err != nil {
+				errResp := output.NewError(
+					"INVALID_ARGUMENT",
+					err.Error(),
+					"",
+					"ap watch <session> --on <event> <cmd> [--project-root DIR] [--json]",
+					[]string{`ap watch my-session --project-root /abs/path --on completed "echo done"`},
+				)
+				return "", nil, "", &errResp
+			}
+			i = next + 1
+			projectRoot = strings.TrimSpace(value)
 		case strings.HasPrefix(arg, "-"):
 			errResp := output.NewError(
 				"INVALID_ARGUMENT",
 				fmt.Sprintf("unknown flag %q", arg),
-				"ap watch accepts --on <event> <cmd> and --json.",
-				"ap watch <session> --on <event> <cmd> [--json]",
+				"ap watch accepts --on <event> <cmd>, --project-root/--workdir, and --json.",
+				"ap watch <session> --on <event> <cmd> [--project-root DIR] [--json]",
 				[]string{`ap watch my-session --on completed "echo done"`},
 			)
-			return "", nil, &errResp
+			return "", nil, "", &errResp
 		default:
 			if sessionName != "" {
 				errResp := output.NewError(
 					"INVALID_ARGUMENT",
 					"ap watch takes exactly one session name",
 					fmt.Sprintf("Got %q and %q.", sessionName, arg),
-					"ap watch <session> --on <event> <cmd> [--json]",
+					"ap watch <session> --on <event> <cmd> [--project-root DIR] [--json]",
 					[]string{`ap watch my-session --on completed "echo done"`},
 				)
-				return "", nil, &errResp
+				return "", nil, "", &errResp
 			}
 			sessionName = strings.TrimSpace(arg)
 			i++
@@ -249,11 +302,11 @@ func parseWatchArgs(args []string) (string, []watchHook, *output.ErrorResponse) 
 			"INVALID_ARGUMENT",
 			"missing required argument: <session>",
 			"Provide the session name to watch.",
-			"ap watch <session> --on <event> <cmd> [--json]",
+			"ap watch <session> --on <event> <cmd> [--project-root DIR] [--json]",
 			[]string{`ap watch my-session --on completed "echo done"`},
 		)
-		return "", nil, &errResp
+		return "", nil, "", &errResp
 	}
 
-	return sessionName, hooks, nil
+	return sessionName, hooks, projectRoot, nil
 }

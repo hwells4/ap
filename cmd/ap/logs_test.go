@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -189,5 +190,53 @@ func TestLogsUnknownFlag(t *testing.T) {
 	code := runLogs([]string{"--verbose", "--json"}, deps)
 	if code != output.ExitInvalidArgs {
 		t.Fatalf("exit code = %d, want %d", code, output.ExitInvalidArgs)
+	}
+}
+
+func TestLogsResolvesSessionFromGlobalIndex(t *testing.T) {
+	t.Setenv("AP_CONTROL_DB", filepath.Join(t.TempDir(), "control.db"))
+	projectRoot := t.TempDir()
+	s, err := store.Open(filepath.Join(projectRoot, ".ap", "ap.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := s.CreateSession(ctx, "global-logs", "loop", "", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateSession(ctx, "global-logs", map[string]any{
+		"project_root": projectRoot,
+		"status":       "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendEvent(ctx, "global-logs", "session.started", "{}", `{"stage":"ralph"}`); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+	}
+
+	code := runLogs([]string{"global-logs", "--json"}, deps)
+	if code != output.ExitSuccess {
+		t.Fatalf("exit code = %d; stderr: %s", code, stderr.String())
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 event line, got %d: %s", len(lines), stdout.String())
+	}
+	var event map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &event); err != nil {
+		t.Fatalf("invalid JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if event["session"] != "global-logs" {
+		t.Fatalf("event.session = %v, want global-logs", event["session"])
 	}
 }

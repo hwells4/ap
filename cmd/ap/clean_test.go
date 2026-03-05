@@ -294,3 +294,90 @@ func TestCleanHuman(t *testing.T) {
 		t.Fatal("expected human output")
 	}
 }
+
+func TestCleanResolvesSessionFromGlobalIndex(t *testing.T) {
+	t.Setenv("AP_CONTROL_DB", filepath.Join(t.TempDir(), "control.db"))
+	projectRoot := t.TempDir()
+	s := setupCleanStore(t, projectRoot, "global-clean", "completed")
+	defer s.Close()
+
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+	}
+
+	code := runClean([]string{"global-clean", "--json"}, deps)
+	if code != output.ExitSuccess {
+		t.Fatalf("exit code = %d; stderr: %s; stdout: %s", code, stderr.String(), stdout.String())
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("invalid JSON: %v\nraw: %s", err, stdout.String())
+	}
+	cleaned, ok := result["cleaned"].([]any)
+	if !ok || len(cleaned) != 1 {
+		t.Fatalf("expected 1 cleaned session, got: %#v", result["cleaned"])
+	}
+
+	sessionDir := filepath.Join(projectRoot, ".ap", "runs", "global-clean")
+	if _, err := os.Stat(sessionDir); !os.IsNotExist(err) {
+		t.Fatalf("session dir should be removed from resolved project root: %v", err)
+	}
+}
+
+func TestCleanAmbiguousAcrossProjects(t *testing.T) {
+	t.Setenv("AP_CONTROL_DB", filepath.Join(t.TempDir(), "control.db"))
+	ctx := context.Background()
+
+	projectA := t.TempDir()
+	a, err := store.Open(filepath.Join(projectA, ".ap", "ap.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.CreateSession(ctx, "dup-clean", "loop", "", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.UpdateSession(ctx, "dup-clean", map[string]any{"project_root": projectA}); err != nil {
+		t.Fatal(err)
+	}
+	_ = a.Close()
+
+	projectB := t.TempDir()
+	b, err := store.Open(filepath.Join(projectB, ".ap", "ap.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.CreateSession(ctx, "dup-clean", "loop", "", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.UpdateSession(ctx, "dup-clean", map[string]any{"project_root": projectB}); err != nil {
+		t.Fatal(err)
+	}
+	_ = b.Close()
+
+	var stdout, stderr bytes.Buffer
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+	}
+
+	code := runClean([]string{"dup-clean", "--json"}, deps)
+	if code != output.ExitInvalidArgs {
+		t.Fatalf("exit code = %d, want %d; stdout=%s stderr=%s", code, output.ExitInvalidArgs, stdout.String(), stderr.String())
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("invalid JSON: %v\nraw: %s", err, stdout.String())
+	}
+	errObj := result["error"].(map[string]any)
+	if errObj["code"] != "SESSION_AMBIGUOUS" {
+		t.Fatalf("error.code = %v, want SESSION_AMBIGUOUS", errObj["code"])
+	}
+}

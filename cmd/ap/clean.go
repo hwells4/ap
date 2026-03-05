@@ -23,7 +23,7 @@ type skipResult struct {
 }
 
 func runClean(args []string, deps cliDeps) int {
-	sessionName, all, force, errResp := parseCleanArgs(args)
+	sessionName, all, force, projectRootFlag, errResp := parseCleanArgs(args)
 	if errResp != nil {
 		return renderError(deps, output.ExitInvalidArgs, *errResp)
 	}
@@ -34,28 +34,60 @@ func runClean(args []string, deps cliDeps) int {
 			projectRoot = cwd
 		}
 	}
-
-	runsDir := filepath.Join(projectRoot, ".ap", "runs")
-	locksDir := filepath.Join(projectRoot, ".ap", "locks")
+	if strings.TrimSpace(projectRootFlag) != "" {
+		resolved, rootErr := resolveRunProjectRoot(projectRootFlag, deps.getwd)
+		if rootErr != nil {
+			return renderError(deps, output.ExitInvalidArgs, output.NewError(
+				"INVALID_ARGUMENT",
+				rootErr.Error(),
+				"",
+				"ap clean <session> [--force] [--project-root DIR] [--json] | ap clean --all [--force] [--project-root DIR] [--json]",
+				[]string{"ap clean my-session --project-root /abs/path --json", "ap clean --all --project-root /abs/path --json"},
+			))
+		}
+		projectRoot = resolved
+	}
 
 	ctx := context.Background()
-
-	var cleaned []cleanResult
-	var skipped []skipResult
+	selectedStore := deps.store
+	cleanup := func() {}
 
 	if all {
-		sessions, err := deps.store.ListSessions(ctx, "")
+		if strings.TrimSpace(projectRootFlag) != "" || selectedStore == nil {
+			s, err := openStoreAtProjectRoot(projectRoot)
+			if err != nil {
+				return renderError(deps, output.ExitGeneralError, output.NewError(
+					"GENERAL_ERROR",
+					fmt.Sprintf("failed to open store for project %q", projectRoot),
+					err.Error(),
+					"ap clean --all [--force] [--project-root DIR] [--json]",
+					nil,
+				))
+			}
+			selectedStore = s
+			cleanup = func() { _ = s.Close() }
+		} else if root := strings.TrimSpace(selectedStore.ProjectRoot()); root != "" {
+			projectRoot = root
+		}
+		defer cleanup()
+
+		runsDir := filepath.Join(projectRoot, ".ap", "runs")
+		locksDir := filepath.Join(projectRoot, ".ap", "locks")
+		sessions, err := selectedStore.ListSessions(ctx, "")
 		if err != nil {
 			return renderError(deps, output.ExitGeneralError, output.NewError(
 				"GENERAL_ERROR",
 				"failed to list sessions",
 				err.Error(),
-				"ap clean --all [--force] [--json]",
+				"ap clean --all [--force] [--project-root DIR] [--json]",
 				nil,
 			))
 		}
+
+		var cleaned []cleanResult
+		var skipped []skipResult
 		for _, row := range sessions {
-			c, s := cleanSessionStore(ctx, deps.store, runsDir, locksDir, row.Name, force)
+			c, s := cleanSessionStore(ctx, selectedStore, runsDir, locksDir, row.Name, force)
 			if c != nil {
 				cleaned = append(cleaned, *c)
 			}
@@ -63,16 +95,74 @@ func runClean(args []string, deps cliDeps) int {
 				skipped = append(skipped, *s)
 			}
 		}
-	} else {
-		c, s := cleanSessionStore(ctx, deps.store, runsDir, locksDir, sessionName, force)
-		if c != nil {
-			cleaned = append(cleaned, *c)
-		}
-		if s != nil {
-			skipped = append(skipped, *s)
-		}
+		return renderCleanResult(deps, cleaned, skipped)
 	}
 
+	resolvedStore, resolvedCleanup, lookupErr := resolveSessionStore(ctx, deps, sessionName, projectRootFlag)
+	if lookupErr == nil {
+		selectedStore = resolvedStore
+		cleanup = resolvedCleanup
+		if root := strings.TrimSpace(selectedStore.ProjectRoot()); root != "" {
+			projectRoot = root
+		}
+	} else if errors.Is(lookupErr, errSessionLookupNotFound) {
+		// Keep clean idempotent: if state is not indexed, still try local disk cleanup.
+		if strings.TrimSpace(projectRootFlag) != "" || selectedStore == nil {
+			s, err := openStoreAtProjectRoot(projectRoot)
+			if err != nil {
+				return renderError(deps, output.ExitGeneralError, output.NewError(
+					"GENERAL_ERROR",
+					fmt.Sprintf("failed to open store for project %q", projectRoot),
+					err.Error(),
+					"ap clean <session> [--force] [--project-root DIR] [--json]",
+					nil,
+				))
+			}
+			selectedStore = s
+			cleanup = func() { _ = s.Close() }
+		} else if root := strings.TrimSpace(selectedStore.ProjectRoot()); root != "" {
+			projectRoot = root
+		}
+	} else {
+		var ambiguous *sessionLookupAmbiguousError
+		if errors.As(lookupErr, &ambiguous) {
+			suggestions := []string{}
+			for _, match := range ambiguous.Matches {
+				suggestions = append(suggestions, fmt.Sprintf("ap clean %s --project-root %s --json", sessionName, match.ProjectRoot))
+				if len(suggestions) >= 3 {
+					break
+				}
+			}
+			return renderError(deps, output.ExitInvalidArgs, output.NewError(
+				"SESSION_AMBIGUOUS",
+				lookupErr.Error(),
+				"Use --project-root to select the project explicitly.",
+				"ap clean <session> [--force] [--project-root DIR] [--json]",
+				suggestions,
+			))
+		}
+		return renderError(deps, output.ExitGeneralError, output.NewError(
+			"GENERAL_ERROR",
+			fmt.Sprintf("failed to resolve store for session %q", sessionName),
+			lookupErr.Error(),
+			"ap clean <session> [--force] [--project-root DIR] [--json]",
+			nil,
+		))
+	}
+	defer cleanup()
+
+	runsDir := filepath.Join(projectRoot, ".ap", "runs")
+	locksDir := filepath.Join(projectRoot, ".ap", "locks")
+
+	var cleaned []cleanResult
+	var skipped []skipResult
+	c, s := cleanSessionStore(ctx, selectedStore, runsDir, locksDir, sessionName, force)
+	if c != nil {
+		cleaned = append(cleaned, *c)
+	}
+	if s != nil {
+		skipped = append(skipped, *s)
+	}
 	return renderCleanResult(deps, cleaned, skipped)
 }
 
@@ -182,12 +272,14 @@ func renderCleanResult(deps cliDeps, cleaned []cleanResult, skipped []skipResult
 	return output.ExitSuccess
 }
 
-func parseCleanArgs(args []string) (string, bool, bool, *output.ErrorResponse) {
+func parseCleanArgs(args []string) (string, bool, bool, string, *output.ErrorResponse) {
 	// Safety: NO fuzzy matching on clean — exact arguments only.
 	var sessionName string
+	var projectRoot string
 	var all, force bool
 
-	for _, arg := range args {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
 		switch {
 		case arg == "--json":
 			continue
@@ -195,25 +287,39 @@ func parseCleanArgs(args []string) (string, bool, bool, *output.ErrorResponse) {
 			all = true
 		case arg == "--force" || arg == "-f":
 			force = true
+		case arg == "--project-root" || strings.HasPrefix(arg, "--project-root=") || arg == "--workdir" || strings.HasPrefix(arg, "--workdir="):
+			value, next, err := readFlagValue(arg, args, i)
+			if err != nil {
+				errResp := output.NewError(
+					"INVALID_ARGUMENT",
+					err.Error(),
+					"",
+					"ap clean <session> [--force] [--project-root DIR] [--json] | ap clean --all [--force] [--project-root DIR] [--json]",
+					[]string{"ap clean my-session --project-root /abs/path --json"},
+				)
+				return "", false, false, "", &errResp
+			}
+			i = next
+			projectRoot = strings.TrimSpace(value)
 		case strings.HasPrefix(arg, "-"):
 			errResp := output.NewError(
 				"INVALID_ARGUMENT",
 				fmt.Sprintf("unknown flag %q", arg),
-				"ap clean accepts --all, --force/-f, and --json.",
-				"ap clean <session> [--force] [--json] | ap clean --all [--force] [--json]",
-				[]string{"ap clean my-session", "ap clean --all --json"},
+				"ap clean accepts --all, --force/-f, --project-root/--workdir, and --json.",
+				"ap clean <session> [--force] [--project-root DIR] [--json] | ap clean --all [--force] [--project-root DIR] [--json]",
+				[]string{"ap clean my-session", "ap clean --all --project-root /abs/path --json"},
 			)
-			return "", false, false, &errResp
+			return "", false, false, "", &errResp
 		default:
 			if sessionName != "" {
 				errResp := output.NewError(
 					"INVALID_ARGUMENT",
 					"ap clean takes exactly one session name or --all",
 					fmt.Sprintf("Got %q and %q.", sessionName, arg),
-					"ap clean <session> [--json]",
+					"ap clean <session> [--project-root DIR] [--json]",
 					[]string{"ap clean my-session", "ap clean --all"},
 				)
-				return "", false, false, &errResp
+				return "", false, false, "", &errResp
 			}
 			sessionName = strings.TrimSpace(arg)
 		}
@@ -224,10 +330,10 @@ func parseCleanArgs(args []string) (string, bool, bool, *output.ErrorResponse) {
 			"INVALID_ARGUMENT",
 			"--all and session name are mutually exclusive",
 			fmt.Sprintf("Got --all and %q.", sessionName),
-			"ap clean <session> | ap clean --all",
-			[]string{"ap clean my-session", "ap clean --all"},
+			"ap clean <session> [--project-root DIR] | ap clean --all [--project-root DIR]",
+			[]string{"ap clean my-session", "ap clean --all --project-root /abs/path"},
 		)
-		return "", false, false, &errResp
+		return "", false, false, "", &errResp
 	}
 
 	if !all && sessionName == "" {
@@ -235,11 +341,15 @@ func parseCleanArgs(args []string) (string, bool, bool, *output.ErrorResponse) {
 			"INVALID_ARGUMENT",
 			"missing required argument: <session> or --all",
 			"Provide a session name or --all for bulk cleanup.",
-			"ap clean <session> [--force] [--json] | ap clean --all [--force] [--json]",
-			[]string{"ap clean my-session", "ap clean --all --json"},
+			"ap clean <session> [--force] [--project-root DIR] [--json] | ap clean --all [--force] [--project-root DIR] [--json]",
+			[]string{"ap clean my-session", "ap clean --all --project-root /abs/path --json"},
 		)
-		return "", false, false, &errResp
+		return "", false, false, "", &errResp
 	}
 
-	return sessionName, all, force, nil
+	return sessionName, all, force, projectRoot, nil
+}
+
+func openStoreAtProjectRoot(projectRoot string) (*store.Store, error) {
+	return store.Open(filepath.Join(projectRoot, ".ap", "ap.db"))
 }

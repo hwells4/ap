@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -53,15 +54,25 @@ func run(args []string) int {
 }
 
 // openStore opens the SQLite store at .ap/ap.db relative to the project root.
+// When createIfMissing=false, it returns (nil, nil) if no local DB exists.
 // The caller must close the store when done.
-func openStore(deps cliDeps) (*store.Store, error) {
+func openStore(deps cliDeps, createIfMissing bool) (*store.Store, error) {
 	projectRoot := "."
 	if deps.getwd != nil {
 		if cwd, err := deps.getwd(); err == nil {
 			projectRoot = cwd
 		}
 	}
-	return store.Open(filepath.Join(projectRoot, ".ap", "ap.db"))
+	dbPath := filepath.Join(projectRoot, ".ap", "ap.db")
+	if !createIfMissing {
+		if _, err := os.Stat(dbPath); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, nil
+			}
+			return nil, err
+		}
+	}
+	return store.Open(dbPath)
 }
 
 func runWithDeps(args []string, deps cliDeps) int {
@@ -105,13 +116,16 @@ func runWithDeps(args []string, deps cliDeps) int {
 	// Open store for commands that query session state from the current project.
 	// `run` resolves project root after parsing flags, so it opens its store later.
 	if commandName != "run" && deps.store == nil {
-		s, err := openStore(deps)
+		createIfMissing := commandName == "clean"
+		s, err := openStore(deps, createIfMissing)
 		if err != nil {
 			_, _ = fmt.Fprintf(deps.stderr, "failed to open store: %v\n", err)
 			return output.ExitGeneralError
 		}
-		defer s.Close()
-		deps.store = s
+		if s != nil {
+			defer s.Close()
+			deps.store = s
+		}
 	}
 
 	switch commandName {
