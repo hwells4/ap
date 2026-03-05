@@ -1,7 +1,6 @@
 package store
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -102,7 +101,6 @@ func (s *Store) attachControlPlane() {
 	}
 	s.control = cp
 	_ = s.control.UpsertProject(s.projectRoot, s.projectKey, s.path)
-	s.syncAllSessionIndex(context.Background())
 }
 
 func projectIdentityFromDBPath(path string) (projectRoot string, projectKey string) {
