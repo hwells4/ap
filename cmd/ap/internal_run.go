@@ -124,9 +124,12 @@ func runInternalRun(args []string, deps cliDeps) int {
 	}
 
 	// Open the store for _run.
-	s, storeErr := openStore(deps)
+	s, storeErr := openStore(deps, true)
 	if storeErr != nil {
 		return internalRunError(deps, fmt.Sprintf("open store: %v", storeErr))
+	}
+	if s == nil {
+		return internalRunError(deps, "open store: store is not available")
 	}
 	defer s.Close()
 	deps.store = s
@@ -303,20 +306,6 @@ func resolveProvider(eng *engine.Engine, name string) (provider.Provider, error)
 	}
 }
 
-// resolveProviderName implements precedence: CLI flag > stage.yaml > config.yaml > default.
-func resolveProviderName(cliFlag, stageProvider, configProvider string) string {
-	if cliFlag != "" {
-		return cliFlag
-	}
-	if stageProvider != "" {
-		return stageProvider
-	}
-	if configProvider != "" {
-		return configProvider
-	}
-	return "claude"
-}
-
 // validateProviderName checks if the provider is known and returns a structured error if not.
 func validateProviderName(name string) *output.ErrorResponse {
 	normalized := provider.NormalizeName(name)
@@ -337,20 +326,6 @@ func validateProviderName(name string) *output.ErrorResponse {
 	)
 	errResp.Error.Available = map[string]any{"providers": availableProviders}
 	return &errResp
-}
-
-// resolveModelName implements precedence: CLI flag > stage.yaml > provider default.
-func resolveModelName(cliFlag, stageModel, providerDefault string) string {
-	if cliFlag != "" {
-		return cliFlag
-	}
-	if stageModel != "" {
-		return stageModel
-	}
-	if providerDefault != "" {
-		return providerDefault
-	}
-	return ""
 }
 
 // validateModelForProvider checks if the model is valid for the resolved provider.

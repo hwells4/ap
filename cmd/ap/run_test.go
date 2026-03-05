@@ -492,31 +492,6 @@ func TestRun_ProviderFlag_Invalid_JSON(t *testing.T) {
 	}
 }
 
-func TestResolveProviderName_Precedence(t *testing.T) {
-	tests := []struct {
-		name   string
-		cli    string
-		stage  string
-		config string
-		want   string
-	}{
-		{"cli wins over all", "codex", "claude", "claude", "codex"},
-		{"stage wins over config", "", "codex", "claude", "codex"},
-		{"config wins over default", "", "", "codex", "codex"},
-		{"default is claude", "", "", "", "claude"},
-		{"cli empty falls through", "", "codex", "", "codex"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := resolveProviderName(tt.cli, tt.stage, tt.config)
-			if got != tt.want {
-				t.Errorf("resolveProviderName(%q, %q, %q) = %q, want %q",
-					tt.cli, tt.stage, tt.config, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestValidateProviderName(t *testing.T) {
 	// Valid providers return nil.
 	for _, name := range []string{"claude", "codex", "anthropic", "openai"} {
@@ -527,29 +502,6 @@ func TestValidateProviderName(t *testing.T) {
 	// Invalid provider returns error.
 	if err := validateProviderName("gpt-x"); err == nil {
 		t.Error("validateProviderName(gpt-x) returned nil, want error")
-	}
-}
-
-func TestResolveModelName_Precedence(t *testing.T) {
-	tests := []struct {
-		name    string
-		cli     string
-		stage   string
-		provDef string
-		want    string
-	}{
-		{"cli wins over all", "opus", "sonnet", "haiku", "opus"},
-		{"stage wins over provider default", "", "sonnet", "haiku", "sonnet"},
-		{"provider default wins over empty", "", "", "haiku", "haiku"},
-		{"all empty returns empty", "", "", "", ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := resolveModelName(tt.cli, tt.stage, tt.provDef)
-			if got != tt.want {
-				t.Errorf("resolveModelName(%q, %q, %q) = %q, want %q", tt.cli, tt.stage, tt.provDef, got, tt.want)
-			}
-		})
 	}
 }
 

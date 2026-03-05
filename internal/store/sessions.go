@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/hwells4/ap/internal/controlplane"
 )
 
 // ErrNotFound is returned when a session is not found.
@@ -52,6 +54,7 @@ func (s *Store) CreateSession(ctx context.Context, name, sessionType, pipeline, 
 	if err != nil {
 		return fmt.Errorf("store: create session: %w", err)
 	}
+	s.syncSessionIndex(ctx, name)
 	return nil
 }
 
@@ -179,27 +182,87 @@ func (s *Store) UpdateSession(ctx context.Context, name string, updates map[stri
 	if n == 0 {
 		return ErrNotFound
 	}
+	s.syncSessionIndex(ctx, name)
 	return nil
 }
 
 // DeleteSession removes a session and cascades to iterations, events, outputs.
 func (s *Store) DeleteSession(ctx context.Context, name string) error {
+	rec := s.readSessionIndexRecord(ctx, name)
 	_, err := s.db.ExecContext(ctx, "DELETE FROM sessions WHERE name = ?", name)
 	if err != nil {
 		return fmt.Errorf("store: delete session: %w", err)
 	}
+	if rec != nil && s.control != nil {
+		_ = s.control.DeleteSession(rec.ProjectKey, rec.SessionName)
+	}
 	return nil
 }
 
-// SessionExists returns true if a session with the given name exists.
-func (s *Store) SessionExists(ctx context.Context, name string) (bool, error) {
-	var x int
-	err := s.db.QueryRowContext(ctx, "SELECT 1 FROM sessions WHERE name = ?", name).Scan(&x)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+func (s *Store) syncSessionIndex(ctx context.Context, name string) {
+	if s == nil || s.control == nil {
+		return
 	}
+	rec := s.readSessionIndexRecord(ctx, name)
+	if rec == nil {
+		return
+	}
+	_ = s.control.UpsertProject(rec.ProjectRoot, rec.ProjectKey, s.path)
+	_ = s.control.UpsertSession(*rec)
+}
+
+func (s *Store) syncAllSessionIndex(ctx context.Context) {
+	if s == nil || s.control == nil {
+		return
+	}
+	rows, err := s.ListSessions(ctx, "")
 	if err != nil {
-		return false, fmt.Errorf("store: session exists: %w", err)
+		return
 	}
-	return true, nil
+	for i := range rows {
+		rec := s.sessionRecordFromRow(&rows[i])
+		if rec == nil {
+			continue
+		}
+		_ = s.control.UpsertProject(rec.ProjectRoot, rec.ProjectKey, s.path)
+		_ = s.control.UpsertSession(*rec)
+	}
+}
+
+func (s *Store) readSessionIndexRecord(ctx context.Context, name string) *controlplane.SessionRecord {
+	row, err := s.GetSession(ctx, name)
+	if err != nil {
+		return nil
+	}
+	return s.sessionRecordFromRow(row)
+}
+
+func (s *Store) sessionRecordFromRow(row *SessionRow) *controlplane.SessionRecord {
+	if row == nil {
+		return nil
+	}
+	projectRoot := strings.TrimSpace(row.ProjectRoot)
+	if projectRoot == "" {
+		projectRoot = strings.TrimSpace(s.projectRoot)
+	}
+	projectKey := strings.TrimSpace(row.ProjectKey)
+	if projectKey == "" {
+		projectKey = strings.TrimSpace(s.projectKey)
+	}
+	rec := &controlplane.SessionRecord{
+		ProjectKey:         projectKey,
+		ProjectRoot:        projectRoot,
+		SessionName:        row.Name,
+		Status:             row.Status,
+		Iteration:          row.Iteration,
+		IterationCompleted: row.IterationCompleted,
+		StartedAt:          row.StartedAt,
+		CompletedAt:        row.CompletedAt,
+		CurrentStage:       row.CurrentStage,
+		RepoRoot:           row.RepoRoot,
+		ConfigRoot:         row.ConfigRoot,
+		TargetSource:       row.TargetSource,
+		UpdatedAt:          row.UpdatedAt,
+	}
+	return rec
 }

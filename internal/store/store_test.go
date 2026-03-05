@@ -184,29 +184,6 @@ func TestDeleteSessionCascades(t *testing.T) {
 	}
 }
 
-func TestSessionExists(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-
-	exists, err := s.SessionExists(ctx, "nope")
-	if err != nil {
-		t.Fatalf("SessionExists: %v", err)
-	}
-	if exists {
-		t.Error("expected false for nonexistent session")
-	}
-
-	s.CreateSession(ctx, "sess1", "stage", "p", "{}")
-
-	exists, err = s.SessionExists(ctx, "sess1")
-	if err != nil {
-		t.Fatalf("SessionExists: %v", err)
-	}
-	if !exists {
-		t.Error("expected true for existing session")
-	}
-}
-
 func TestStartCompleteIteration(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
