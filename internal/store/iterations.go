@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -65,9 +66,21 @@ func (s *Store) StartIteration(ctx context.Context, input IterationInput) error 
 		return fmt.Errorf("store: insert iteration: %w", err)
 	}
 
-	cursorJSON := fmt.Sprintf(`{"iteration":%d,"provider":"%s"}`, input.Iteration, input.ProviderName)
-	dataJSON := fmt.Sprintf(`{"stage":"%s","iteration":%d}`, input.StageName, input.Iteration)
-	if err := appendEventTx(ctx, tx, input.SessionName, "iteration.started", cursorJSON, dataJSON); err != nil {
+	cursorBytes, err := json.Marshal(struct {
+		Iteration int    `json:"iteration"`
+		Provider  string `json:"provider"`
+	}{input.Iteration, input.ProviderName})
+	if err != nil {
+		return fmt.Errorf("store: marshal cursor json: %w", err)
+	}
+	dataBytes, err := json.Marshal(struct {
+		Stage     string `json:"stage"`
+		Iteration int    `json:"iteration"`
+	}{input.StageName, input.Iteration})
+	if err != nil {
+		return fmt.Errorf("store: marshal data json: %w", err)
+	}
+	if err := appendEventTx(ctx, tx, input.SessionName, "iteration.started", string(cursorBytes), string(dataBytes)); err != nil {
 		return err
 	}
 
@@ -115,10 +128,24 @@ func (s *Store) CompleteIteration(ctx context.Context, input IterationComplete) 
 		return fmt.Errorf("store: insert output: %w", err)
 	}
 
-	cursorJSON := fmt.Sprintf(`{"iteration":%d,"provider":"%s"}`, input.Iteration, input.ProviderName)
-	dataJSON := fmt.Sprintf(`{"stage":"%s","iteration":%d,"decision":"%s","summary":"%s","duration":%d}`,
-		input.StageName, input.Iteration, input.Decision, input.Summary, input.DurationMS)
-	if err := appendEventTx(ctx, tx, input.SessionName, "iteration.completed", cursorJSON, dataJSON); err != nil {
+	cursorBytes2, err := json.Marshal(struct {
+		Iteration int    `json:"iteration"`
+		Provider  string `json:"provider"`
+	}{input.Iteration, input.ProviderName})
+	if err != nil {
+		return fmt.Errorf("store: marshal cursor json: %w", err)
+	}
+	dataBytes2, err := json.Marshal(struct {
+		Stage     string `json:"stage"`
+		Iteration int    `json:"iteration"`
+		Decision  string `json:"decision"`
+		Summary   string `json:"summary"`
+		Duration  int64  `json:"duration"`
+	}{input.StageName, input.Iteration, input.Decision, input.Summary, input.DurationMS})
+	if err != nil {
+		return fmt.Errorf("store: marshal data json: %w", err)
+	}
+	if err := appendEventTx(ctx, tx, input.SessionName, "iteration.completed", string(cursorBytes2), string(dataBytes2)); err != nil {
 		return err
 	}
 
