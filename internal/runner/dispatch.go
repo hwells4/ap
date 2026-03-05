@@ -53,7 +53,7 @@ func (ds *DispatchState) ShouldSkip(signalID string) bool {
 func LoadDispatchStateFromStore(ctx context.Context, st *store.Store, session string) (*DispatchState, error) {
 	ds := NewDispatchState()
 
-	rows, err := st.GetEvents(ctx, session, "", 0)
+	rows, err := st.GetEventsByTypePrefix(ctx, session, "signal.", 0)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch: get events from store: %w", err)
 	}

@@ -89,6 +89,29 @@ func (s *Store) GetEvents(ctx context.Context, sessionName string, typeFilter st
 	return result, rows.Err()
 }
 
+// GetEventsByTypePrefix returns events whose type starts with the given prefix.
+func (s *Store) GetEventsByTypePrefix(ctx context.Context, sessionName string, typePrefix string, afterSeq int) ([]EventRow, error) {
+	query := `SELECT id, session_name, seq, type, cursor_json, data_json, created_at
+	           FROM events WHERE session_name = ? AND type GLOB ? AND seq > ? ORDER BY seq`
+	args := []any{sessionName, typePrefix + "*", afterSeq}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: get events by type prefix: %w", err)
+	}
+	defer rows.Close()
+
+	var result []EventRow
+	for rows.Next() {
+		var r EventRow
+		if err := rows.Scan(&r.ID, &r.SessionName, &r.Seq, &r.Type, &r.CursorJSON, &r.DataJSON, &r.CreatedAt); err != nil {
+			return nil, fmt.Errorf("store: get events by type prefix scan: %w", err)
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
 // TailEvents returns events with seq > afterSeq, ordered by seq.
 func (s *Store) TailEvents(ctx context.Context, sessionName string, afterSeq int) ([]EventRow, error) {
 	return s.GetEvents(ctx, sessionName, "", afterSeq)
