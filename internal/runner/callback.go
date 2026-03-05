@@ -2,6 +2,7 @@ package runner
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -141,7 +142,7 @@ func (cl *CallbackListener) handleResume(w http.ResponseWriter, r *http.Request)
 
 	if cl.token != "" {
 		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != cl.token {
+		if !strings.HasPrefix(auth, "Bearer ") || subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, "Bearer ")), []byte(cl.token)) != 1 {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
