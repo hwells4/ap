@@ -51,7 +51,7 @@ func WriteRunRequest(path string, req RunRequestFile) error {
 		return fmt.Errorf("create run request dir: %w", err)
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write run request: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {

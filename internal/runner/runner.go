@@ -1108,7 +1108,7 @@ func persistRunRequest(cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("marshal run request: %w", err)
 	}
-	return os.WriteFile(filepath.Join(cfg.RunDir, "run_request.json"), append(data, '\n'), 0o644)
+	return os.WriteFile(filepath.Join(cfg.RunDir, "run_request.json"), append(data, '\n'), 0o600)
 }
 
 // marshalRunRequestJSON returns a JSON string for the run request payload,
