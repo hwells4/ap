@@ -134,6 +134,30 @@ func (s *Store) ListSessions(ctx context.Context, statusFilter string) ([]Sessio
 	return result, rows.Err()
 }
 
+// ErrInvalidTransition is returned when a status transition is not allowed.
+var ErrInvalidTransition = errors.New("store: invalid status transition")
+
+// validTransitions defines the allowed session status transitions.
+// Terminal states (completed, aborted) have no outgoing transitions.
+var validTransitions = map[string]map[string]bool{
+	StatusRunning: {
+		StatusPaused:    true,
+		StatusCompleted: true,
+		StatusFailed:    true,
+		StatusAborted:   true,
+	},
+	StatusPaused: {
+		StatusRunning: true,
+		StatusAborted: true,
+	},
+	StatusFailed: {
+		StatusRunning: true,
+		StatusAborted: true,
+	},
+	StatusCompleted: {},
+	StatusAborted:   {},
+}
+
 // validUpdateKeys lists all columns that may be passed to UpdateSession.
 var validUpdateKeys = map[string]bool{
 	"status":              true,
@@ -160,6 +184,28 @@ func (s *Store) UpdateSession(ctx context.Context, name string, updates map[stri
 	if len(updates) == 0 {
 		return nil
 	}
+
+	// Validate status transition if "status" is being updated.
+	if newStatus, ok := updates["status"]; ok {
+		var currentStatus string
+		err := s.db.QueryRowContext(ctx,
+			"SELECT status FROM sessions WHERE name = ?", name,
+		).Scan(&currentStatus)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("store: read current status: %w", err)
+		}
+		newStr, _ := newStatus.(string)
+		if newStr != currentStatus {
+			allowed := validTransitions[currentStatus]
+			if !allowed[newStr] {
+				return fmt.Errorf("%w from %q to %q", ErrInvalidTransition, currentStatus, newStr)
+			}
+		}
+	}
+
 	var setClauses []string
 	var args []any
 	for k, v := range updates {

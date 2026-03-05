@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 )
@@ -143,6 +144,77 @@ func TestUpdateSessionNotFound(t *testing.T) {
 	err := s.UpdateSession(ctx, "nope", map[string]any{"status": "done"})
 	if err != ErrNotFound {
 		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestUpdateSessionStateMachine(t *testing.T) {
+	tests := []struct {
+		name    string
+		from    string
+		to      string
+		wantErr bool
+	}{
+		// Valid transitions from running.
+		{"running->paused", "running", "paused", false},
+		{"running->completed", "running", "completed", false},
+		{"running->failed", "running", "failed", false},
+		{"running->aborted", "running", "aborted", false},
+		// Valid transitions from paused.
+		{"paused->running", "paused", "running", false},
+		{"paused->aborted", "paused", "aborted", false},
+		// Valid transitions from failed.
+		{"failed->running", "failed", "running", false},
+		{"failed->aborted", "failed", "aborted", false},
+		// Same-status no-op transitions.
+		{"running->running", "running", "running", false},
+		{"paused->paused", "paused", "paused", false},
+		// Invalid transitions from terminal states.
+		{"completed->running", "completed", "running", true},
+		{"completed->paused", "completed", "paused", true},
+		{"aborted->running", "aborted", "running", true},
+		{"aborted->paused", "aborted", "paused", true},
+		// Invalid cross-transitions.
+		{"paused->completed", "paused", "completed", true},
+		{"paused->failed", "paused", "failed", true},
+		{"failed->completed", "failed", "completed", true},
+		{"failed->paused", "failed", "paused", true},
+		{"running->bogus", "running", "bogus", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := mustOpen(t)
+			ctx := context.Background()
+
+			session := "s-" + tt.name
+			s.CreateSession(ctx, session, "stage", "p", "{}")
+
+			// Transition to the "from" state if it's not the default "running".
+			if tt.from != "running" {
+				// Use a valid path to reach the desired state.
+				switch tt.from {
+				case "paused":
+					s.UpdateSession(ctx, session, map[string]any{"status": "paused"})
+				case "completed":
+					s.UpdateSession(ctx, session, map[string]any{"status": "completed"})
+				case "failed":
+					s.UpdateSession(ctx, session, map[string]any{"status": "failed"})
+				case "aborted":
+					s.UpdateSession(ctx, session, map[string]any{"status": "aborted"})
+				}
+			}
+
+			err := s.UpdateSession(ctx, session, map[string]any{"status": tt.to})
+			if tt.wantErr && err == nil {
+				t.Fatalf("expected error for %s -> %s, got nil", tt.from, tt.to)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected error for %s -> %s: %v", tt.from, tt.to, err)
+			}
+			if tt.wantErr && !errors.Is(err, ErrInvalidTransition) {
+				t.Fatalf("expected ErrInvalidTransition, got %v", err)
+			}
+		})
 	}
 }
 
