@@ -3,8 +3,6 @@ package termination
 import (
 	"strings"
 	"testing"
-
-	"github.com/hwells4/ap/internal/result"
 )
 
 func TestFixedTargetPrefersIterations(t *testing.T) {
@@ -49,9 +47,8 @@ func TestFixedShouldStopOnDecisionStop(t *testing.T) {
 	t.Parallel()
 
 	strategy := NewFixed(FixedConfig{Max: intPtr(5)})
-	res := result.Result{Decision: "STOP"}
 
-	done, reason := strategy.ShouldStop(2, res)
+	done, reason := strategy.ShouldStop(2, "STOP")
 	if !done {
 		t.Fatalf("ShouldStop() = false, want true")
 	}
@@ -64,9 +61,8 @@ func TestFixedShouldStopOnDecisionError(t *testing.T) {
 	t.Parallel()
 
 	strategy := NewFixed(FixedConfig{Max: intPtr(5)})
-	res := result.Result{Decision: "error"}
 
-	done, reason := strategy.ShouldStop(2, res)
+	done, reason := strategy.ShouldStop(2, "error")
 	if !done {
 		t.Fatalf("ShouldStop() = false, want true")
 	}
@@ -75,36 +71,12 @@ func TestFixedShouldStopOnDecisionError(t *testing.T) {
 	}
 }
 
-func TestFixedShouldStopOnSignalStop(t *testing.T) {
-	t.Parallel()
-
-	strategy := NewFixed(FixedConfig{Max: intPtr(5)})
-	res := result.Result{Signals: result.SignalInfo{PlateauSuspected: true}}
-
-	done, _ := strategy.ShouldStop(1, res)
-	if !done {
-		t.Fatalf("ShouldStop() = false, want true")
-	}
-}
-
-func TestFixedShouldStopOnSignalError(t *testing.T) {
-	t.Parallel()
-
-	strategy := NewFixed(FixedConfig{Max: intPtr(5)})
-	res := result.Result{Signals: result.SignalInfo{Risk: "high"}}
-
-	done, _ := strategy.ShouldStop(1, res)
-	if !done {
-		t.Fatalf("ShouldStop() = false, want true")
-	}
-}
-
 func TestFixedShouldStopOnMaxIterations(t *testing.T) {
 	t.Parallel()
 
 	strategy := NewFixed(FixedConfig{Max: intPtr(3)})
 
-	done, reason := strategy.ShouldStop(3, result.Result{})
+	done, reason := strategy.ShouldStop(3, "")
 	if !done {
 		t.Fatalf("ShouldStop() = false, want true")
 	}
@@ -118,7 +90,7 @@ func TestFixedShouldContinueBeforeMax(t *testing.T) {
 
 	strategy := NewFixed(FixedConfig{Max: intPtr(3)})
 
-	done, reason := strategy.ShouldStop(2, result.Result{})
+	done, reason := strategy.ShouldStop(2, "")
 	if done {
 		t.Fatalf("ShouldStop() = true, want false")
 	}

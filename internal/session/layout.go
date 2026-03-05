@@ -36,8 +36,6 @@ type Layout struct {
 	EventsPath     string
 	ProgressPath   string
 	OutputPath     string
-	StatusPath     string
-	ResultPath     string
 }
 
 // Prepare creates the deterministic session directory tree under .ap/runs/<session>.
@@ -133,8 +131,6 @@ func buildLayout(projectRoot, sessionName, stageName string, stageIndex, iterati
 		EventsPath:     filepath.Join(sessionDir, "events.jsonl"),
 		ProgressPath:   filepath.Join(stageDir, "progress.md"),
 		OutputPath:     filepath.Join(iterationDir, "output.md"),
-		StatusPath:     filepath.Join(iterationDir, "status.json"),
-		ResultPath:     filepath.Join(iterationDir, "result.json"),
 	}
 }
 

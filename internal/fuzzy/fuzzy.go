@@ -22,6 +22,7 @@ var canonicalCommands = []string{
 	"logs",
 	"clean",
 	"watch",
+	"query",
 }
 
 var commandAliases = map[string]string{

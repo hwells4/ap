@@ -237,6 +237,12 @@ func TestRunRequestFile_RoundTrip(t *testing.T) {
 		Env:            map[string]string{"KEY": "val", "FOO": "bar"},
 		RunDir:         filepath.Join(dir, "runs", "my-session"),
 		OnEscalate:     "webhook:http://localhost:8123/hooks/escalate",
+		ParentSession:  "parent-1",
+		ProjectRoot:    "/home/user/project",
+		RepoRoot:       "/home/user",
+		ConfigRoot:     "/home/user/project",
+		ProjectKey:     "/home/user/project",
+		TargetSource:   "spawn_inherit",
 	}
 
 	if err := WriteRunRequest(path, original); err != nil {
@@ -256,7 +262,13 @@ func TestRunRequestFile_RoundTrip(t *testing.T) {
 		loaded.PromptTemplate != original.PromptTemplate ||
 		loaded.WorkDir != original.WorkDir ||
 		loaded.RunDir != original.RunDir ||
-		loaded.OnEscalate != original.OnEscalate {
+		loaded.OnEscalate != original.OnEscalate ||
+		loaded.ParentSession != original.ParentSession ||
+		loaded.ProjectRoot != original.ProjectRoot ||
+		loaded.RepoRoot != original.RepoRoot ||
+		loaded.ConfigRoot != original.ConfigRoot ||
+		loaded.ProjectKey != original.ProjectKey ||
+		loaded.TargetSource != original.TargetSource {
 		t.Errorf("round-trip mismatch:\n  original: %+v\n  loaded:   %+v", original, loaded)
 	}
 

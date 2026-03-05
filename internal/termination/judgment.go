@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/hwells4/ap/internal/judge"
-	"github.com/hwells4/ap/internal/result"
 )
 
 const (
@@ -64,7 +63,6 @@ func NewJudgment(cfg JudgmentConfig) *Judgment {
 func (j *Judgment) ShouldStop(
 	ctx context.Context,
 	iteration int,
-	_ result.Result,
 	evaluator Evaluator,
 	summaries []string,
 ) (bool, string) {

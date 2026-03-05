@@ -2,7 +2,6 @@
 
 Read context from: ${CTX}
 Progress file: ${PROGRESS}
-Status output: ${STATUS}
 Iteration: ${ITERATION}
 
 ${CONTEXT}
@@ -47,9 +46,11 @@ Write your response to `${PROGRESS}/../response.md`. Be specific:
 
 The goal is to converge on the best set of improvements, not to win the argument.
 
-## Write Status
+## Write Decision
 
-```json
+When you are done, output your decision in a fenced block:
+
+```ap-result
 {
   "decision": "stop",
   "reason": "Response complete",
@@ -62,6 +63,6 @@ The goal is to converge on the best set of improvements, not to win the argument
 }
 ```
 
-Write to `${STATUS}`.
+Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
 
 Use ultrathink.

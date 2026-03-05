@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/hwells4/ap/internal/runtarget"
 	"github.com/hwells4/ap/internal/spec"
 	"github.com/hwells4/ap/internal/stage"
 )
@@ -33,6 +34,8 @@ type Session struct {
 // StartOpts controls session.Start behavior.
 type StartOpts struct {
 	ProjectRoot   string
+	RunTarget     runtarget.Target
+	TargetSource  string
 	Provider      string
 	Model         string
 	OnEscalate    string
@@ -61,6 +64,11 @@ type runRequestFile struct {
 	Context        string            `json:"context,omitempty"`
 	Force          bool              `json:"force,omitempty"`
 	ParentSession  string            `json:"parent_session,omitempty"`
+	ProjectRoot    string            `json:"project_root,omitempty"`
+	RepoRoot       string            `json:"repo_root,omitempty"`
+	ConfigRoot     string            `json:"config_root,omitempty"`
+	ProjectKey     string            `json:"project_key,omitempty"`
+	TargetSource   string            `json:"target_source,omitempty"`
 }
 
 // Start writes the session run request and delegates process creation to the
@@ -73,10 +81,20 @@ func Start(parsed spec.Spec, session string, opts StartOpts) (*Session, error) {
 		return nil, ErrLauncherRequired
 	}
 
-	projectRoot, err := resolveProjectRoot(opts.ProjectRoot)
+	projectRootInput := strings.TrimSpace(opts.ProjectRoot)
+	if override := strings.TrimSpace(opts.RunTarget.ProjectRoot); override != "" {
+		projectRootInput = override
+	}
+	projectRoot, err := resolveProjectRoot(projectRootInput)
 	if err != nil {
 		return nil, err
 	}
+	target, err := resolveRunTarget(opts, projectRoot)
+	if err != nil {
+		return nil, err
+	}
+	projectRoot = target.ProjectRoot
+
 	sessionName, err := validateSegment(session, "session name")
 	if err != nil {
 		return nil, err
@@ -112,7 +130,7 @@ func Start(parsed spec.Spec, session string, opts StartOpts) (*Session, error) {
 		Model:          strings.TrimSpace(opts.Model),
 		Iterations:     iterations,
 		PromptTemplate: promptTemplate,
-		WorkDir:        projectRoot,
+		WorkDir:        target.ProjectRoot,
 		Env:            cloneStringMap(opts.Env),
 		RunDir:         layout.SessionDir,
 		InputFiles:     inputFiles,
@@ -120,6 +138,11 @@ func Start(parsed spec.Spec, session string, opts StartOpts) (*Session, error) {
 		Context:        opts.Context,
 		Force:          opts.Force,
 		ParentSession:  strings.TrimSpace(opts.ParentSession),
+		ProjectRoot:    target.ProjectRoot,
+		RepoRoot:       target.RepoRoot,
+		ConfigRoot:     target.ConfigRoot,
+		ProjectKey:     target.ProjectKey,
+		TargetSource:   target.Source,
 	}
 	if err := writeRunRequest(layout.RunRequestPath, request); err != nil {
 		return nil, err
@@ -161,6 +184,17 @@ func resolveProjectRoot(projectRoot string) (string, error) {
 		return "", fmt.Errorf("session: determine project root: %w", err)
 	}
 	return cwd, nil
+}
+
+func resolveRunTarget(opts StartOpts, projectRoot string) (runtarget.Target, error) {
+	if strings.TrimSpace(opts.RunTarget.ProjectRoot) == "" {
+		source := strings.TrimSpace(opts.TargetSource)
+		if source == "" {
+			source = runtarget.SourceCLI
+		}
+		return runtarget.Resolve(projectRoot, source)
+	}
+	return runtarget.NormalizeWithDefaults(opts.RunTarget, opts.TargetSource)
 }
 
 func sessionDirExists(projectRoot, session string) bool {

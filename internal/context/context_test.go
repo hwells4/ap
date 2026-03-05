@@ -21,7 +21,7 @@ func TestGenerateContextStructure(t *testing.T) {
 		MaxIterations: intPtr(25),
 	}
 
-	contextPath, err := GenerateContext("test-session", 1, stageConfig, tempDir)
+	contextPath, err := GenerateContext("test-session", 1, stageConfig, tempDir, nil)
 	if err != nil {
 		t.Fatalf("GenerateContext: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestContextPathsAndInputs(t *testing.T) {
 		MaxIterations: intPtr(25),
 	}
 
-	contextPath, err := GenerateContext("test-session", 1, stageConfig, tempDir)
+	contextPath, err := GenerateContext("test-session", 1, stageConfig, tempDir, nil)
 	if err != nil {
 		t.Fatalf("GenerateContext: %v", err)
 	}
@@ -82,9 +82,6 @@ func TestContextPathsAndInputs(t *testing.T) {
 	}
 	if !stringsContain(manifest.Paths.Progress, "progress.md") {
 		t.Fatalf("progress path missing progress.md: %q", manifest.Paths.Progress)
-	}
-	if !stringsContain(manifest.Paths.Status, filepath.Join("iterations", "001", "status.json")) {
-		t.Fatalf("status path missing iteration: %q", manifest.Paths.Status)
 	}
 
 	if len(manifest.Inputs.FromStage) != 0 {
@@ -108,7 +105,7 @@ func TestGenerateContextOutputPathUsesIterationDir(t *testing.T) {
 		Index: intPtr(1),
 	}
 
-	contextPath, err := GenerateContext("test-session", 1, stageConfig, tempDir)
+	contextPath, err := GenerateContext("test-session", 1, stageConfig, tempDir, nil)
 	if err != nil {
 		t.Fatalf("GenerateContext: %v", err)
 	}

@@ -2,7 +2,6 @@
 
 Read context from: ${CTX}
 Progress file: ${PROGRESS}
-Status output: ${STATUS}
 Iteration: ${ITERATION}
 
 ${CONTEXT}
@@ -50,9 +49,11 @@ Focus on substance:
 
 Don't nitpick wording. Don't suggest reorganization for its own sake. Every recommendation should make the plan materially more implementable.
 
-## Write Status
+## Write Decision
 
-```json
+When you are done, output your decision in a fenced block:
+
+```ap-result
 {
   "decision": "stop",
   "reason": "Recommendations complete",
@@ -65,6 +66,6 @@ Don't nitpick wording. Don't suggest reorganization for its own sake. Every reco
 }
 ```
 
-Write to `${STATUS}`.
+Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
 
 Use ultrathink.

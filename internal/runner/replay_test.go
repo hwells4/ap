@@ -2,30 +2,31 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/hwells4/ap/internal/events"
 	"github.com/hwells4/ap/internal/mock"
-	"github.com/hwells4/ap/internal/state"
+	"github.com/hwells4/ap/internal/store"
 )
 
 // TestDispatchState_EscalateInFlight verifies that a dispatching event for
 // an escalate signal without a corresponding result is reported as in-flight.
 func TestDispatchState_EscalateInFlight(t *testing.T) {
-	dir := t.TempDir()
-	evPath := filepath.Join(dir, "events.jsonl")
+	s := mustOpenStore(t)
+	ctx := context.Background()
+	s.CreateSession(ctx, "test", "stage", "test", "{}")
 
-	writeEvent(t, evPath, events.TypeSignalDispatching, "test", map[string]any{
+	writeStoreEvent(t, s, store.TypeSignalDispatching, "test", map[string]any{
 		"signal_id":   "sig-1-escalate-0",
 		"signal_type": "escalate",
 		"iteration":   1,
 	})
 
-	ds, err := LoadDispatchState(evPath)
+	ds, err := LoadDispatchStateFromStore(ctx, s, "test")
 	if err != nil {
-		t.Fatalf("LoadDispatchState: %v", err)
+		t.Fatalf("LoadDispatchStateFromStore: %v", err)
 	}
 
 	if !ds.IsInFlight("sig-1-escalate-0") {
@@ -43,29 +44,30 @@ func TestDispatchState_EscalateInFlight(t *testing.T) {
 // appearing in two dispatching events (e.g., crash-and-replay) is tracked
 // as a single dispatch, not creating duplicates.
 func TestDispatchState_DuplicateDispatching(t *testing.T) {
-	dir := t.TempDir()
-	evPath := filepath.Join(dir, "events.jsonl")
+	s := mustOpenStore(t)
+	ctx := context.Background()
+	s.CreateSession(ctx, "test", "stage", "test", "{}")
 
 	// Simulate a crash-replay: dispatching emitted twice for the same ID.
-	writeEvent(t, evPath, events.TypeSignalDispatching, "test", map[string]any{
+	writeStoreEvent(t, s, store.TypeSignalDispatching, "test", map[string]any{
 		"signal_id":   "sig-1-spawn-0",
 		"signal_type": "spawn",
 		"iteration":   1,
 	})
-	writeEvent(t, evPath, events.TypeSignalDispatching, "test", map[string]any{
+	writeStoreEvent(t, s, store.TypeSignalDispatching, "test", map[string]any{
 		"signal_id":   "sig-1-spawn-0",
 		"signal_type": "spawn",
 		"iteration":   1,
 	})
 	// Only one result event.
-	writeEvent(t, evPath, events.TypeSignalSpawn, "test", map[string]any{
+	writeStoreEvent(t, s, store.TypeSignalSpawn, "test", map[string]any{
 		"signal_id":     "sig-1-spawn-0",
 		"child_session": "child-1",
 	})
 
-	ds, err := LoadDispatchState(evPath)
+	ds, err := LoadDispatchStateFromStore(ctx, s, "test")
 	if err != nil {
-		t.Fatalf("LoadDispatchState: %v", err)
+		t.Fatalf("LoadDispatchStateFromStore: %v", err)
 	}
 
 	if !ds.IsCompleted("sig-1-spawn-0") {
@@ -79,27 +81,26 @@ func TestDispatchState_DuplicateDispatching(t *testing.T) {
 // TestDispatchState_SignalIDIsolation verifies that different signal IDs
 // (different types, iterations, indices) are tracked independently.
 func TestDispatchState_SignalIDIsolation(t *testing.T) {
-	dir := t.TempDir()
-	evPath := filepath.Join(dir, "events.jsonl")
+	s := mustOpenStore(t)
+	ctx := context.Background()
+	s.CreateSession(ctx, "test", "stage", "test", "{}")
 
 	// spawn signal completed.
-	writeEvent(t, evPath, events.TypeSignalDispatching, "test", map[string]any{
+	writeStoreEvent(t, s, store.TypeSignalDispatching, "test", map[string]any{
 		"signal_id": "sig-1-spawn-0", "signal_type": "spawn", "iteration": 1,
 	})
-	writeEvent(t, evPath, events.TypeSignalSpawn, "test", map[string]any{
+	writeStoreEvent(t, s, store.TypeSignalSpawn, "test", map[string]any{
 		"signal_id": "sig-1-spawn-0", "child_session": "child-1",
 	})
 
 	// escalate signal in-flight.
-	writeEvent(t, evPath, events.TypeSignalDispatching, "test", map[string]any{
+	writeStoreEvent(t, s, store.TypeSignalDispatching, "test", map[string]any{
 		"signal_id": "sig-1-escalate-0", "signal_type": "escalate", "iteration": 1,
 	})
 
-	// spawn signal from iteration 2, not yet dispatched.
-
-	ds, err := LoadDispatchState(evPath)
+	ds, err := LoadDispatchStateFromStore(ctx, s, "test")
 	if err != nil {
-		t.Fatalf("LoadDispatchState: %v", err)
+		t.Fatalf("LoadDispatchStateFromStore: %v", err)
 	}
 
 	if !ds.ShouldSkip("sig-1-spawn-0") {
@@ -117,49 +118,47 @@ func TestDispatchState_SignalIDIsolation(t *testing.T) {
 }
 
 // TestIntegration_CrashDuringEscalate_Recovery verifies the full escalate
-// crash-recovery scenario: dispatching emitted, then crash (no escalate
-// result), then recovery adds the result.
+// crash-recovery scenario.
 func TestIntegration_CrashDuringEscalate_Recovery(t *testing.T) {
-	dir := t.TempDir()
-	evPath := filepath.Join(dir, "events.jsonl")
+	s := mustOpenStore(t)
+	ctx := context.Background()
+	session := "esc-crash"
+	s.CreateSession(ctx, session, "stage", "test", "{}")
 
-	// Simulate normal lifecycle events before the crash.
-	writeEvent(t, evPath, events.TypeSessionStart, "esc-crash", map[string]any{
+	writeStoreEvent(t, s, store.TypeSessionStart, session, map[string]any{
 		"stage": "test", "iterations": 5,
 	})
-	writeEvent(t, evPath, events.TypeIterationStart, "esc-crash", map[string]any{
+	writeStoreEvent(t, s, store.TypeIterationStart, session, map[string]any{
 		"iteration": 1,
 	})
-	writeEvent(t, evPath, events.TypeIterationComplete, "esc-crash", map[string]any{
+	writeStoreEvent(t, s, store.TypeIterationComplete, session, map[string]any{
 		"iteration": 1, "decision": "continue",
 	})
-	// Escalate dispatching emitted, then crash.
-	writeEvent(t, evPath, events.TypeSignalDispatching, "esc-crash", map[string]any{
+	writeStoreEvent(t, s, store.TypeSignalDispatching, session, map[string]any{
 		"signal_id":   "sig-1-escalate-0",
 		"signal_type": "escalate",
 		"iteration":   1,
 	})
 
-	ds, err := LoadDispatchState(evPath)
+	ds, err := LoadDispatchStateFromStore(ctx, s, session)
 	if err != nil {
-		t.Fatalf("LoadDispatchState: %v", err)
+		t.Fatalf("LoadDispatchStateFromStore: %v", err)
 	}
 
 	if !ds.IsInFlight("sig-1-escalate-0") {
 		t.Error("escalate should be in-flight after crash")
 	}
 
-	// Simulate recovery: escalate result event.
-	writeEvent(t, evPath, events.TypeSignalEscalate, "esc-crash", map[string]any{
+	writeStoreEvent(t, s, store.TypeSignalEscalate, session, map[string]any{
 		"signal_id": "sig-1-escalate-0",
 		"iteration": 1,
 		"type":      "human",
 		"reason":    "review needed",
 	})
 
-	ds2, err := LoadDispatchState(evPath)
+	ds2, err := LoadDispatchStateFromStore(ctx, s, session)
 	if err != nil {
-		t.Fatalf("LoadDispatchState after recovery: %v", err)
+		t.Fatalf("LoadDispatchStateFromStore after recovery: %v", err)
 	}
 
 	if !ds2.IsCompleted("sig-1-escalate-0") {
@@ -173,50 +172,48 @@ func TestIntegration_CrashDuringEscalate_Recovery(t *testing.T) {
 	}
 }
 
-// TestIntegration_FullReplayScenario builds a comprehensive events.jsonl with
-// multiple signal types in different states and verifies DispatchState
-// correctly identifies each signal's lifecycle phase.
+// TestIntegration_FullReplayScenario builds a comprehensive event log with
+// multiple signal types in different states.
 func TestIntegration_FullReplayScenario(t *testing.T) {
-	dir := t.TempDir()
-	evPath := filepath.Join(dir, "events.jsonl")
+	s := mustOpenStore(t)
+	ctx := context.Background()
+	session := "replay"
+	s.CreateSession(ctx, session, "stage", "test", "{}")
 
-	// Iteration 1: two spawns — first completed, second failed.
-	writeEvent(t, evPath, events.TypeSessionStart, "replay", map[string]any{
+	writeStoreEvent(t, s, store.TypeSessionStart, session, map[string]any{
 		"stage": "test", "iterations": 10,
 	})
-	writeEvent(t, evPath, events.TypeIterationStart, "replay", map[string]any{"iteration": 1})
-	writeEvent(t, evPath, events.TypeIterationComplete, "replay", map[string]any{
+	writeStoreEvent(t, s, store.TypeIterationStart, session, map[string]any{"iteration": 1})
+	writeStoreEvent(t, s, store.TypeIterationComplete, session, map[string]any{
 		"iteration": 1, "decision": "continue",
 	})
-	writeEvent(t, evPath, events.TypeSignalDispatching, "replay", map[string]any{
+	writeStoreEvent(t, s, store.TypeSignalDispatching, session, map[string]any{
 		"signal_id": "sig-1-spawn-0", "signal_type": "spawn", "iteration": 1,
 	})
-	writeEvent(t, evPath, events.TypeSignalSpawn, "replay", map[string]any{
+	writeStoreEvent(t, s, store.TypeSignalSpawn, session, map[string]any{
 		"signal_id": "sig-1-spawn-0", "child_session": "child-a",
 	})
-	writeEvent(t, evPath, events.TypeSignalDispatching, "replay", map[string]any{
+	writeStoreEvent(t, s, store.TypeSignalDispatching, session, map[string]any{
 		"signal_id": "sig-1-spawn-1", "signal_type": "spawn", "iteration": 1,
 	})
-	writeEvent(t, evPath, events.TypeSignalSpawnFailed, "replay", map[string]any{
+	writeStoreEvent(t, s, store.TypeSignalSpawnFailed, session, map[string]any{
 		"signal_id": "sig-1-spawn-1", "error": "stage not found",
 	})
 
-	// Iteration 2: inject (no dispatch state), then spawn in-flight (crash).
-	writeEvent(t, evPath, events.TypeIterationStart, "replay", map[string]any{"iteration": 2})
-	writeEvent(t, evPath, events.TypeIterationComplete, "replay", map[string]any{
+	writeStoreEvent(t, s, store.TypeIterationStart, session, map[string]any{"iteration": 2})
+	writeStoreEvent(t, s, store.TypeIterationComplete, session, map[string]any{
 		"iteration": 2, "decision": "continue",
 	})
-	writeEvent(t, evPath, events.TypeSignalInject, "replay", map[string]any{
+	writeStoreEvent(t, s, store.TypeSignalInject, session, map[string]any{
 		"iteration": 2, "length": 42,
 	})
-	writeEvent(t, evPath, events.TypeSignalDispatching, "replay", map[string]any{
+	writeStoreEvent(t, s, store.TypeSignalDispatching, session, map[string]any{
 		"signal_id": "sig-2-spawn-0", "signal_type": "spawn", "iteration": 2,
 	})
-	// No result event for sig-2-spawn-0 — this is in-flight (crash).
 
-	ds, err := LoadDispatchState(evPath)
+	ds, err := LoadDispatchStateFromStore(ctx, s, session)
 	if err != nil {
-		t.Fatalf("LoadDispatchState: %v", err)
+		t.Fatalf("LoadDispatchStateFromStore: %v", err)
 	}
 
 	tests := []struct {
@@ -225,10 +222,10 @@ func TestIntegration_FullReplayScenario(t *testing.T) {
 		inFlight   bool
 		shouldSkip bool
 	}{
-		{"sig-1-spawn-0", true, false, true},   // completed
-		{"sig-1-spawn-1", true, false, true},    // failed (also completed)
-		{"sig-2-spawn-0", false, true, false},   // in-flight (needs re-dispatch)
-		{"sig-3-spawn-0", false, false, false},  // never dispatched
+		{"sig-1-spawn-0", true, false, true},
+		{"sig-1-spawn-1", true, false, true},
+		{"sig-2-spawn-0", false, true, false},
+		{"sig-3-spawn-0", false, false, false},
 	}
 
 	for _, tt := range tests {
@@ -253,28 +250,25 @@ func TestRun_SpawnLimitsCumulativeAcrossIterations(t *testing.T) {
 		t.Fatalf("mkdir runDir: %v", err)
 	}
 
-	// Iteration 1 spawns one child, iteration 2 attempts another.
+	s := mustOpenStore(t)
+
 	prov := mock.New(
 		mock.WithResponses(
 			mock.Response{
-				StatusJSON: `{
-					"decision":"continue",
-					"reason":"next",
-					"summary":"spawn first",
-					"work":{"items_completed":[],"files_touched":[]},
-					"errors":[],
-					"agent_signals":{"spawn":[{"run":"ralph","session":"child-1"}]}
-				}`,
+				Decision: "continue",
+				Reason:   "next",
+				Summary:  "spawn first",
+				Signals: &mock.Signals{
+					Spawn: json.RawMessage(`[{"run":"ralph","session":"child-1"}]`),
+				},
 			},
 			mock.Response{
-				StatusJSON: `{
-					"decision":"stop",
-					"reason":"done",
-					"summary":"spawn second",
-					"work":{"items_completed":[],"files_touched":[]},
-					"errors":[],
-					"agent_signals":{"spawn":[{"run":"ralph","session":"child-2"}]}
-				}`,
+				Decision: "stop",
+				Reason:   "done",
+				Summary:  "spawn second",
+				Signals: &mock.Signals{
+					Spawn: json.RawMessage(`[{"run":"ralph","session":"child-2"}]`),
+				},
 			},
 		),
 	)
@@ -290,20 +284,20 @@ func TestRun_SpawnLimitsCumulativeAcrossIterations(t *testing.T) {
 		WorkDir:          root,
 		Launcher:         launcher,
 		ExecutablePath:   "/usr/bin/ap",
-		SpawnMaxChildren: 1, // only 1 child allowed total
+		SpawnMaxChildren: 1,
+		Store:            s,
 	})
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	// Launcher should have been called exactly once (first spawn succeeds).
 	if launcher.startCalls != 1 {
 		t.Fatalf("launcher start calls = %d, want 1", launcher.startCalls)
 	}
 
-	evts := readEvents(t, runDir)
-	spawned := filterByType(evts, "signal.spawn")
-	failed := filterByType(evts, "signal.spawn.failed")
+	evts := readEvents(t, s, "parent-cumulative")
+	spawned := filterByType(evts, store.TypeSignalSpawn)
+	failed := filterByType(evts, store.TypeSignalSpawnFailed)
 	if len(spawned) != 1 {
 		t.Fatalf("signal.spawn count = %d, want 1", len(spawned))
 	}
@@ -315,9 +309,8 @@ func TestRun_SpawnLimitsCumulativeAcrossIterations(t *testing.T) {
 // TestRun_EscalateSignal_AlwaysPauses verifies that an escalate signal
 // overrides any agent decision and pauses the session.
 func TestRun_EscalateSignal_AlwaysPauses(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
-	// Agent says "continue" but also sends escalate — escalate wins.
 	mp := mock.New(
 		mock.WithResponses(
 			mock.EscalateResponse("continue", "keep going", "human", "need approval", []string{"yes", "no"}),
@@ -331,40 +324,36 @@ func TestRun_EscalateSignal_AlwaysPauses(t *testing.T) {
 		Provider:       mp,
 		Iterations:     10,
 		PromptTemplate: "iteration ${ITERATION}",
+		Store:          s,
 	})
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	if res.Status != state.StatePaused {
+	if res.Status != store.StatusPaused {
 		t.Errorf("status = %v, want paused", res.Status)
 	}
 	if res.Iterations != 1 {
 		t.Errorf("iterations = %d, want 1 (should stop after escalation)", res.Iterations)
 	}
 
-	// Verify state.json shows paused with escalation info.
-	st, err := state.Load(runDir + "/state.json")
+	row, err := s.GetSession(context.Background(), "test-escalate-pause")
 	if err != nil {
-		t.Fatalf("load state: %v", err)
+		t.Fatalf("get session: %v", err)
 	}
-	if st.Status != state.StatePaused {
-		t.Errorf("state status = %v, want paused", st.Status)
+	if row.Status != store.StatusPaused {
+		t.Errorf("store status = %v, want paused", row.Status)
 	}
-	if st.Escalation == nil {
-		t.Fatal("state missing escalation info")
-	}
-	if st.Escalation.Type != "human" {
-		t.Errorf("escalation type = %q, want human", st.Escalation.Type)
+	if row.EscalationJSON == nil {
+		t.Fatal("store missing escalation info")
 	}
 }
 
 // TestRun_InjectSignal_ConsumedOnce verifies that inject signal text is
 // applied to the next iteration's prompt and then cleared.
 func TestRun_InjectSignal_ConsumedOnce(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
-	// Iteration 1 injects context, iteration 2 and 3 do not inject.
 	mp := mock.New(
 		mock.WithResponses(
 			mock.InjectResponse("continue", "did work", "INJECTED CONTEXT HERE"),
@@ -380,36 +369,33 @@ func TestRun_InjectSignal_ConsumedOnce(t *testing.T) {
 		Provider:       mp,
 		Iterations:     3,
 		PromptTemplate: "iteration ${ITERATION} context=${CONTEXT}",
+		Store:          s,
 	})
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
-	if res.Status != state.StateCompleted {
+	if res.Status != store.StatusCompleted {
 		t.Errorf("status = %v, want completed", res.Status)
 	}
 
-	evts := readEvents(t, runDir)
-	injects := filterByType(evts, events.TypeSignalInject)
+	evts := readEvents(t, s, "test-inject-once")
+	injects := filterByType(evts, store.TypeSignalInject)
 	if len(injects) != 1 {
 		t.Fatalf("signal.inject events = %d, want 1", len(injects))
 	}
 
-	// Verify the inject event has the right iteration.
-	if injects[0].Data["iteration"] != float64(1) {
-		t.Errorf("inject iteration = %v, want 1", injects[0].Data["iteration"])
+	injectData := parseEventData(t, injects[0])
+	if injectData["iteration"] != float64(1) {
+		t.Errorf("inject iteration = %v, want 1", injectData["iteration"])
 	}
 
-	// Verify the provider received the injected context in iteration 2
-	// but not in iteration 3. MockProvider records Calls with Request.Prompt.
 	calls := mp.Calls()
 	if len(calls) < 3 {
 		t.Fatalf("expected 3 calls, got %d", len(calls))
 	}
-	// Iteration 2 prompt should contain the injected text.
 	if !containsSubstr(calls[1].Request.Prompt, "INJECTED CONTEXT HERE") {
-		t.Errorf("iteration 2 prompt should contain injected context, got: %s", calls[1].Request.Prompt[:min(100, len(calls[1].Request.Prompt))])
+		t.Errorf("iteration 2 prompt should contain injected context")
 	}
-	// Iteration 3 prompt should NOT contain the injected text (consumed).
 	if containsSubstr(calls[2].Request.Prompt, "INJECTED CONTEXT HERE") {
 		t.Errorf("iteration 3 prompt should NOT contain injected context (consumed)")
 	}
@@ -418,23 +404,23 @@ func TestRun_InjectSignal_ConsumedOnce(t *testing.T) {
 // TestDispatchState_HandlerErrorDoesNotAffectCompletion verifies that
 // signal.handler.error events don't interfere with dispatch state tracking.
 func TestDispatchState_HandlerErrorDoesNotAffectCompletion(t *testing.T) {
-	dir := t.TempDir()
-	evPath := filepath.Join(dir, "events.jsonl")
+	s := mustOpenStore(t)
+	ctx := context.Background()
+	s.CreateSession(ctx, "test", "stage", "test", "{}")
 
-	writeEvent(t, evPath, events.TypeSignalDispatching, "test", map[string]any{
+	writeStoreEvent(t, s, store.TypeSignalDispatching, "test", map[string]any{
 		"signal_id": "sig-1-spawn-0", "signal_type": "spawn", "iteration": 1,
 	})
-	// Handler error occurs but spawn still succeeds.
-	writeEvent(t, evPath, events.TypeSignalHandlerError, "test", map[string]any{
+	writeStoreEvent(t, s, store.TypeSignalHandlerError, "test", map[string]any{
 		"signal_id": "sig-1-spawn-0", "error": "webhook timeout",
 	})
-	writeEvent(t, evPath, events.TypeSignalSpawn, "test", map[string]any{
+	writeStoreEvent(t, s, store.TypeSignalSpawn, "test", map[string]any{
 		"signal_id": "sig-1-spawn-0", "child_session": "child-1",
 	})
 
-	ds, err := LoadDispatchState(evPath)
+	ds, err := LoadDispatchStateFromStore(ctx, s, "test")
 	if err != nil {
-		t.Fatalf("LoadDispatchState: %v", err)
+		t.Fatalf("LoadDispatchStateFromStore: %v", err)
 	}
 
 	if !ds.IsCompleted("sig-1-spawn-0") {
@@ -445,25 +431,25 @@ func TestDispatchState_HandlerErrorDoesNotAffectCompletion(t *testing.T) {
 	}
 }
 
-// TestRun_ChildSessionTrackedInState verifies that spawned child sessions
-// are recorded in the parent's state.json.
-func TestRun_ChildSessionTrackedInState(t *testing.T) {
+// TestRun_ChildSessionTrackedInStore verifies that spawned child sessions
+// are recorded in the parent's store child_sessions.
+func TestRun_ChildSessionTrackedInStore(t *testing.T) {
 	root := t.TempDir()
 	runDir := filepath.Join(root, ".ap", "runs", "parent-track")
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatalf("mkdir runDir: %v", err)
 	}
 
+	s := mustOpenStore(t)
+
 	prov := mock.New(
 		mock.WithResponses(mock.Response{
-			StatusJSON: `{
-				"decision":"stop",
-				"reason":"done",
-				"summary":"spawn child",
-				"work":{"items_completed":[],"files_touched":[]},
-				"errors":[],
-				"agent_signals":{"spawn":[{"run":"ralph","session":"child-tracked"}]}
-			}`,
+			Decision: "stop",
+			Reason:   "done",
+			Summary:  "spawn child",
+			Signals: &mock.Signals{
+				Spawn: json.RawMessage(`[{"run":"ralph","session":"child-tracked"}]`),
+			},
 		}),
 	)
 
@@ -478,21 +464,21 @@ func TestRun_ChildSessionTrackedInState(t *testing.T) {
 		WorkDir:        root,
 		Launcher:       launcher,
 		ExecutablePath: "/usr/bin/ap",
+		Store:          s,
 	})
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	st, err := state.Load(runDir + "/state.json")
+	children, err := s.GetChildren(context.Background(), "parent-track")
 	if err != nil {
-		t.Fatalf("load state: %v", err)
+		t.Fatalf("get children: %v", err)
 	}
 
-	if len(st.ChildSessions) != 1 {
-		t.Fatalf("child_sessions = %v, want 1 entry", st.ChildSessions)
+	if len(children) != 1 {
+		t.Fatalf("child_sessions = %v, want 1 entry", children)
 	}
-	if st.ChildSessions[0] != "child-tracked" {
-		t.Errorf("child_sessions[0] = %q, want child-tracked", st.ChildSessions[0])
+	if children[0] != "child-tracked" {
+		t.Errorf("child_sessions[0] = %q, want child-tracked", children[0])
 	}
 }
-

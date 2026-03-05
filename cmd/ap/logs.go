@@ -1,16 +1,15 @@
 package main
 
 import (
-	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/hwells4/ap/internal/output"
+	"github.com/hwells4/ap/internal/store"
 )
 
 func runLogs(args []string, deps cliDeps) int {
@@ -19,115 +18,100 @@ func runLogs(args []string, deps cliDeps) int {
 		return renderError(deps, output.ExitInvalidArgs, *errResp)
 	}
 
-	projectRoot := "."
-	if deps.getwd != nil {
-		if cwd, err := deps.getwd(); err == nil {
-			projectRoot = cwd
-		}
-	}
+	ctx := context.Background()
 
-	eventsPath := filepath.Join(projectRoot, ".ap", "runs", sessionName, "events.jsonl")
-
-	if _, err := os.Stat(eventsPath); err != nil {
-		// Check if the session directory exists at all.
-		sessionDir := filepath.Join(projectRoot, ".ap", "runs", sessionName)
-		if _, dirErr := os.Stat(sessionDir); dirErr != nil {
+	// Verify session exists.
+	_, err := deps.store.GetSession(ctx, sessionName)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
 			return renderError(deps, output.ExitNotFound, output.NewError(
 				"SESSION_NOT_FOUND",
 				fmt.Sprintf("session %q not found", sessionName),
-				fmt.Sprintf("No session directory at %s", sessionDir),
+				"No session with that name in the store.",
 				"ap logs <session> [-f] [--json]",
 				[]string{"ap list", "ap logs my-session --json"},
 			))
 		}
-		// Session exists but no events file yet — empty output.
-		return output.ExitSuccess
+		return renderError(deps, output.ExitGeneralError, output.NewError(
+			"EVENTS_READ_FAILED",
+			"failed to check session",
+			err.Error(),
+			"ap logs <session> [-f] [--json]",
+			nil,
+		))
 	}
 
 	if follow {
-		return followLogs(eventsPath, deps)
+		return followLogsStore(ctx, sessionName, deps)
 	}
-	return dumpLogs(eventsPath, deps)
+	return dumpLogsStore(ctx, sessionName, deps)
 }
 
-func dumpLogs(eventsPath string, deps cliDeps) int {
-	file, err := os.Open(eventsPath)
+func dumpLogsStore(ctx context.Context, sessionName string, deps cliDeps) int {
+	events, err := deps.store.GetEvents(ctx, sessionName, "", 0)
 	if err != nil {
 		return renderError(deps, output.ExitGeneralError, output.NewError(
 			"EVENTS_READ_FAILED",
-			"failed to open events file",
+			"failed to read events",
 			err.Error(),
 			"ap logs <session> [--json]",
 			nil,
 		))
 	}
-	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
+	for _, evt := range events {
 		if deps.mode == output.ModeJSON {
-			_, _ = fmt.Fprintln(deps.stdout, line)
+			_, _ = fmt.Fprintln(deps.stdout, eventRowToJSON(evt))
 		} else {
-			_, _ = fmt.Fprintln(deps.stdout, formatEventHuman(line))
+			_, _ = fmt.Fprintln(deps.stdout, formatEventRowHuman(evt))
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		_, _ = fmt.Fprintf(deps.stderr, "error reading events: %v\n", err)
-		return output.ExitGeneralError
 	}
 	return output.ExitSuccess
 }
 
-func followLogs(eventsPath string, deps cliDeps) int {
-	file, err := os.Open(eventsPath)
-	if err != nil {
-		return renderError(deps, output.ExitGeneralError, output.NewError(
-			"EVENTS_READ_FAILED",
-			"failed to open events file",
-			err.Error(),
-			"ap logs <session> -f [--json]",
-			nil,
-		))
-	}
-	defer file.Close()
-
-	reader := bufio.NewReader(file)
+func followLogsStore(ctx context.Context, sessionName string, deps cliDeps) int {
+	lastSeq := 0
 	for {
-		line, err := reader.ReadString('\n')
-		line = strings.TrimSpace(line)
-		if line != "" {
-			if deps.mode == output.ModeJSON {
-				_, _ = fmt.Fprintln(deps.stdout, line)
-			} else {
-				_, _ = fmt.Fprintln(deps.stdout, formatEventHuman(line))
-			}
-		}
+		events, err := deps.store.TailEvents(ctx, sessionName, lastSeq)
 		if err != nil {
-			if err == io.EOF {
-				// Poll for new data.
-				time.Sleep(250 * time.Millisecond)
-				continue
-			}
 			_, _ = fmt.Fprintf(deps.stderr, "error following events: %v\n", err)
 			return output.ExitGeneralError
 		}
+		for _, evt := range events {
+			if deps.mode == output.ModeJSON {
+				_, _ = fmt.Fprintln(deps.stdout, eventRowToJSON(evt))
+			} else {
+				_, _ = fmt.Fprintln(deps.stdout, formatEventRowHuman(evt))
+			}
+			if evt.Seq > lastSeq {
+				lastSeq = evt.Seq
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
 	}
 }
 
-func formatEventHuman(line string) string {
-	var evt map[string]any
-	if err := json.Unmarshal([]byte(line), &evt); err != nil {
-		return line // fallback: print raw
+func eventRowToJSON(evt store.EventRow) string {
+	obj := map[string]any{
+		"seq":     evt.Seq,
+		"type":    evt.Type,
+		"session": evt.SessionName,
+		"ts":      evt.CreatedAt,
 	}
+	var cursor any
+	if json.Unmarshal([]byte(evt.CursorJSON), &cursor) == nil {
+		obj["cursor"] = cursor
+	}
+	var data any
+	if json.Unmarshal([]byte(evt.DataJSON), &data) == nil {
+		obj["data"] = data
+	}
+	out, _ := json.Marshal(obj)
+	return string(out)
+}
 
-	ts, _ := evt["ts"].(string)
-	eventType, _ := evt["type"].(string)
-	session, _ := evt["session"].(string)
-
+func formatEventRowHuman(evt store.EventRow) string {
+	ts := evt.CreatedAt
 	// Compact timestamp to time only if today.
 	if len(ts) > 10 {
 		ts = ts[11:] // strip date prefix "YYYY-MM-DD"
@@ -142,15 +126,16 @@ func formatEventHuman(line string) string {
 	var b strings.Builder
 	b.WriteString(ts)
 	b.WriteString("  ")
-	b.WriteString(eventType)
-	if session != "" {
+	b.WriteString(evt.Type)
+	if evt.SessionName != "" {
 		b.WriteString("  [")
-		b.WriteString(session)
+		b.WriteString(evt.SessionName)
 		b.WriteString("]")
 	}
 
 	// Add cursor info if present.
-	if cursor, ok := evt["cursor"].(map[string]any); ok {
+	var cursor map[string]any
+	if json.Unmarshal([]byte(evt.CursorJSON), &cursor) == nil {
 		if iter, ok := cursor["iteration"].(float64); ok && iter > 0 {
 			b.WriteString(fmt.Sprintf("  iter=%d", int(iter)))
 		}
@@ -160,7 +145,8 @@ func formatEventHuman(line string) string {
 	}
 
 	// Add select data fields.
-	if data, ok := evt["data"].(map[string]any); ok {
+	var data map[string]any
+	if json.Unmarshal([]byte(evt.DataJSON), &data) == nil {
 		for _, key := range []string{"decision", "reason", "error", "stage"} {
 			if val, ok := data[key]; ok && val != nil && val != "" {
 				b.WriteString(fmt.Sprintf("  %s=%v", key, val))

@@ -2,7 +2,6 @@
 
 Context: ${CTX}
 Progress: ${PROGRESS}
-Status: ${STATUS}
 
 ${CONTEXT}
 
@@ -40,13 +39,13 @@ Find and eliminate **all stubs, placeholders, and mocks** in this codebase. Repl
    git add -A && git commit -m "feat: implement <package/function> (stub elimination)"
    ```
 
-7. **Write status:**
-   ```bash
-   cat > ${STATUS} << 'EOF'
+7. **Output your decision:**
+   ```ap-result
    {"decision": "continue", "summary": "Eliminated stub: <what>. N stubs remaining."}
-   EOF
    ```
    Use `"decision": "stop"` when no stubs remain.
+
+   Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
 
 ## Update Progress
 

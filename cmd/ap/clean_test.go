@@ -2,44 +2,43 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/hwells4/ap/internal/output"
-	"github.com/hwells4/ap/internal/state"
+	"github.com/hwells4/ap/internal/store"
 )
 
-// setupCleanSession creates a session dir with state.json and optional data files.
-func setupCleanSession(t *testing.T, dir, session string, st *state.SessionState) {
+// setupCleanStore creates a store with a session and a session run dir on disk.
+func setupCleanStore(t *testing.T, dir, session, status string) *store.Store {
 	t.Helper()
+	s, err := store.Open(filepath.Join(dir, ".ap", "ap.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := s.CreateSession(ctx, session, "loop", "", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if status != "running" {
+		_ = s.UpdateSession(ctx, session, map[string]any{"status": status})
+	}
+	// Create run dir with dummy files.
 	sessionDir := filepath.Join(dir, ".ap", "runs", session)
 	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	statePath := filepath.Join(sessionDir, "state.json")
-	if err := state.Write(statePath, st); err != nil {
-		t.Fatal(err)
-	}
-	// Write a dummy file so we have bytes to free.
-	dummyPath := filepath.Join(sessionDir, "events.jsonl")
-	if err := os.WriteFile(dummyPath, []byte(`{"type":"session.started"}`+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	_ = os.WriteFile(filepath.Join(sessionDir, "events.jsonl"), []byte(`{"type":"session.started"}`+"\n"), 0o644)
+	return s
 }
 
 func TestCleanCompletedSession(t *testing.T) {
 	dir := t.TempDir()
-	completedAt := "2026-03-04T02:00:00Z"
-	setupCleanSession(t, dir, "done-sess", &state.SessionState{
-		Session:     "done-sess",
-		Status:      state.StateCompleted,
-		StartedAt:   "2026-03-04T00:00:00Z",
-		CompletedAt: &completedAt,
-		Stages:      []state.StageState{},
-		History:     []map[string]any{},
-	})
+	s := setupCleanStore(t, dir, "done-sess", "completed")
+	defer s.Close()
 
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
@@ -47,9 +46,10 @@ func TestCleanCompletedSession(t *testing.T) {
 		stdout: &stdout,
 		stderr: &stderr,
 		getwd:  func() (string, error) { return dir, nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"clean", "done-sess", "--json"}, deps)
+	code := runClean([]string{"done-sess", "--json"}, deps)
 	if code != output.ExitSuccess {
 		t.Fatalf("exit code = %d; stderr: %s\nstdout: %s", code, stderr.String(), stdout.String())
 	}
@@ -77,17 +77,8 @@ func TestCleanCompletedSession(t *testing.T) {
 
 func TestCleanFailedSession(t *testing.T) {
 	dir := t.TempDir()
-	errMsg := "provider crash"
-	errType := "provider_failed"
-	setupCleanSession(t, dir, "fail-sess", &state.SessionState{
-		Session:   "fail-sess",
-		Status:    state.StateFailed,
-		StartedAt: "2026-03-04T00:00:00Z",
-		Error:     &errMsg,
-		ErrorType: &errType,
-		Stages:    []state.StageState{},
-		History:   []map[string]any{},
-	})
+	s := setupCleanStore(t, dir, "fail-sess", "failed")
+	defer s.Close()
 
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
@@ -95,9 +86,10 @@ func TestCleanFailedSession(t *testing.T) {
 		stdout: &stdout,
 		stderr: &stderr,
 		getwd:  func() (string, error) { return dir, nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"clean", "fail-sess", "--json"}, deps)
+	code := runClean([]string{"fail-sess", "--json"}, deps)
 	if code != output.ExitSuccess {
 		t.Fatalf("exit code = %d; stderr: %s", code, stderr.String())
 	}
@@ -112,13 +104,8 @@ func TestCleanFailedSession(t *testing.T) {
 
 func TestCleanRunningSessionBlocked(t *testing.T) {
 	dir := t.TempDir()
-	setupCleanSession(t, dir, "running-sess", &state.SessionState{
-		Session:   "running-sess",
-		Status:    state.StateRunning,
-		StartedAt: "2026-03-04T00:00:00Z",
-		Stages:    []state.StageState{},
-		History:   []map[string]any{},
-	})
+	s := setupCleanStore(t, dir, "running-sess", "running")
+	defer s.Close()
 
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
@@ -126,9 +113,10 @@ func TestCleanRunningSessionBlocked(t *testing.T) {
 		stdout: &stdout,
 		stderr: &stderr,
 		getwd:  func() (string, error) { return dir, nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"clean", "running-sess", "--json"}, deps)
+	code := runClean([]string{"running-sess", "--json"}, deps)
 	if code != output.ExitSuccess {
 		t.Fatalf("exit code = %d; stderr: %s", code, stderr.String())
 	}
@@ -157,13 +145,8 @@ func TestCleanRunningSessionBlocked(t *testing.T) {
 
 func TestCleanRunningSessionForce(t *testing.T) {
 	dir := t.TempDir()
-	setupCleanSession(t, dir, "force-sess", &state.SessionState{
-		Session:   "force-sess",
-		Status:    state.StateRunning,
-		StartedAt: "2026-03-04T00:00:00Z",
-		Stages:    []state.StageState{},
-		History:   []map[string]any{},
-	})
+	s := setupCleanStore(t, dir, "force-sess", "running")
+	defer s.Close()
 
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
@@ -171,9 +154,10 @@ func TestCleanRunningSessionForce(t *testing.T) {
 		stdout: &stdout,
 		stderr: &stderr,
 		getwd:  func() (string, error) { return dir, nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"clean", "force-sess", "--force", "--json"}, deps)
+	code := runClean([]string{"force-sess", "--force", "--json"}, deps)
 	if code != output.ExitSuccess {
 		t.Fatalf("exit code = %d; stderr: %s", code, stderr.String())
 	}
@@ -194,6 +178,11 @@ func TestCleanRunningSessionForce(t *testing.T) {
 
 func TestCleanNonexistentSession(t *testing.T) {
 	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, ".ap", "ap.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
 
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
@@ -201,10 +190,10 @@ func TestCleanNonexistentSession(t *testing.T) {
 		stdout: &stdout,
 		stderr: &stderr,
 		getwd:  func() (string, error) { return dir, nil },
+		store:  s,
 	}
 
-	// Idempotent: cleaning a nonexistent session returns success.
-	code := runWithDeps([]string{"clean", "ghost", "--json"}, deps)
+	code := runClean([]string{"ghost", "--json"}, deps)
 	if code != output.ExitSuccess {
 		t.Fatalf("exit code = %d, want success (idempotent)", code)
 	}
@@ -219,29 +208,24 @@ func TestCleanNonexistentSession(t *testing.T) {
 
 func TestCleanAllSessions(t *testing.T) {
 	dir := t.TempDir()
-	completedAt := "2026-03-04T02:00:00Z"
-	setupCleanSession(t, dir, "done-1", &state.SessionState{
-		Session:     "done-1",
-		Status:      state.StateCompleted,
-		StartedAt:   "2026-03-04T00:00:00Z",
-		CompletedAt: &completedAt,
-		Stages:      []state.StageState{},
-		History:     []map[string]any{},
-	})
-	setupCleanSession(t, dir, "done-2", &state.SessionState{
-		Session:     "done-2",
-		Status:      state.StateAborted,
-		StartedAt:   "2026-03-04T00:00:00Z",
-		Stages:      []state.StageState{},
-		History:     []map[string]any{},
-	})
-	setupCleanSession(t, dir, "active", &state.SessionState{
-		Session:   "active",
-		Status:    state.StateRunning,
-		StartedAt: "2026-03-04T00:00:00Z",
-		Stages:    []state.StageState{},
-		History:   []map[string]any{},
-	})
+	s, err := store.Open(filepath.Join(dir, ".ap", "ap.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	// Create 3 sessions: 2 terminal, 1 running.
+	_ = s.CreateSession(ctx, "done-1", "loop", "", "{}")
+	_ = s.UpdateSession(ctx, "done-1", map[string]any{"status": "completed"})
+	_ = s.CreateSession(ctx, "done-2", "loop", "", "{}")
+	_ = s.UpdateSession(ctx, "done-2", map[string]any{"status": "aborted"})
+	_ = s.CreateSession(ctx, "active", "loop", "", "{}")
+	// Create run dirs.
+	for _, name := range []string{"done-1", "done-2", "active"} {
+		sessionDir := filepath.Join(dir, ".ap", "runs", name)
+		_ = os.MkdirAll(sessionDir, 0o755)
+		_ = os.WriteFile(filepath.Join(sessionDir, "events.jsonl"), []byte("{}"), 0o644)
+	}
+	defer s.Close()
 
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
@@ -249,9 +233,10 @@ func TestCleanAllSessions(t *testing.T) {
 		stdout: &stdout,
 		stderr: &stderr,
 		getwd:  func() (string, error) { return dir, nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"clean", "--all", "--json"}, deps)
+	code := runClean([]string{"--all", "--json"}, deps)
 	if code != output.ExitSuccess {
 		t.Fatalf("exit code = %d; stderr: %s", code, stderr.String())
 	}
@@ -280,7 +265,7 @@ func TestCleanMissingArg(t *testing.T) {
 		getwd:  func() (string, error) { return t.TempDir(), nil },
 	}
 
-	code := runWithDeps([]string{"clean", "--json"}, deps)
+	code := runClean([]string{"--json"}, deps)
 	if code != output.ExitInvalidArgs {
 		t.Fatalf("exit code = %d, want %d", code, output.ExitInvalidArgs)
 	}
@@ -288,15 +273,8 @@ func TestCleanMissingArg(t *testing.T) {
 
 func TestCleanHuman(t *testing.T) {
 	dir := t.TempDir()
-	completedAt := "2026-03-04T02:00:00Z"
-	setupCleanSession(t, dir, "human-clean", &state.SessionState{
-		Session:     "human-clean",
-		Status:      state.StateCompleted,
-		StartedAt:   "2026-03-04T00:00:00Z",
-		CompletedAt: &completedAt,
-		Stages:      []state.StageState{},
-		History:     []map[string]any{},
-	})
+	s := setupCleanStore(t, dir, "human-clean", "completed")
+	defer s.Close()
 
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
@@ -304,9 +282,10 @@ func TestCleanHuman(t *testing.T) {
 		stdout: &stdout,
 		stderr: &stderr,
 		getwd:  func() (string, error) { return dir, nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"clean", "human-clean"}, deps)
+	code := runClean([]string{"human-clean"}, deps)
 	if code != output.ExitSuccess {
 		t.Fatalf("exit code = %d; stderr: %s", code, stderr.String())
 	}

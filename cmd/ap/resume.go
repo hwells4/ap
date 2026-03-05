@@ -1,13 +1,13 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/hwells4/ap/internal/output"
-	"github.com/hwells4/ap/internal/state"
+	"github.com/hwells4/ap/internal/store"
 )
 
 func runResume(args []string, deps cliDeps) int {
@@ -16,31 +16,20 @@ func runResume(args []string, deps cliDeps) int {
 		return renderError(deps, output.ExitInvalidArgs, *errResp)
 	}
 
-	projectRoot := "."
-	if deps.getwd != nil {
-		if cwd, err := deps.getwd(); err == nil {
-			projectRoot = cwd
-		}
-	}
+	ctx := context.Background()
 
-	sessionDir := filepath.Join(projectRoot, ".ap", "runs", sessionName)
-	statePath := filepath.Join(sessionDir, "state.json")
-	requestPath := filepath.Join(sessionDir, "run_request.json")
-
-	// Check session exists.
-	if _, err := os.Stat(statePath); err != nil {
-		return renderError(deps, output.ExitNotFound, output.NewError(
-			"SESSION_NOT_FOUND",
-			fmt.Sprintf("session %q not found", sessionName),
-			fmt.Sprintf("No state.json at %s", statePath),
-			"ap resume <session> [--context TEXT] [--json]",
-			[]string{"ap list", "ap status " + sessionName + " --json"},
-		))
-	}
-
-	// Load current state.
-	snapshot, err := state.Load(statePath)
+	// Load session from store.
+	row, err := deps.store.GetSession(ctx, sessionName)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return renderError(deps, output.ExitNotFound, output.NewError(
+				"SESSION_NOT_FOUND",
+				fmt.Sprintf("session %q not found", sessionName),
+				"No session with that name in the store.",
+				"ap resume <session> [--context TEXT] [--json]",
+				[]string{"ap list", "ap status " + sessionName + " --json"},
+			))
+		}
 		return renderError(deps, output.ExitGeneralError, output.NewError(
 			"STATE_READ_FAILED",
 			fmt.Sprintf("failed to read state for session %q", sessionName),
@@ -50,24 +39,13 @@ func runResume(args []string, deps cliDeps) int {
 		))
 	}
 
-	// Check run_request.json exists.
-	if _, err := os.Stat(requestPath); err != nil {
-		return renderError(deps, output.ExitGeneralError, output.NewError(
-			"REQUEST_NOT_FOUND",
-			fmt.Sprintf("run_request.json missing for session %q", sessionName),
-			"Cannot resume without the original run request.",
-			"ap resume <session> [--json]",
-			nil,
-		))
-	}
-
 	// Determine action based on current status.
-	switch snapshot.Status {
-	case state.StateRunning:
-		return resumeAlreadyRunning(deps, sessionName, snapshot)
-	case state.StatePaused, state.StateFailed:
-		return resumeSession(deps, sessionName, statePath, snapshot, contextOverride)
-	case state.StateCompleted:
+	switch row.Status {
+	case "running":
+		return resumeAlreadyRunningStore(deps, sessionName, row)
+	case "paused", "failed":
+		return resumeSessionStore(deps, ctx, sessionName, row, contextOverride)
+	case "completed":
 		return renderError(deps, output.ExitInvalidArgs, output.NewError(
 			"SESSION_COMPLETED",
 			fmt.Sprintf("session %q is already completed", sessionName),
@@ -75,7 +53,7 @@ func runResume(args []string, deps cliDeps) int {
 			"ap resume <session> [--json]",
 			[]string{"ap run <spec> <new-session>"},
 		))
-	case state.StateAborted:
+	case "aborted":
 		return renderError(deps, output.ExitInvalidArgs, output.NewError(
 			"SESSION_ABORTED",
 			fmt.Sprintf("session %q was aborted and cannot be resumed", sessionName),
@@ -86,7 +64,7 @@ func runResume(args []string, deps cliDeps) int {
 	default:
 		return renderError(deps, output.ExitGeneralError, output.NewError(
 			"INVALID_STATE",
-			fmt.Sprintf("session %q has unexpected status %q", sessionName, snapshot.Status),
+			fmt.Sprintf("session %q has unexpected status %q", sessionName, row.Status),
 			"",
 			"ap resume <session> [--json]",
 			[]string{"ap status " + sessionName + " --json"},
@@ -94,21 +72,23 @@ func runResume(args []string, deps cliDeps) int {
 	}
 }
 
-func resumeAlreadyRunning(deps cliDeps, session string, snapshot *state.SessionState) int {
+func resumeAlreadyRunningStore(deps cliDeps, session string, row *store.SessionRow) int {
+	resumeFrom := row.IterationCompleted + 1
 	payload := map[string]any{
 		"session":     session,
 		"action":      "already_running",
-		"status":      string(snapshot.Status),
-		"iteration":   snapshot.Iteration,
-		"resume_from": state.ResumeFrom(snapshot),
+		"status":      row.Status,
+		"iteration":   row.Iteration,
+		"resume_from": resumeFrom,
 	}
 	return renderResumeSuccess(deps, payload)
 }
 
-func resumeSession(deps cliDeps, session, statePath string, snapshot *state.SessionState, contextOverride string) int {
-	resumeFrom := state.ResumeFrom(snapshot)
-	updated, err := state.Update(statePath, func(s *state.SessionState) error {
-		return s.Transition(state.StateRunning)
+func resumeSessionStore(deps cliDeps, ctx context.Context, session string, row *store.SessionRow, contextOverride string) int {
+	resumeFrom := row.IterationCompleted + 1
+
+	err := deps.store.UpdateSession(ctx, session, map[string]any{
+		"status": "running",
 	})
 	if err != nil {
 		return renderError(deps, output.ExitGeneralError, output.NewError(
@@ -123,7 +103,7 @@ func resumeSession(deps cliDeps, session, statePath string, snapshot *state.Sess
 	payload := map[string]any{
 		"session":     session,
 		"action":      "resumed",
-		"status":      string(updated.Status),
+		"status":      "running",
 		"resume_from": resumeFrom,
 	}
 	if contextOverride != "" {

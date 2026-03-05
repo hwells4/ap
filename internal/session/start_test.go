@@ -89,6 +89,18 @@ func TestIntegration_Start_Success(t *testing.T) {
 	if request.Iterations != 3 {
 		t.Fatalf("request.iterations = %d, want 3", request.Iterations)
 	}
+	if request.ProjectRoot != projectRoot {
+		t.Fatalf("request.project_root = %q, want %q", request.ProjectRoot, projectRoot)
+	}
+	if request.ConfigRoot != projectRoot {
+		t.Fatalf("request.config_root = %q, want %q", request.ConfigRoot, projectRoot)
+	}
+	if request.ProjectKey != projectRoot {
+		t.Fatalf("request.project_key = %q, want %q", request.ProjectKey, projectRoot)
+	}
+	if request.TargetSource != "cli" {
+		t.Fatalf("request.target_source = %q, want cli", request.TargetSource)
+	}
 	if len(request.InputFiles) != 1 {
 		t.Fatalf("request.input_files length = %d, want 1", len(request.InputFiles))
 	}

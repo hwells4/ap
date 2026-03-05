@@ -2,13 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/hwells4/ap/internal/output"
-	"github.com/hwells4/ap/internal/state"
+	"github.com/hwells4/ap/internal/store"
 )
 
 func TestKill_MissingSession(t *testing.T) {
@@ -20,39 +19,51 @@ func TestKill_MissingSession(t *testing.T) {
 		getwd:  func() (string, error) { return t.TempDir(), nil },
 	}
 
-	code := runWithDeps([]string{"kill"}, deps)
+	code := runKill([]string{}, deps)
 	if code != output.ExitInvalidArgs {
 		t.Fatalf("exit code = %d, want %d", code, output.ExitInvalidArgs)
 	}
 }
 
 func TestKill_NonexistentSession_Idempotent(t *testing.T) {
-	dir := t.TempDir()
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
 		mode:   output.ModeHuman,
 		stdout: &stdout,
 		stderr: &stderr,
-		getwd:  func() (string, error) { return dir, nil },
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"kill", "nonexistent"}, deps)
+	code := runKill([]string{"nonexistent"}, deps)
 	if code != output.ExitSuccess {
 		t.Fatalf("exit code = %d, want %d (idempotent); stderr: %s", code, output.ExitSuccess, stderr.String())
 	}
 }
 
 func TestKill_NonexistentSession_JSON(t *testing.T) {
-	dir := t.TempDir()
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
 		mode:   output.ModeJSON,
 		stdout: &stdout,
 		stderr: &stderr,
-		getwd:  func() (string, error) { return dir, nil },
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"kill", "nonexistent", "--json"}, deps)
+	code := runKill([]string{"nonexistent", "--json"}, deps)
 	if code != output.ExitSuccess {
 		t.Fatalf("exit code = %d, want %d; stderr: %s", code, output.ExitSuccess, stderr.String())
 	}
@@ -71,63 +82,57 @@ func TestKill_NonexistentSession_JSON(t *testing.T) {
 }
 
 func TestKill_SessionWithState_MarksAborted(t *testing.T) {
-	dir := t.TempDir()
-
-	// Create a session directory with state.json in running state.
-	sessionDir := filepath.Join(dir, ".ap", "runs", "my-session")
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+	s, err := store.Open(":memory:")
+	if err != nil {
 		t.Fatal(err)
 	}
-	statePath := filepath.Join(sessionDir, "state.json")
-	if _, err := state.Init(statePath, "my-session", "loop", ""); err != nil {
-		t.Fatal(err)
-	}
+	defer s.Close()
+	ctx := context.Background()
+	_ = s.CreateSession(ctx, "my-session", "loop", "", "{}")
 
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
 		mode:   output.ModeHuman,
 		stdout: &stdout,
 		stderr: &stderr,
-		getwd:  func() (string, error) { return dir, nil },
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"kill", "my-session"}, deps)
+	code := runKill([]string{"my-session"}, deps)
 	if code != output.ExitSuccess {
 		t.Fatalf("exit code = %d, want %d; stderr: %s", code, output.ExitSuccess, stderr.String())
 	}
 
-	// Verify state was marked as aborted.
-	s, err := state.Load(statePath)
+	// Verify state was marked as aborted in the store.
+	row, err := s.GetSession(ctx, "my-session")
 	if err != nil {
-		t.Fatalf("load state: %v", err)
+		t.Fatalf("get session: %v", err)
 	}
-	if s.Status != state.StateAborted {
-		t.Errorf("state status = %q, want %q", s.Status, state.StateAborted)
+	if row.Status != "aborted" {
+		t.Errorf("state status = %q, want %q", row.Status, "aborted")
 	}
 }
 
 func TestKill_SessionWithState_JSON(t *testing.T) {
-	dir := t.TempDir()
-
-	// Create a session directory with state.json.
-	sessionDir := filepath.Join(dir, ".ap", "runs", "my-session")
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+	s, err := store.Open(":memory:")
+	if err != nil {
 		t.Fatal(err)
 	}
-	statePath := filepath.Join(sessionDir, "state.json")
-	if _, err := state.Init(statePath, "my-session", "loop", ""); err != nil {
-		t.Fatal(err)
-	}
+	defer s.Close()
+	ctx := context.Background()
+	_ = s.CreateSession(ctx, "my-session", "loop", "", "{}")
 
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
 		mode:   output.ModeJSON,
 		stdout: &stdout,
 		stderr: &stderr,
-		getwd:  func() (string, error) { return dir, nil },
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"kill", "my-session", "--json"}, deps)
+	code := runKill([]string{"my-session", "--json"}, deps)
 	if code != output.ExitSuccess {
 		t.Fatalf("exit code = %d, want %d; stderr: %s", code, output.ExitSuccess, stderr.String())
 	}
@@ -154,7 +159,7 @@ func TestKill_ExtraArgs(t *testing.T) {
 		getwd:  func() (string, error) { return t.TempDir(), nil },
 	}
 
-	code := runWithDeps([]string{"kill", "session1", "session2"}, deps)
+	code := runKill([]string{"session1", "session2"}, deps)
 	if code != output.ExitInvalidArgs {
 		t.Fatalf("exit code = %d, want %d", code, output.ExitInvalidArgs)
 	}
@@ -169,46 +174,40 @@ func TestKill_UnknownFlag(t *testing.T) {
 		getwd:  func() (string, error) { return t.TempDir(), nil },
 	}
 
-	code := runWithDeps([]string{"kill", "--bad-flag", "session"}, deps)
+	code := runKill([]string{"--bad-flag", "session"}, deps)
 	if code != output.ExitInvalidArgs {
 		t.Fatalf("exit code = %d, want %d", code, output.ExitInvalidArgs)
 	}
 }
 
 func TestKill_CompletedSession_NoChange(t *testing.T) {
-	dir := t.TempDir()
-	sessionDir := filepath.Join(dir, ".ap", "runs", "done-session")
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+	s, err := store.Open(":memory:")
+	if err != nil {
 		t.Fatal(err)
 	}
-	statePath := filepath.Join(sessionDir, "state.json")
-	if _, err := state.Init(statePath, "done-session", "loop", ""); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := state.MarkCompleted(statePath); err != nil {
-		t.Fatal(err)
-	}
+	defer s.Close()
+	ctx := context.Background()
+	_ = s.CreateSession(ctx, "done-session", "loop", "", "{}")
+	_ = s.UpdateSession(ctx, "done-session", map[string]any{"status": "completed"})
 
 	var stdout bytes.Buffer
 	deps := cliDeps{
 		mode:   output.ModeJSON,
 		stdout: &stdout,
 		stderr: &bytes.Buffer{},
-		getwd:  func() (string, error) { return dir, nil },
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"kill", "done-session", "--json"}, deps)
+	code := runKill([]string{"done-session", "--json"}, deps)
 	if code != output.ExitSuccess {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 
 	// State should remain completed.
-	s, err := state.Load(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.Status != state.StateCompleted {
-		t.Errorf("status = %q, want %q", s.Status, state.StateCompleted)
+	row, _ := s.GetSession(ctx, "done-session")
+	if row.Status != "completed" {
+		t.Errorf("status = %q, want %q", row.Status, "completed")
 	}
 
 	var result map[string]any
@@ -221,41 +220,32 @@ func TestKill_CompletedSession_NoChange(t *testing.T) {
 }
 
 func TestKill_PausedSession_MarksAborted(t *testing.T) {
-	dir := t.TempDir()
-	sessionDir := filepath.Join(dir, ".ap", "runs", "paused-session")
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+	s, err := store.Open(":memory:")
+	if err != nil {
 		t.Fatal(err)
 	}
-	statePath := filepath.Join(sessionDir, "state.json")
-	if _, err := state.Init(statePath, "paused-session", "loop", ""); err != nil {
-		t.Fatal(err)
-	}
-	// Running → Paused.
-	if _, err := state.Update(statePath, func(s *state.SessionState) error {
-		return s.Transition(state.StatePaused)
-	}); err != nil {
-		t.Fatal(err)
-	}
+	defer s.Close()
+	ctx := context.Background()
+	_ = s.CreateSession(ctx, "paused-session", "loop", "", "{}")
+	_ = s.UpdateSession(ctx, "paused-session", map[string]any{"status": "paused"})
 
 	var stdout bytes.Buffer
 	deps := cliDeps{
 		mode:   output.ModeJSON,
 		stdout: &stdout,
 		stderr: &bytes.Buffer{},
-		getwd:  func() (string, error) { return dir, nil },
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"kill", "paused-session", "--json"}, deps)
+	code := runKill([]string{"paused-session", "--json"}, deps)
 	if code != output.ExitSuccess {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 
-	s, err := state.Load(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.Status != state.StateAborted {
-		t.Errorf("status = %q, want %q", s.Status, state.StateAborted)
+	row, _ := s.GetSession(ctx, "paused-session")
+	if row.Status != "aborted" {
+		t.Errorf("status = %q, want %q", row.Status, "aborted")
 	}
 
 	var result map[string]any

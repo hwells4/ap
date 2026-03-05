@@ -82,28 +82,25 @@ After completing each item, append to ${PROGRESS}:
   - What was changed: [brief description]
 ```
 
-## Write Result
+## Write Decision
 
-After making your changes, write result to `${RESULT}` (set `signals.plateau_suspected` true when all audit items are complete and no gaps remain):
+When you are done, output your decision in a fenced block:
 
-```json
+```ap-result
 {
+  "decision": "continue",
   "summary": "Updated [files]. Remaining: [what's left]",
   "work": {
     "items_completed": ["file1.md", "file2.md"],
     "files_touched": ["path/to/file1.md", "path/to/file2.md"]
   },
-  "artifacts": {
-    "outputs": [],
-    "paths": []
-  },
-  "signals": {
-    "plateau_suspected": false,
-    "risk": "low",
-    "notes": ""
-  }
+  "errors": []
 }
 ```
+
+Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
+
+Set `"decision": "stop"` when all audit items are complete and no gaps remain.
 
 ## Important
 

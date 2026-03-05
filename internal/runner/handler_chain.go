@@ -13,15 +13,15 @@ import (
 	"time"
 
 	"github.com/hwells4/ap/internal/config"
-	"github.com/hwells4/ap/internal/events"
 	apexec "github.com/hwells4/ap/internal/exec"
 	"github.com/hwells4/ap/internal/signals"
+	"github.com/hwells4/ap/internal/store"
 )
 
 const defaultSignalHandlerTimeout = 30 * time.Second
 
 type dispatchSignalInput struct {
-	Writer        *events.Writer
+	Store         *store.Store
 	Session       string
 	Stage         string
 	Iteration     int
@@ -52,10 +52,6 @@ type signalHandlerPayload struct {
 }
 
 func dispatchSignalHandlers(input dispatchSignalInput) error {
-	if input.Writer == nil {
-		return fmt.Errorf("dispatch handlers: writer is required")
-	}
-
 	timeout := input.Timeout
 	if timeout <= 0 {
 		timeout = defaultSignalHandlerTimeout
@@ -97,17 +93,19 @@ func dispatchSignalHandlers(input dispatchSignalInput) error {
 			continue
 		}
 
-		if err := input.Writer.Append(events.NewEvent(events.TypeSignalHandlerError, input.Session, &events.Cursor{
-			Iteration: input.Iteration,
-		}, map[string]any{
-			"iteration":     input.Iteration,
-			"signal_id":     input.SignalID,
-			"signal_type":   input.SignalType,
-			"handler_type":  handlerType,
-			"handler_index": idx,
-			"error":         runErr.Error(),
-		})); err != nil {
-			return fmt.Errorf("emit signal.handler.error: %w", err)
+		// Emit handler error event to store.
+		if input.Store != nil {
+			errData := map[string]any{
+				"iteration":     input.Iteration,
+				"signal_id":     input.SignalID,
+				"signal_type":   input.SignalType,
+				"handler_type":  handlerType,
+				"handler_index": idx,
+				"error":         runErr.Error(),
+			}
+			dataJSON, _ := json.Marshal(errData)
+			_ = input.Store.AppendEvent(context.Background(), input.Session,
+				store.TypeSignalHandlerError, "{}", string(dataJSON))
 		}
 	}
 

@@ -27,11 +27,11 @@ Append what you find to the progress file. Include:
 
 Use ultrathink. Be methodical. Be critical.
 
-## Write Status
+## Write Decision
 
-After exploring, write your status to `${STATUS}`:
+When you are done, output your decision in a fenced block:
 
-```json
+```ap-result
 {
   "decision": "continue",
   "reason": "More areas to explore",
@@ -43,3 +43,5 @@ After exploring, write your status to `${STATUS}`:
   "errors": []
 }
 ```
+
+Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).

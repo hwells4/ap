@@ -99,28 +99,23 @@ Format:
 
 Append a summary to the progress file noting what ideas you generated.
 
-### Step 7: Write Result
+### Step 7: Write Decision
 
-After completing your work, write your result to `${RESULT}`:
+When you are done, output your decision in a fenced block:
 
-```json
+```ap-result
 {
+  "decision": "continue",
   "summary": "Brief description of the themes you explored",
   "work": {
     "items_completed": [],
     "files_touched": ["${OUTPUT_PATH}"]
   },
-  "artifacts": {
-    "outputs": [],
-    "paths": []
-  },
-  "signals": {
-    "plateau_suspected": false,
-    "risk": "low",
-    "notes": ""
-  }
+  "errors": []
 }
 ```
+
+Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
 
 ## Important
 

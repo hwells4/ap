@@ -35,8 +35,6 @@ func TestPrepareCreatesDeterministicSessionTree(t *testing.T) {
 		layout.EventsPath,
 		layout.ProgressPath,
 		layout.OutputPath,
-		layout.StatusPath,
-		layout.ResultPath,
 	} {
 		if !strings.HasPrefix(path, sessionPrefix) {
 			t.Fatalf("path escaped session root: %s (session: %s)", path, layout.SessionDir)

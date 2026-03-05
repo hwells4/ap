@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/hwells4/ap/internal/output"
 	"github.com/hwells4/ap/internal/session"
+	"github.com/hwells4/ap/internal/store"
 )
 
 func TestRun_MinimalArgs(t *testing.T) {
@@ -492,11 +494,11 @@ func TestRun_ProviderFlag_Invalid_JSON(t *testing.T) {
 
 func TestResolveProviderName_Precedence(t *testing.T) {
 	tests := []struct {
-		name     string
-		cli      string
-		stage    string
-		config   string
-		want     string
+		name   string
+		cli    string
+		stage  string
+		config string
+		want   string
 	}{
 		{"cli wins over all", "codex", "claude", "claude", "codex"},
 		{"stage wins over config", "", "codex", "claude", "codex"},
@@ -727,6 +729,63 @@ func TestRun_BackgroundLaunch_JSON(t *testing.T) {
 	}
 }
 
+func TestRun_BackgroundLaunch_ProjectRootFlag(t *testing.T) {
+	dir := setupStageDir(t)
+	overrideRoot := t.TempDir()
+	stageDir := filepath.Join(overrideRoot, ".claude", "stages", "ralph")
+	if err := os.MkdirAll(stageDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stageDir, "stage.yaml"), []byte("name: ralph\ndescription: override\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stageDir, "prompt.md"), []byte("override prompt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	launcher := &testLauncher{
+		available: true,
+		handle: session.SessionHandle{
+			Session: "override-session",
+			PID:     9999,
+			Backend: "test",
+		},
+	}
+	deps := cliDeps{
+		mode:   output.ModeJSON,
+		stdout: &stdout,
+		stderr: &stderr,
+		getwd: func() (string, error) {
+			return dir, nil
+		},
+		launcher: launcher,
+	}
+
+	code := runWithDeps([]string{"run", "ralph", "override-session", "--project-root", overrideRoot, "--json"}, deps)
+	if code != output.ExitSuccess {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if launcher.opts.WorkDir != overrideRoot {
+		t.Fatalf("launcher opts.WorkDir = %q, want %q", launcher.opts.WorkDir, overrideRoot)
+	}
+
+	var result map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("invalid JSON: %v; output: %s", err, stdout.String())
+	}
+	if result["project_root"] != overrideRoot {
+		t.Fatalf("project_root = %v, want %q", result["project_root"], overrideRoot)
+	}
+	request, ok := result["request"].(map[string]any)
+	if !ok {
+		t.Fatal("missing request object")
+	}
+	if request["project_root"] != overrideRoot {
+		t.Fatalf("request.project_root = %v, want %q", request["project_root"], overrideRoot)
+	}
+}
+
 func TestRun_BackgroundLaunch_Human(t *testing.T) {
 	dir := setupStageDir(t)
 	var stdout, stderr bytes.Buffer
@@ -824,8 +883,14 @@ func TestRun_LauncherUnavailable_FallsToForeground(t *testing.T) {
 	}
 }
 
-func TestRun_Foreground_PollsStateJSON(t *testing.T) {
+func TestRun_Foreground_PollsStore(t *testing.T) {
 	dir := setupStageDir(t)
+	s, err := store.Open(filepath.Join(dir, ".ap", "ap.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
 	var stdout, stderr bytes.Buffer
 	launcher := &testLauncher{
 		available: true,
@@ -843,6 +908,7 @@ func TestRun_Foreground_PollsStateJSON(t *testing.T) {
 			return dir, nil
 		},
 		launcher: launcher,
+		store:    s,
 	}
 
 	// Run foreground in a goroutine since it polls.
@@ -862,12 +928,13 @@ func TestRun_Foreground_PollsStateJSON(t *testing.T) {
 		t.Fatal("launcher was never called")
 	}
 
-	// Write state.json to the run dir so the foreground poller sees completion.
-	runDir := filepath.Join(dir, ".ap", "runs", "fg-session")
-	stateJSON := `{"status": "completed", "iteration_completed": 3}`
-	if err := os.WriteFile(filepath.Join(runDir, "state.json"), []byte(stateJSON), 0o644); err != nil {
-		t.Fatalf("write state.json: %v", err)
-	}
+	// Create the session in the store and mark it completed (simulating what _run would do).
+	ctx := context.Background()
+	_ = s.CreateSession(ctx, "fg-session", "loop", "", "{}")
+	_ = s.UpdateSession(ctx, "fg-session", map[string]any{
+		"status":              "completed",
+		"iteration_completed": 3,
+	})
 
 	select {
 	case code := <-done:
@@ -892,6 +959,12 @@ func TestRun_Foreground_PollsStateJSON(t *testing.T) {
 
 func TestRun_Foreground_FailedStatus(t *testing.T) {
 	dir := setupStageDir(t)
+	s, err := store.Open(filepath.Join(dir, ".ap", "ap.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
 	var stdout, stderr bytes.Buffer
 	launcher := &testLauncher{
 		available: true,
@@ -909,6 +982,7 @@ func TestRun_Foreground_FailedStatus(t *testing.T) {
 			return dir, nil
 		},
 		launcher: launcher,
+		store:    s,
 	}
 
 	done := make(chan int, 1)
@@ -923,11 +997,13 @@ func TestRun_Foreground_FailedStatus(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	runDir := filepath.Join(dir, ".ap", "runs", "fail-session")
-	stateJSON := `{"status": "failed", "iteration_completed": 1}`
-	if err := os.WriteFile(filepath.Join(runDir, "state.json"), []byte(stateJSON), 0o644); err != nil {
-		t.Fatalf("write state.json: %v", err)
-	}
+	// Create the session in the store and mark it failed (simulating what _run would do).
+	ctx := context.Background()
+	_ = s.CreateSession(ctx, "fail-session", "loop", "", "{}")
+	_ = s.UpdateSession(ctx, "fail-session", map[string]any{
+		"status":              "failed",
+		"iteration_completed": 1,
+	})
 
 	select {
 	case code := <-done:

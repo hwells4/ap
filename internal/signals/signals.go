@@ -20,10 +20,11 @@ type AgentSignals struct {
 
 // SpawnSignal requests launching a child session.
 type SpawnSignal struct {
-	Run     string `json:"run"`
-	Session string `json:"session"`
-	Context string `json:"context,omitempty"`
-	N       int    `json:"n,omitempty"`
+	Run         string `json:"run"`
+	Session     string `json:"session"`
+	Context     string `json:"context,omitempty"`
+	ProjectRoot string `json:"project_root,omitempty"`
+	N           int    `json:"n,omitempty"`
 }
 
 // EscalateSignal requests escalation to a human/external decision path.
@@ -155,7 +156,7 @@ func parseSpawnEntry(raw json.RawMessage, path string) (SpawnSignal, error) {
 	sort.Strings(keys)
 	for _, key := range keys {
 		switch key {
-		case "run", "session", "context", "n":
+		case "run", "session", "context", "project_root", "n":
 		default:
 			return SpawnSignal{}, ValidationError{
 				Path:    path + "." + key,
@@ -173,6 +174,10 @@ func parseSpawnEntry(raw json.RawMessage, path string) (SpawnSignal, error) {
 		return SpawnSignal{}, err
 	}
 	contextValue, _, err := parseOptionalString(obj["context"], path+".context")
+	if err != nil {
+		return SpawnSignal{}, err
+	}
+	projectRoot, _, err := parseOptionalString(obj["project_root"], path+".project_root")
 	if err != nil {
 		return SpawnSignal{}, err
 	}
@@ -196,10 +201,11 @@ func parseSpawnEntry(raw json.RawMessage, path string) (SpawnSignal, error) {
 	}
 
 	return SpawnSignal{
-		Run:     run,
-		Session: session,
-		Context: contextValue,
-		N:       count,
+		Run:         run,
+		Session:     session,
+		Context:     contextValue,
+		ProjectRoot: projectRoot,
+		N:           count,
 	}, nil
 }
 

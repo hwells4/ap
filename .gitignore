@@ -26,6 +26,9 @@ Thumbs.db
 # Session data (runtime, not committed)
 .ap/
 
+# SQLite runtime artifacts
+storage.sqlite3
+
 # Beads data (local task tracking)
 .beads/
 

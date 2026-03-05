@@ -13,6 +13,7 @@ import (
 	"github.com/hwells4/ap/internal/lock"
 	"github.com/hwells4/ap/internal/output"
 	"github.com/hwells4/ap/internal/runner"
+	"github.com/hwells4/ap/internal/runtarget"
 	"github.com/hwells4/ap/internal/stage"
 	"github.com/hwells4/ap/pkg/provider"
 	"github.com/hwells4/ap/pkg/provider/claude"
@@ -31,6 +32,12 @@ type RunRequestFile struct {
 	Env            map[string]string `json:"env"`
 	RunDir         string            `json:"run_dir"`
 	OnEscalate     string            `json:"on_escalate,omitempty"`
+	ParentSession  string            `json:"parent_session,omitempty"`
+	ProjectRoot    string            `json:"project_root,omitempty"`
+	RepoRoot       string            `json:"repo_root,omitempty"`
+	ConfigRoot     string            `json:"config_root,omitempty"`
+	ProjectKey     string            `json:"project_key,omitempty"`
+	TargetSource   string            `json:"target_source,omitempty"`
 }
 
 // WriteRunRequest atomically writes a run_request.json file.
@@ -116,10 +123,27 @@ func runInternalRun(args []string, deps cliDeps) int {
 		return internalRunError(deps, "missing required flag --request")
 	}
 
-	// Read run request.
-	req, err := ReadRunRequest(requestPath)
-	if err != nil {
-		return internalRunError(deps, err.Error())
+	// Open the store for _run.
+	s, storeErr := openStore(deps)
+	if storeErr != nil {
+		return internalRunError(deps, fmt.Sprintf("open store: %v", storeErr))
+	}
+	defer s.Close()
+	deps.store = s
+
+	// Try reading run_request from the store first, fall back to file.
+	var req RunRequestFile
+	row, getErr := s.GetSession(context.Background(), session)
+	if getErr == nil && row.RunRequestJSON != "" && row.RunRequestJSON != "{}" {
+		if parseErr := json.Unmarshal([]byte(row.RunRequestJSON), &req); parseErr != nil {
+			return internalRunError(deps, fmt.Sprintf("parse store run request: %v", parseErr))
+		}
+	} else {
+		var readErr error
+		req, readErr = ReadRunRequest(requestPath)
+		if readErr != nil {
+			return internalRunError(deps, readErr.Error())
+		}
 	}
 
 	// Verify session name matches.
@@ -127,6 +151,21 @@ func runInternalRun(args []string, deps cliDeps) int {
 		return internalRunError(deps, fmt.Sprintf(
 			"session mismatch: flag says %q, request says %q", session, req.Session))
 	}
+	workDir := strings.TrimSpace(req.WorkDir)
+	if workDir == "" {
+		workDir = strings.TrimSpace(req.ProjectRoot)
+	}
+	target, targetErr := runtarget.NormalizeWithDefaults(runtarget.Target{
+		ProjectRoot: workDir,
+		RepoRoot:    strings.TrimSpace(req.RepoRoot),
+		ConfigRoot:  strings.TrimSpace(req.ConfigRoot),
+		ProjectKey:  strings.TrimSpace(req.ProjectKey),
+		Source:      strings.TrimSpace(req.TargetSource),
+	}, req.TargetSource)
+	if targetErr != nil {
+		return internalRunError(deps, fmt.Sprintf("resolve run target: %v", targetErr))
+	}
+	workDir = target.ProjectRoot
 
 	// Acquire session lock.
 	locksDir := filepath.Join(filepath.Dir(req.RunDir), "..", "locks")
@@ -153,7 +192,7 @@ func runInternalRun(args []string, deps cliDeps) int {
 	promptTemplate := req.PromptTemplate
 	if promptTemplate == "" {
 		def, stageErr := stage.ResolveStage(req.Stage, stage.ResolveOptions{
-			ProjectRoot: req.WorkDir,
+			ProjectRoot: workDir,
 		})
 		if stageErr != nil {
 			return internalRunError(deps, fmt.Sprintf("resolve stage %q: %v", req.Stage, stageErr))
@@ -190,7 +229,8 @@ func runInternalRun(args []string, deps cliDeps) int {
 		Iterations:           req.Iterations,
 		PromptTemplate:       promptTemplate,
 		Model:                req.Model,
-		WorkDir:              req.WorkDir,
+		WorkDir:              workDir,
+		RunTarget:            target,
 		Env:                  req.Env,
 		OnEscalate:           req.OnEscalate,
 		SpawnMaxChildren:     limits.MaxChildSessions,
@@ -198,6 +238,8 @@ func runInternalRun(args []string, deps cliDeps) int {
 		EscalateHandlers:     escalateHandlers,
 		SpawnHandlers:        loadedConfig.SignalHandlers("spawn"),
 		SignalHandlerTimeout: loadedConfig.Signals.HandlerTimeout,
+		Store:                s,
+		ParentSession:        strings.TrimSpace(req.ParentSession),
 	}
 
 	// Execute runner.

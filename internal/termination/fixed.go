@@ -4,8 +4,6 @@ package termination
 import (
 	"fmt"
 	"strings"
-
-	"github.com/hwells4/ap/internal/result"
 )
 
 // DefaultFixedIterations is the fallback iteration count when none is supplied.
@@ -47,12 +45,13 @@ func (f Fixed) Target() int {
 }
 
 // ShouldStop determines whether the loop should terminate after this iteration.
-func (f Fixed) ShouldStop(iteration int, res result.Result) (bool, string) {
-	decision := decisionHint(res)
-	if decision == "stop" {
+// decision is the normalized decision string from the agent (continue/stop/error).
+func (f Fixed) ShouldStop(iteration int, decision string) (bool, string) {
+	hint := normalizeDecision(decision)
+	if hint == "stop" {
 		return true, fmt.Sprintf("Agent requested stop at iteration %d", iteration)
 	}
-	if decision == "error" {
+	if hint == "error" {
 		return true, fmt.Sprintf("Agent reported error at iteration %d", iteration)
 	}
 
@@ -63,22 +62,12 @@ func (f Fixed) ShouldStop(iteration int, res result.Result) (bool, string) {
 	return false, ""
 }
 
-func decisionHint(res result.Result) string {
-	decision := strings.ToLower(strings.TrimSpace(res.Decision))
-	switch decision {
+func normalizeDecision(decision string) string {
+	d := strings.ToLower(strings.TrimSpace(decision))
+	switch d {
 	case "stop", "error", "continue":
-		return decision
-	case "":
-		// Fall back to signal-based hints when decision is absent.
+		return d
 	default:
 		return "continue"
 	}
-
-	if strings.EqualFold(strings.TrimSpace(res.Signals.Risk), "high") {
-		return "error"
-	}
-	if res.Signals.PlateauSuspected {
-		return "stop"
-	}
-	return "continue"
 }

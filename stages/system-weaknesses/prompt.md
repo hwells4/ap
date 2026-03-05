@@ -2,7 +2,6 @@
 
 Context: ${CTX}
 Progress: ${PROGRESS}
-Status: ${STATUS}
 
 ${CONTEXT}
 
@@ -24,13 +23,13 @@ Based on everything you can see in this project, identify the **weakest and wors
 
 5. **For the top 3 weaknesses**, provide a concrete, actionable improvement plan with enough detail that an agent could implement it.
 
-6. **Write status**:
-   ```bash
-   cat > ${STATUS} << 'EOF'
+6. **Output your decision**:
+   ```ap-result
    {"decision": "continue", "summary": "Identified N weaknesses, top 3 with actionable plans"}
-   EOF
    ```
    Use `"decision": "stop"` if analysis is comprehensive.
+
+   Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
 
 ## Update Progress
 

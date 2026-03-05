@@ -3,19 +3,17 @@ package runner
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"strings"
+	"fmt"
 	"testing"
 
-	"github.com/hwells4/ap/internal/events"
 	"github.com/hwells4/ap/internal/mock"
-	"github.com/hwells4/ap/internal/state"
+	"github.com/hwells4/ap/internal/store"
 )
 
 // TestIntegration_LifecycleEvents_Schema validates that all emitted
 // lifecycle events contain the required fields per Contract 5.
 func TestIntegration_LifecycleEvents_Schema(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(
@@ -31,6 +29,7 @@ func TestIntegration_LifecycleEvents_Schema(t *testing.T) {
 		Provider:       mp,
 		Iterations:     5,
 		PromptTemplate: "iteration ${ITERATION}",
+		Store:          s,
 	}
 
 	_, err := Run(context.Background(), cfg)
@@ -38,96 +37,96 @@ func TestIntegration_LifecycleEvents_Schema(t *testing.T) {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	evts := readEvents(t, runDir)
+	evts := readEvents(t, s, "test-events-schema")
 
 	// Validate required fields on ALL events.
 	for i, evt := range evts {
 		if evt.Type == "" {
 			t.Errorf("event[%d]: missing type", i)
 		}
-		if evt.Session == "" {
+		if evt.SessionName == "" {
 			t.Errorf("event[%d]: missing session", i)
 		}
-		if evt.Timestamp == "" {
+		if evt.CreatedAt == "" {
 			t.Errorf("event[%d]: missing timestamp", i)
 		}
 	}
 
 	// Check session_start event.
-	sessionStarts := filterByType(evts, events.TypeSessionStart)
+	sessionStarts := filterByType(evts, store.TypeSessionStart)
 	if len(sessionStarts) != 1 {
 		t.Fatalf("expected 1 session_start, got %d", len(sessionStarts))
 	}
 	ss := sessionStarts[0]
-	if ss.Data["stage"] != "test-stage" {
-		t.Errorf("session_start stage = %v, want test-stage", ss.Data["stage"])
+	ssData := parseEventData(t, ss)
+	if ssData["stage"] != "test-stage" {
+		t.Errorf("session_start stage = %v, want test-stage", ssData["stage"])
 	}
-	if ss.Data["provider"] != "mock" {
-		t.Errorf("session_start provider = %v, want mock", ss.Data["provider"])
+	if ssData["provider"] != "mock" {
+		t.Errorf("session_start provider = %v, want mock", ssData["provider"])
 	}
-	if _, ok := ss.Data["iterations"]; !ok {
+	if _, ok := ssData["iterations"]; !ok {
 		t.Error("session_start missing iterations field")
 	}
 
 	// Check iteration_start events.
-	iterStarts := filterByType(evts, events.TypeIterationStart)
+	iterStarts := filterByType(evts, store.TypeIterationStart)
 	if len(iterStarts) != 2 {
 		t.Fatalf("expected 2 iteration_starts, got %d", len(iterStarts))
 	}
 	for i, is := range iterStarts {
-		if is.Cursor == nil {
-			t.Errorf("iteration_start[%d]: missing cursor", i)
+		isData := parseEventData(t, is)
+		var cursor map[string]any
+		if err := json.Unmarshal([]byte(is.CursorJSON), &cursor); err != nil {
+			t.Errorf("iteration_start[%d]: invalid cursor JSON: %v", i, err)
 			continue
 		}
-		if is.Cursor.Iteration != i+1 {
-			t.Errorf("iteration_start[%d] cursor.iteration = %d, want %d", i, is.Cursor.Iteration, i+1)
+		if cursor["iteration"] != float64(i+1) {
+			t.Errorf("iteration_start[%d] cursor.iteration = %v, want %d", i, cursor["iteration"], i+1)
 		}
-		if is.Cursor.Provider == "" {
+		if cursor["provider"] == "" {
 			t.Errorf("iteration_start[%d]: cursor.provider is empty", i)
 		}
-		if is.Data["iteration"] != float64(i+1) {
-			t.Errorf("iteration_start[%d] data.iteration = %v, want %d", i, is.Data["iteration"], i+1)
+		if isData["iteration"] != float64(i+1) {
+			t.Errorf("iteration_start[%d] data.iteration = %v, want %d", i, isData["iteration"], i+1)
 		}
 	}
 
 	// Check iteration_complete events.
-	iterCompletes := filterByType(evts, events.TypeIterationComplete)
+	iterCompletes := filterByType(evts, store.TypeIterationComplete)
 	if len(iterCompletes) != 2 {
 		t.Fatalf("expected 2 iteration_completes, got %d", len(iterCompletes))
 	}
 	for i, ic := range iterCompletes {
-		if ic.Cursor == nil {
-			t.Errorf("iteration_complete[%d]: missing cursor", i)
-			continue
-		}
-		if _, ok := ic.Data["decision"]; !ok {
+		icData := parseEventData(t, ic)
+		if _, ok := icData["decision"]; !ok {
 			t.Errorf("iteration_complete[%d]: missing decision", i)
 		}
-		if _, ok := ic.Data["summary"]; !ok {
+		if _, ok := icData["summary"]; !ok {
 			t.Errorf("iteration_complete[%d]: missing summary", i)
 		}
-		if _, ok := ic.Data["duration"]; !ok {
+		if _, ok := icData["duration"]; !ok {
 			t.Errorf("iteration_complete[%d]: missing duration", i)
 		}
 	}
 
 	// Check session_complete event.
-	sessionCompletes := filterByType(evts, events.TypeSessionComplete)
+	sessionCompletes := filterByType(evts, store.TypeSessionComplete)
 	if len(sessionCompletes) != 1 {
 		t.Fatalf("expected 1 session_complete, got %d", len(sessionCompletes))
 	}
-	sc := sessionCompletes[0]
-	if _, ok := sc.Data["iterations"]; !ok {
+	scData := parseEventData(t, sessionCompletes[0])
+	if _, ok := scData["iterations"]; !ok {
 		t.Error("session_complete missing iterations field")
 	}
-	if _, ok := sc.Data["reason"]; !ok {
+	if _, ok := scData["reason"]; !ok {
 		t.Error("session_complete missing reason field")
 	}
 }
 
 // TestIntegration_LifecycleEvents_Ordering validates strict event ordering.
 func TestIntegration_LifecycleEvents_Ordering(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(
@@ -144,6 +143,7 @@ func TestIntegration_LifecycleEvents_Ordering(t *testing.T) {
 		Provider:       mp,
 		Iterations:     two,
 		PromptTemplate: "iteration ${ITERATION}",
+		Store:          s,
 	}
 
 	_, err := Run(context.Background(), cfg)
@@ -151,17 +151,17 @@ func TestIntegration_LifecycleEvents_Ordering(t *testing.T) {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	evts := readEvents(t, runDir)
+	evts := readEvents(t, s, "test-ordering")
 
 	// Expected order: session_start, iter1_start, iter1_complete,
 	// iter2_start, iter2_complete, session_complete
 	expectedTypes := []string{
-		events.TypeSessionStart,
-		events.TypeIterationStart,
-		events.TypeIterationComplete,
-		events.TypeIterationStart,
-		events.TypeIterationComplete,
-		events.TypeSessionComplete,
+		store.TypeSessionStart,
+		store.TypeIterationStart,
+		store.TypeIterationComplete,
+		store.TypeIterationStart,
+		store.TypeIterationComplete,
+		store.TypeSessionComplete,
 	}
 
 	if len(evts) != len(expectedTypes) {
@@ -176,9 +176,9 @@ func TestIntegration_LifecycleEvents_Ordering(t *testing.T) {
 
 	// Verify timestamps are monotonically non-decreasing.
 	for i := 1; i < len(evts); i++ {
-		if evts[i].Timestamp < evts[i-1].Timestamp {
+		if evts[i].CreatedAt < evts[i-1].CreatedAt {
 			t.Errorf("event[%d] timestamp %s < event[%d] timestamp %s",
-				i, evts[i].Timestamp, i-1, evts[i-1].Timestamp)
+				i, evts[i].CreatedAt, i-1, evts[i-1].CreatedAt)
 		}
 	}
 }
@@ -186,12 +186,12 @@ func TestIntegration_LifecycleEvents_Ordering(t *testing.T) {
 // TestIntegration_LifecycleEvents_FailurePath validates events on
 // provider failure — error event should appear before session_complete.
 func TestIntegration_LifecycleEvents_FailurePath(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(
 			mock.ContinueResponse("iter 1"),
-			mock.NoStatusResponse(), // Missing status.json
+			mock.FailureResponse(fmt.Errorf("provider crashed")),
 		),
 	)
 
@@ -202,6 +202,7 @@ func TestIntegration_LifecycleEvents_FailurePath(t *testing.T) {
 		Provider:       mp,
 		Iterations:     5,
 		PromptTemplate: "iteration ${ITERATION}",
+		Store:          s,
 	}
 
 	res, err := Run(context.Background(), cfg)
@@ -209,25 +210,25 @@ func TestIntegration_LifecycleEvents_FailurePath(t *testing.T) {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	if res.Status != state.StateFailed {
-		t.Errorf("status = %q, want %q", res.Status, state.StateFailed)
+	if res.Status != store.StatusFailed {
+		t.Errorf("status = %q, want %q", res.Status, store.StatusFailed)
 	}
 
-	evts := readEvents(t, runDir)
+	evts := readEvents(t, s, "test-fail-events")
 
 	// Should have: session.started, iter1 started/completed,
 	// iter2 started, iteration.failed
 	types := eventTypes(evts)
 
 	// First event should be session.started.
-	if len(types) == 0 || types[0] != events.TypeSessionStart {
-		t.Fatalf("first event = %v, want %s", types, events.TypeSessionStart)
+	if len(types) == 0 || types[0] != store.TypeSessionStart {
+		t.Fatalf("first event = %v, want %s", types, store.TypeSessionStart)
 	}
 
 	// Should contain an iteration.failed event.
 	hasIterFailed := false
 	for _, typ := range types {
-		if typ == events.TypeIterationFailed {
+		if typ == store.TypeIterationFailed {
 			hasIterFailed = true
 			break
 		}
@@ -236,20 +237,20 @@ func TestIntegration_LifecycleEvents_FailurePath(t *testing.T) {
 		t.Errorf("no iteration.failed event found; types: %v", types)
 	}
 
-	// Verify state.json reflects failure.
-	st, err := state.Load(runDir + "/state.json")
+	// Verify store session reflects failure.
+	row, err := s.GetSession(context.Background(), "test-fail-events")
 	if err != nil {
-		t.Fatalf("load state: %v", err)
+		t.Fatalf("get session: %v", err)
 	}
-	if st.Status != state.StateFailed {
-		t.Errorf("state status = %q, want %q", st.Status, state.StateFailed)
+	if row.Status != store.StatusFailed {
+		t.Errorf("state status = %q, want %q", row.Status, store.StatusFailed)
 	}
 }
 
 // TestIntegration_EventsBeforeState validates that events are appended
 // before the state snapshot is updated (crash consistency guarantee).
 func TestIntegration_EventsBeforeState(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(mock.ContinueResponse("single iter")),
@@ -262,6 +263,7 @@ func TestIntegration_EventsBeforeState(t *testing.T) {
 		Provider:       mp,
 		Iterations:     1,
 		PromptTemplate: "iteration ${ITERATION}",
+		Store:          s,
 	}
 
 	_, err := Run(context.Background(), cfg)
@@ -269,68 +271,47 @@ func TestIntegration_EventsBeforeState(t *testing.T) {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	// Both events.jsonl and state.json should exist.
-	eventsPath := runDir + "/events.jsonl"
-	statePath := runDir + "/state.json"
-
-	evInfo, err := os.Stat(eventsPath)
-	if err != nil {
-		t.Fatalf("events.jsonl missing: %v", err)
-	}
-	stInfo, err := os.Stat(statePath)
-	if err != nil {
-		t.Fatalf("state.json missing: %v", err)
-	}
-
-	// Events file should have been modified at or before state file.
-	// This verifies the write order: events → state.
-	if evInfo.ModTime().After(stInfo.ModTime().Add(1)) {
-		t.Logf("events mod: %v, state mod: %v", evInfo.ModTime(), stInfo.ModTime())
-		// This is a soft check — filesystem timestamps may have coarse resolution.
-	}
-
-	// The critical check: events.jsonl should have a session_complete
-	// event, and state.json should show completed.
-	evts := readEvents(t, runDir)
-	sessionCompletes := filterByType(evts, events.TypeSessionComplete)
+	// The critical check: store should have a session_complete
+	// event, and session should show completed.
+	evts := readEvents(t, s, "test-before-state")
+	sessionCompletes := filterByType(evts, store.TypeSessionComplete)
 	if len(sessionCompletes) == 0 {
 		t.Error("no session_complete event")
 	}
 
-	st, err := state.Load(statePath)
+	row, err := s.GetSession(context.Background(), "test-before-state")
 	if err != nil {
-		t.Fatalf("load state: %v", err)
+		t.Fatalf("get session: %v", err)
 	}
-	if st.Status != state.StateCompleted {
-		t.Errorf("state status = %q, want %q", st.Status, state.StateCompleted)
+	if row.Status != store.StatusCompleted {
+		t.Errorf("state status = %q, want %q", row.Status, store.StatusCompleted)
 	}
 }
 
-// readEvents parses events.jsonl into typed Event structs.
-func readEvents(t *testing.T, runDir string) []events.Event {
+// mustOpenStore opens an in-memory store for testing.
+func mustOpenStore(t *testing.T) *store.Store {
 	t.Helper()
-	data, err := os.ReadFile(runDir + "/events.jsonl")
+	s, err := store.Open(":memory:")
 	if err != nil {
-		t.Fatalf("read events: %v", err)
+		t.Fatalf("open store: %v", err)
 	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
 
-	var evts []events.Event
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		if line == "" {
-			continue
-		}
-		var evt events.Event
-		if err := json.Unmarshal([]byte(line), &evt); err != nil {
-			t.Fatalf("parse event: %v", err)
-		}
-		evts = append(evts, evt)
+// readEvents queries events from the store for a session.
+func readEvents(t *testing.T, s *store.Store, session string) []store.EventRow {
+	t.Helper()
+	evts, err := s.GetEvents(context.Background(), session, "", 0)
+	if err != nil {
+		t.Fatalf("get events: %v", err)
 	}
 	return evts
 }
 
 // filterByType returns events matching the given type.
-func filterByType(evts []events.Event, typ string) []events.Event {
-	var out []events.Event
+func filterByType(evts []store.EventRow, typ string) []store.EventRow {
+	var out []store.EventRow
 	for _, evt := range evts {
 		if evt.Type == typ {
 			out = append(out, evt)
@@ -340,10 +321,20 @@ func filterByType(evts []events.Event, typ string) []events.Event {
 }
 
 // eventTypes extracts event type strings.
-func eventTypes(evts []events.Event) []string {
+func eventTypes(evts []store.EventRow) []string {
 	types := make([]string, len(evts))
 	for i, evt := range evts {
 		types[i] = evt.Type
 	}
 	return types
+}
+
+// parseEventData parses the DataJSON field of an EventRow into a map.
+func parseEventData(t *testing.T, evt store.EventRow) map[string]any {
+	t.Helper()
+	var data map[string]any
+	if err := json.Unmarshal([]byte(evt.DataJSON), &data); err != nil {
+		t.Fatalf("parse event data: %v", err)
+	}
+	return data
 }

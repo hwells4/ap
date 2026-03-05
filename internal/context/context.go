@@ -84,8 +84,6 @@ type ContextPaths struct {
 	StageDir   string `json:"stage_dir"`
 	Progress   string `json:"progress"`
 	Output     string `json:"output"`
-	Status     string `json:"status"`
-	Result     string `json:"result"`
 	Messages   string `json:"messages"`
 }
 
@@ -103,8 +101,17 @@ type Limits struct {
 	RemainingSeconds int `json:"remaining_seconds"`
 }
 
+// GenerateContextOpts provides optional overrides for context generation.
+// When provided, these values are used instead of reading state.json.
+type GenerateContextOpts struct {
+	// PipelineName overrides the pipeline name (avoids reading state.json).
+	PipelineName string
+	// StartedAt overrides the session start time for remaining seconds calculation.
+	StartedAt string
+}
+
 // GenerateContext creates context.json for an iteration and returns its path.
-func GenerateContext(session string, iteration int, stageConfig StageConfig, runDir string) (string, error) {
+func GenerateContext(session string, iteration int, stageConfig StageConfig, runDir string, opts *GenerateContextOpts) (string, error) {
 	stageID := stageIdentifier(stageConfig)
 	stageIdx := stageIndex(stageConfig)
 	stageTemplate := stageTemplate(stageConfig)
@@ -125,8 +132,6 @@ func GenerateContext(session string, iteration int, stageConfig StageConfig, run
 	}
 
 	outputFile := filepath.Join(iterDir, "output.md")
-	statusFile := filepath.Join(iterDir, "status.json")
-	resultFile := filepath.Join(iterDir, "result.json")
 	messagesFile := filepath.Join(runDir, "messages.jsonl")
 
 	inputs, err := BuildInputs(runDir, stageConfig, iteration)
@@ -139,12 +144,22 @@ func GenerateContext(session string, iteration int, stageConfig StageConfig, run
 		maxIterations = *stageConfig.MaxIterations
 	}
 
-	remaining, err := CalculateRemainingSeconds(runDir, stageConfig)
+	var remaining int
+	if opts != nil && opts.StartedAt != "" {
+		remaining, err = CalculateRemainingSecondsFromStartedAt(opts.StartedAt, stageConfig)
+	} else {
+		remaining, err = CalculateRemainingSeconds(runDir, stageConfig)
+	}
 	if err != nil {
 		return "", err
 	}
 
-	pipeline := readPipelineName(filepath.Join(runDir, "state.json"))
+	var pipeline string
+	if opts != nil && opts.PipelineName != "" {
+		pipeline = opts.PipelineName
+	} else {
+		pipeline = readPipelineName(filepath.Join(runDir, "state.json"))
+	}
 
 	commands := stageConfig.Commands
 	if commands == nil {
@@ -161,8 +176,6 @@ func GenerateContext(session string, iteration int, stageConfig StageConfig, run
 			StageDir:   stageDir,
 			Progress:   progressFile,
 			Output:     outputFile,
-			Status:     statusFile,
-			Result:     resultFile,
 			Messages:   messagesFile,
 		},
 		Inputs: inputs,
@@ -182,6 +195,37 @@ func GenerateContext(session string, iteration int, stageConfig StageConfig, run
 		return "", fmt.Errorf("write context: %w", err)
 	}
 	return manifestPath, nil
+}
+
+// CalculateRemainingSecondsFromStartedAt computes remaining runtime using an
+// explicit startedAt timestamp, without reading state.json from disk.
+func CalculateRemainingSecondsFromStartedAt(startedAt string, stageConfig StageConfig) (int, error) {
+	maxRuntime := -1
+	if stageConfig.Guardrails != nil && stageConfig.Guardrails.MaxRuntimeSeconds != nil {
+		maxRuntime = *stageConfig.Guardrails.MaxRuntimeSeconds
+	} else if stageConfig.MaxRuntimeSeconds != nil {
+		maxRuntime = *stageConfig.MaxRuntimeSeconds
+	}
+
+	if maxRuntime < 0 {
+		return -1, nil
+	}
+
+	if strings.TrimSpace(startedAt) == "" || startedAt == "null" {
+		return maxRuntime, nil
+	}
+
+	parsed, err := time.Parse(time.RFC3339, startedAt)
+	if err != nil {
+		return maxRuntime, nil
+	}
+
+	elapsed := int(time.Since(parsed).Seconds())
+	remaining := maxRuntime - elapsed
+	if remaining < 0 {
+		return 0, nil
+	}
+	return remaining, nil
 }
 
 // CalculateRemainingSeconds computes remaining runtime from stage config and state.json.

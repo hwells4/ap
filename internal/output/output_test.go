@@ -283,7 +283,7 @@ func TestMarshalSuccessJSONPayloadShape(t *testing.T) {
 // TestCommandsReturnsCanonicalSet validates the canonical command list.
 func TestCommandsReturnsCanonicalSet(t *testing.T) {
 	cmds := Commands()
-	expected := []string{"run", "list", "status", "resume", "kill", "logs", "clean", "watch"}
+	expected := []string{"run", "list", "status", "resume", "kill", "logs", "clean", "watch", "query"}
 	if len(cmds) != len(expected) {
 		t.Fatalf("commands count = %d, want %d", len(cmds), len(expected))
 	}

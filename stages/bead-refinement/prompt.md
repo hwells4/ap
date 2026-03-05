@@ -2,7 +2,6 @@
 
 Read context from: ${CTX}
 Progress file: ${PROGRESS}
-Status output: ${STATUS}
 Session: ${SESSION_NAME}
 Iteration: ${ITERATION}
 
@@ -46,10 +45,12 @@ bd ready --label=pipeline/${SESSION_NAME}
 
 Append a summary of bead changes to `${PROGRESS}`.
 
-### Write Status
+### Write Decision
+
+When you are done, output your decision in a fenced block.
 
 **If more refinement needed:**
-```json
+```ap-result
 {
   "decision": "continue",
   "reason": "More beads need refinement or plan not fully captured",
@@ -60,7 +61,7 @@ Append a summary of bead changes to `${PROGRESS}`.
 ```
 
 **If beads are comprehensive:**
-```json
+```ap-result
 {
   "decision": "stop",
   "reason": "Beads comprehensively cover the optimization plan",
@@ -68,4 +69,7 @@ Append a summary of bead changes to `${PROGRESS}`.
   "work": {"items_completed": ["bead-refinement"], "files_touched": []},
   "errors": []
 }
+```
+
+Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
 ```

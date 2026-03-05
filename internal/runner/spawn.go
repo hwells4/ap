@@ -1,15 +1,17 @@
 package runner
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
-	"github.com/hwells4/ap/internal/events"
+	"github.com/hwells4/ap/internal/runtarget"
 	"github.com/hwells4/ap/internal/session"
 	"github.com/hwells4/ap/internal/signals"
 	"github.com/hwells4/ap/internal/spec"
 	"github.com/hwells4/ap/internal/stage"
+	"github.com/hwells4/ap/internal/store"
 )
 
 const (
@@ -25,7 +27,6 @@ type spawnResult struct {
 
 func processSpawnSignals(
 	cfg Config,
-	ew *events.Writer,
 	iteration int,
 	spawnSignals []signals.SpawnSignal,
 	spawnedChildren int,
@@ -45,28 +46,32 @@ func processSpawnSignals(
 		maxDepth = defaultMaxSpawnDepth
 	}
 
-	projectRoot, err := spawnProjectRoot(cfg.WorkDir)
+	parentTarget, err := spawnParentTarget(cfg)
 	if err != nil {
 		return res, err
 	}
 
-	cursor := &events.Cursor{
-		Iteration: iteration,
-		Provider:  cfg.Provider.Name(),
-	}
+	cursorJSON := marshalCursorJSON(iteration, cfg.Provider.Name(), "", 0)
 
 	for idx, spawnSignal := range spawnSignals {
 		sigID := SignalID(iteration, "spawn", idx)
 
 		failure := func(reason error) error {
-			return ew.Append(events.NewEvent(events.TypeSignalSpawnFailed, cfg.Session, cursor, map[string]any{
-				"signal_id":     sigID,
-				"iteration":     iteration,
-				"signal_index":  idx,
-				"run":           spawnSignal.Run,
-				"child_session": spawnSignal.Session,
-				"error":         reason.Error(),
-			}))
+			if cfg.Store != nil {
+				data := map[string]any{
+					"signal_id":     sigID,
+					"iteration":     iteration,
+					"signal_index":  idx,
+					"run":           spawnSignal.Run,
+					"child_session": spawnSignal.Session,
+					"project_root":  strings.TrimSpace(spawnSignal.ProjectRoot),
+					"error":         reason.Error(),
+				}
+				dataJSON, _ := json.Marshal(data)
+				_ = cfg.Store.AppendEvent(context.Background(), cfg.Session,
+					store.TypeSignalSpawnFailed, cursorJSON, string(dataJSON))
+			}
+			return nil
 		}
 
 		if cfg.SpawnDepth >= maxDepth {
@@ -90,8 +95,27 @@ func processSpawnSignals(
 			continue
 		}
 
+		childProjectRoot, rootErr := runtarget.ResolveSpawnRoot(parentTarget.ProjectRoot, spawnSignal.ProjectRoot)
+		if rootErr != nil {
+			if appendErr := failure(fmt.Errorf("resolve spawn project_root: %w", rootErr)); appendErr != nil {
+				return res, appendErr
+			}
+			continue
+		}
+		targetSource := runtarget.SourceSpawnInherit
+		if strings.TrimSpace(spawnSignal.ProjectRoot) != "" {
+			targetSource = runtarget.SourceSpawnOverride
+		}
+		childTarget, targetErr := runtarget.Resolve(childProjectRoot, targetSource)
+		if targetErr != nil {
+			if appendErr := failure(fmt.Errorf("resolve child run target: %w", targetErr)); appendErr != nil {
+				return res, appendErr
+			}
+			continue
+		}
+
 		parsed, err := spec.ParseWithOptions(spawnSignal.Run, spec.ParseOptions{
-			StageResolveOpts: stage.ResolveOptions{ProjectRoot: projectRoot},
+			StageResolveOpts: stage.ResolveOptions{ProjectRoot: childTarget.ProjectRoot},
 		})
 		if err != nil {
 			if appendErr := failure(fmt.Errorf("parse run spec: %w", err)); appendErr != nil {
@@ -113,12 +137,21 @@ func processSpawnSignals(
 		}
 
 		// Two-phase: emit dispatching before the side effect.
-		if err := emitDispatching(ew, cfg.Session, cursor, sigID, "spawn", iteration); err != nil {
-			return res, fmt.Errorf("emit spawn dispatching: %w", err)
+		if cfg.Store != nil {
+			dispData := map[string]any{
+				"signal_id":   sigID,
+				"signal_type": "spawn",
+				"iteration":   iteration,
+			}
+			dataJSON, _ := json.Marshal(dispData)
+			_ = cfg.Store.AppendEvent(context.Background(), cfg.Session,
+				store.TypeSignalDispatching, cursorJSON, string(dataJSON))
 		}
 
 		childSession, err := session.Start(parsed, spawnSignal.Session, session.StartOpts{
-			ProjectRoot:   projectRoot,
+			ProjectRoot:   childTarget.ProjectRoot,
+			RunTarget:     childTarget,
+			TargetSource:  childTarget.Source,
 			Provider:      cfg.Provider.Name(),
 			Model:         cfg.Model,
 			Context:       spawnSignal.Context,
@@ -126,7 +159,7 @@ func processSpawnSignals(
 			Executable:    cfg.ExecutablePath,
 			Launcher:      cfg.Launcher,
 			LauncherOpts: session.StartOptions{
-				WorkDir: projectRoot,
+				WorkDir: childTarget.ProjectRoot,
 			},
 		})
 		if err != nil {
@@ -138,21 +171,31 @@ func processSpawnSignals(
 
 		res.ChildCount++
 		res.ChildNames = append(res.ChildNames, childSession.Name)
-		if err := ew.Append(events.NewEvent(events.TypeSignalSpawn, cfg.Session, cursor, map[string]any{
-			"signal_id":     sigID,
-			"iteration":     iteration,
-			"signal_index":  idx,
-			"run":           spawnSignal.Run,
-			"child_stage":   childStage,
-			"child_session": childSession.Name,
-			"child_run_dir": childSession.RunDir,
-			"pid":           childSession.Handle.PID,
-			"backend":       childSession.Handle.Backend,
-		})); err != nil {
-			return res, err
+
+		if cfg.Store != nil {
+			spawnData := map[string]any{
+				"signal_id":     sigID,
+				"iteration":     iteration,
+				"signal_index":  idx,
+				"run":           spawnSignal.Run,
+				"child_stage":   childStage,
+				"child_session": childSession.Name,
+				"child_run_dir": childSession.RunDir,
+				"project_root":  childTarget.ProjectRoot,
+				"repo_root":     childTarget.RepoRoot,
+				"config_root":   childTarget.ConfigRoot,
+				"project_key":   childTarget.ProjectKey,
+				"target_source": childTarget.Source,
+				"pid":           childSession.Handle.PID,
+				"backend":       childSession.Handle.Backend,
+			}
+			dataJSON, _ := json.Marshal(spawnData)
+			_ = cfg.Store.AppendEvent(context.Background(), cfg.Session,
+				store.TypeSignalSpawn, cursorJSON, string(dataJSON))
 		}
+
 		if err := dispatchSignalHandlers(dispatchSignalInput{
-			Writer:        ew,
+			Store:         cfg.Store,
 			Session:       cfg.Session,
 			Stage:         cfg.StageName,
 			Iteration:     iteration,
@@ -186,10 +229,9 @@ func applySpawnCountOverride(parsed spec.Spec, override int) (spec.Spec, error) 
 	return stageSpec, nil
 }
 
-func spawnProjectRoot(workDir string) (string, error) {
-	workDir = strings.TrimSpace(workDir)
-	if workDir != "" {
-		return workDir, nil
+func spawnParentTarget(cfg Config) (runtarget.Target, error) {
+	if strings.TrimSpace(cfg.RunTarget.ProjectRoot) != "" {
+		return runtarget.NormalizeWithDefaults(cfg.RunTarget, cfg.RunTarget.Source)
 	}
-	return os.Getwd()
+	return runtarget.Resolve(cfg.WorkDir, runtarget.SourceSpawnInherit)
 }

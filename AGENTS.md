@@ -14,7 +14,19 @@ Binary: `ap`. Module: `github.com/hwells4/ap`.
 | Resume paused/failed session | `ap resume <session> [--context "..."] [--json]` |
 | Terminate a session | `ap kill <session> [--json]` |
 | Read session events | `ap logs <session> [-f] [--json]` |
+| Watch sessions live | `ap watch [--json]` |
+| Query sessions | `ap query sessions [--status STATUS] [--json]` |
+| Query iterations | `ap query iterations --session NAME [--stage NAME] [--json]` |
+| Query events | `ap query events --session NAME [--type TYPE] [--after SEQ] [--json]` |
 | Clean run artifacts | `ap clean <session>|--all [--force] [--json]` |
+
+## Storage Model
+- All session state lives in a single **SQLite database** (`.ap/ap.db`, WAL mode).
+- Tables: `sessions`, `iterations`, `outputs`, `events`, `locks`, `session_children`, `schema_version`.
+- The `events` table is an append-only audit log with monotonic `seq` per session.
+- The `iterations` table stores per-iteration decision, summary, exit code, and signals.
+- The `outputs` table stores stdout/stderr/context_json paired 1:1 with iterations.
+- Decision authority is the SQLite store (not stdout/stderr or any JSON file on disk).
 
 ## Output Contract
 - JSON mode is enabled by `--json`, non-TTY stdout, or `AP_OUTPUT=json`.
@@ -41,9 +53,14 @@ Binary: `ap`. Module: `github.com/hwells4/ap`.
    - `ap status <session> --json`
 4. Read iteration/event details:
    - `ap logs <session> --json` or `ap logs <session> -f --json`
-5. Escalation/paused handling:
+5. Query store directly:
+   - `ap query sessions --status running --json` (list sessions by status)
+   - `ap query iterations --session <name> --json` (all iterations for a session)
+   - `ap query events --session <name> --type signal.escalate --json` (filtered events)
+   - `ap query events --session <name> --after 5 --json` (events after seq 5, for polling)
+6. Escalation/paused handling:
    - if paused (`exit 20`/state paused), gather context and `ap resume <session> --json`
-6. Cleanup/termination:
+7. Cleanup/termination:
    - `ap kill <session> --json` (idempotent)
    - `ap clean <session>|--all --json`
 
@@ -56,5 +73,6 @@ Binary: `ap`. Module: `github.com/hwells4/ap`.
 
 ## Agent Notes
 - Internal launcher entrypoint is `ap _run --session <name> --request <path>`.
-- Decision authority is `status.json` (not stdout/stderr).
+- Decision authority is the SQLite store (`.ap/ap.db`), not stdout/stderr.
 - Preserve and inspect `corrections[]` for deterministic machine workflows.
+- `run_request.json` is also persisted to disk in `.ap/runs/<session>/` for crash recovery.

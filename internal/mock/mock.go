@@ -2,15 +2,16 @@
 //
 // MockProvider implements pkg/provider.Provider with configurable canned
 // responses per iteration. It supports success, error, timeout, and
-// malformed status scenarios without requiring external CLI tools.
+// no-decision scenarios without requiring external CLI tools.
+//
+// Decisions are emitted as ```ap-result fenced blocks appended to stdout,
+// matching the extraction strategy used by internal/extract.
 package mock
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -28,23 +29,17 @@ type Response struct {
 	// ExitCode is the process exit code.
 	ExitCode int
 
-	// Decision is the agent decision written to status.json.
+	// Decision is the agent decision (continue, stop, error, etc.).
 	Decision string
 
-	// Summary is the agent summary written to status.json.
+	// Summary is the agent summary.
 	Summary string
 
-	// Reason is the agent reason written to status.json.
+	// Reason is the agent reason.
 	Reason string
 
-	// FilesTouched is the list of files reported in status.json.
-	FilesTouched []string
-
-	// ItemsCompleted is the list of work items reported in status.json.
-	ItemsCompleted []string
-
-	// Errors is the list of errors reported in status.json.
-	Errors []string
+	// Signals contains optional agent signals (inject, escalate, etc.).
+	Signals *Signals
 
 	// Duration overrides the execution duration. Zero uses a small default.
 	Duration time.Duration
@@ -52,24 +47,35 @@ type Response struct {
 	// Err is an error returned from Execute (simulates provider failure).
 	Err error
 
-	// WriteStatus controls whether a status.json file is written.
-	// Defaults to true when Decision is set.
-	WriteStatus *bool
-
-	// StatusJSON overrides the status.json content entirely.
-	// When set, Decision/Summary/Reason/Work/Errors fields are ignored.
-	StatusJSON string
+	// EmitDecision controls whether an ap-result block is emitted in stdout.
+	// Defaults to true when Decision is set. Set to false explicitly to
+	// simulate an agent that produces no decision block.
+	EmitDecision *bool
 
 	// Delay is how long Execute blocks before returning (simulates work).
 	Delay time.Duration
 }
 
-// shouldWriteStatus returns whether a status.json should be written.
-func (r Response) shouldWriteStatus() bool {
-	if r.WriteStatus != nil {
-		return *r.WriteStatus
+// Signals holds optional signal fields for the ap-result block.
+type Signals struct {
+	Inject   string          `json:"inject,omitempty"`
+	Escalate *EscalateSignal `json:"escalate,omitempty"`
+	Spawn    json.RawMessage `json:"spawn,omitempty"`
+}
+
+// EscalateSignal represents an escalation request.
+type EscalateSignal struct {
+	Type    string   `json:"type"`
+	Reason  string   `json:"reason"`
+	Options []string `json:"options,omitempty"`
+}
+
+// shouldEmitDecision returns whether an ap-result block should be appended to stdout.
+func (r Response) shouldEmitDecision() bool {
+	if r.EmitDecision != nil {
+		return *r.EmitDecision
 	}
-	return r.Decision != "" || r.StatusJSON != ""
+	return r.Decision != ""
 }
 
 // Provider is a deterministic mock implementation of pkg/provider.Provider.
@@ -183,7 +189,7 @@ func (p *Provider) Capabilities() provider.Capabilities {
 }
 
 // Execute returns the canned response for the current call index.
-// It writes status.json to req.StatusPath when configured.
+// When a decision is configured, it appends an ap-result fenced block to stdout.
 func (p *Provider) Execute(ctx context.Context, req provider.Request) (provider.Result, error) {
 	p.mu.Lock()
 	callIdx := len(p.calls)
@@ -216,11 +222,14 @@ func (p *Provider) Execute(ctx context.Context, req provider.Request) (provider.
 	}
 	finished := started.Add(duration)
 
-	// Write status.json if configured.
-	if resp.shouldWriteStatus() && req.StatusPath != "" {
-		if err := writeStatus(req.StatusPath, resp); err != nil {
-			return provider.Result{}, fmt.Errorf("mock: write status: %w", err)
+	// Build stdout: original stdout + optional ap-result block.
+	stdout := resp.Stdout
+	if resp.shouldEmitDecision() {
+		block := buildApResultBlock(resp)
+		if stdout != "" {
+			stdout += "\n"
 		}
+		stdout += block
 	}
 
 	model := req.Model
@@ -229,8 +238,8 @@ func (p *Provider) Execute(ctx context.Context, req provider.Request) (provider.
 	}
 
 	result := provider.Result{
-		Output:     resp.Stdout,
-		Stdout:     resp.Stdout,
+		Output:     stdout,
+		Stdout:     stdout,
 		Stderr:     resp.Stderr,
 		ExitCode:   resp.ExitCode,
 		Model:      model,
@@ -244,6 +253,35 @@ func (p *Provider) Execute(ctx context.Context, req provider.Request) (provider.
 	}
 
 	return result, nil
+}
+
+// buildApResultBlock constructs a ```ap-result fenced block from the response.
+func buildApResultBlock(resp Response) string {
+	payload := map[string]any{
+		"decision": resp.Decision,
+		"summary":  resp.Summary,
+	}
+	if resp.Reason != "" {
+		payload["reason"] = resp.Reason
+	}
+	if resp.Signals != nil {
+		signals := map[string]any{}
+		if resp.Signals.Inject != "" {
+			signals["inject"] = resp.Signals.Inject
+		}
+		if resp.Signals.Escalate != nil {
+			signals["escalate"] = resp.Signals.Escalate
+		}
+		if len(resp.Signals.Spawn) > 0 {
+			signals["spawn"] = json.RawMessage(resp.Signals.Spawn)
+		}
+		if len(signals) > 0 {
+			payload["signals"] = signals
+		}
+	}
+
+	data, _ := json.Marshal(payload)
+	return "```ap-result\n" + string(data) + "\n```"
 }
 
 // Calls returns a copy of all recorded Execute calls.
@@ -284,50 +322,6 @@ func (p *Provider) responseFor(idx int) Response {
 	}
 }
 
-// writeStatus writes a status.json file at the given path.
-func writeStatus(path string, resp Response) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create status dir: %w", err)
-	}
-
-	var payload []byte
-	if resp.StatusJSON != "" {
-		payload = []byte(resp.StatusJSON)
-	} else {
-		filesTouched := resp.FilesTouched
-		if filesTouched == nil {
-			filesTouched = []string{}
-		}
-		itemsCompleted := resp.ItemsCompleted
-		if itemsCompleted == nil {
-			itemsCompleted = []string{}
-		}
-		errs := resp.Errors
-		if errs == nil {
-			errs = []string{}
-		}
-
-		status := map[string]any{
-			"decision": resp.Decision,
-			"reason":   resp.Reason,
-			"summary":  resp.Summary,
-			"work": map[string]any{
-				"items_completed": itemsCompleted,
-				"files_touched":   filesTouched,
-			},
-			"errors": errs,
-		}
-
-		var err error
-		payload, err = json.MarshalIndent(status, "", "  ")
-		if err != nil {
-			return fmt.Errorf("marshal status: %w", err)
-		}
-	}
-
-	return os.WriteFile(path, append(payload, '\n'), 0o644)
-}
-
 // ContinueResponse returns a Response that signals "continue".
 func ContinueResponse(summary string) Response {
 	return Response{
@@ -351,7 +345,6 @@ func ErrorResponse(summary, reason string, errs []string) Response {
 		Decision: "error",
 		Summary:  summary,
 		Reason:   reason,
-		Errors:   errs,
 	}
 }
 
@@ -364,64 +357,51 @@ func FailureResponse(err error) Response {
 }
 
 // InjectResponse returns a Response with an inject signal.
-// The inject text is stored for the next iteration's ${CONTEXT}.
 func InjectResponse(decision, summary, injectText string) Response {
-	statusJSON := map[string]any{
-		"decision": decision,
-		"summary":  summary,
-		"reason":   "",
-		"work": map[string]any{
-			"items_completed": []string{},
-			"files_touched":   []string{},
-		},
-		"errors": []string{},
-		"agent_signals": map[string]any{
-			"inject": injectText,
-		},
-	}
-	data, _ := json.MarshalIndent(statusJSON, "", "  ")
 	return Response{
-		Decision:   decision,
-		Summary:    summary,
-		StatusJSON: string(data),
+		Decision: decision,
+		Summary:  summary,
+		Signals:  &Signals{Inject: injectText},
 	}
 }
 
 // EscalateResponse returns a Response with an escalate signal.
-// The agent's decision field is overridden by the escalation.
 func EscalateResponse(decision, summary, escalateType, reason string, options []string) Response {
-	if options == nil {
-		options = []string{}
-	}
-	statusJSON := map[string]any{
-		"decision": decision,
-		"summary":  summary,
-		"reason":   "",
-		"work": map[string]any{
-			"items_completed": []string{},
-			"files_touched":   []string{},
-		},
-		"errors": []string{},
-		"agent_signals": map[string]any{
-			"escalate": map[string]any{
-				"type":    escalateType,
-				"reason":  reason,
-				"options": options,
+	return Response{
+		Decision: decision,
+		Summary:  summary,
+		Signals: &Signals{
+			Escalate: &EscalateSignal{
+				Type:    escalateType,
+				Reason:  reason,
+				Options: options,
 			},
 		},
 	}
-	data, _ := json.MarshalIndent(statusJSON, "", "  ")
+}
+
+// SpawnResponse returns a Response with spawn signals.
+func SpawnResponse(decision, summary string, spawns ...SpawnDef) Response {
+	data, _ := json.Marshal(spawns)
 	return Response{
-		Decision:   decision,
-		Summary:    summary,
-		StatusJSON: string(data),
+		Decision: decision,
+		Summary:  summary,
+		Signals:  &Signals{Spawn: json.RawMessage(data)},
 	}
 }
 
-// NoStatusResponse returns a Response where no status.json is written.
-func NoStatusResponse() Response {
-	writeStatus := false
+// SpawnDef defines a spawn signal for SpawnResponse.
+type SpawnDef struct {
+	Run     string `json:"run"`
+	Session string `json:"session"`
+	Context string `json:"context,omitempty"`
+}
+
+// NoDecisionResponse returns a Response where no ap-result block is emitted.
+// This simulates an agent that produces no structured decision.
+func NoDecisionResponse() Response {
+	emit := false
 	return Response{
-		WriteStatus: &writeStatus,
+		EmitDecision: &emit,
 	}
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/hwells4/ap/internal/mock"
 	"github.com/hwells4/ap/internal/session"
+	"github.com/hwells4/ap/internal/store"
 )
 
 func TestRun_SpawnSignalSuccessEmitsEvent(t *testing.T) {
@@ -19,18 +20,16 @@ func TestRun_SpawnSignalSuccessEmitsEvent(t *testing.T) {
 		t.Fatalf("mkdir runDir: %v", err)
 	}
 
+	s := mustOpenStore(t)
+
 	prov := mock.New(
 		mock.WithResponses(mock.Response{
-			StatusJSON: `{
-        "decision":"stop",
-        "reason":"done",
-        "summary":"spawn child",
-        "work":{"items_completed":[],"files_touched":[]},
-        "errors":[],
-        "agent_signals":{
-          "spawn":[{"run":"ralph:2","session":"child-one","context":"focus child"}]
-        }
-      }`,
+			Decision: "stop",
+			Summary:  "spawn child",
+			Reason:   "done",
+			Signals: &mock.Signals{
+				Spawn: json.RawMessage(`[{"run":"ralph:2","session":"child-one","context":"focus child"}]`),
+			},
 		}),
 	)
 
@@ -45,6 +44,7 @@ func TestRun_SpawnSignalSuccessEmitsEvent(t *testing.T) {
 		WorkDir:        root,
 		Launcher:       launcher,
 		ExecutablePath: "/usr/bin/ap",
+		Store:          s,
 	})
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
@@ -68,14 +68,75 @@ func TestRun_SpawnSignalSuccessEmitsEvent(t *testing.T) {
 		t.Fatalf("child request context = %v, want focus child", req["context"])
 	}
 
-	evts := readEvents(t, runDir)
-	spawnEvents := filterByType(evts, "signal.spawn")
+	evts := readEvents(t, s, "parent-success")
+	spawnEvents := filterByType(evts, store.TypeSignalSpawn)
 	if len(spawnEvents) != 1 {
 		t.Fatalf("signal.spawn event count = %d, want 1", len(spawnEvents))
 	}
-	data := spawnEvents[0].Data
+	data := parseEventData(t, spawnEvents[0])
 	if data["child_session"] != "child-one" {
 		t.Fatalf("signal.spawn child_session = %v, want child-one", data["child_session"])
+	}
+}
+
+func TestRun_SpawnSignalProjectRootOverride(t *testing.T) {
+	root := t.TempDir()
+	otherRoot := t.TempDir()
+	runDir := filepath.Join(root, ".ap", "runs", "parent-override")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir runDir: %v", err)
+	}
+
+	s := mustOpenStore(t)
+
+	prov := mock.New(
+		mock.WithResponses(mock.Response{
+			Decision: "stop",
+			Summary:  "spawn child to override root",
+			Reason:   "done",
+			Signals: &mock.Signals{
+				Spawn: json.RawMessage(`[{"run":"ralph:2","session":"child-override","project_root":"` + otherRoot + `"}]`),
+			},
+		}),
+	)
+
+	launcher := &spawnTestLauncher{}
+	_, err := Run(context.Background(), Config{
+		Session:        "parent-override",
+		RunDir:         runDir,
+		StageName:      "ralph",
+		Provider:       prov,
+		Iterations:     1,
+		PromptTemplate: "iteration ${ITERATION}",
+		WorkDir:        root,
+		Launcher:       launcher,
+		ExecutablePath: "/usr/bin/ap",
+		Store:          s,
+	})
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if launcher.startCalls != 1 {
+		t.Fatalf("launcher start calls = %d, want 1", launcher.startCalls)
+	}
+
+	childReqPath := filepath.Join(otherRoot, ".ap", "runs", "child-override", "run_request.json")
+	req := readJSONMap(t, childReqPath)
+	if req["project_root"] != otherRoot {
+		t.Fatalf("child request project_root = %v, want %q", req["project_root"], otherRoot)
+	}
+	if req["target_source"] != "spawn_override" {
+		t.Fatalf("child request target_source = %v, want spawn_override", req["target_source"])
+	}
+
+	evts := readEvents(t, s, "parent-override")
+	spawnEvents := filterByType(evts, store.TypeSignalSpawn)
+	if len(spawnEvents) != 1 {
+		t.Fatalf("signal.spawn event count = %d, want 1", len(spawnEvents))
+	}
+	data := parseEventData(t, spawnEvents[0])
+	if data["project_root"] != otherRoot {
+		t.Fatalf("signal.spawn project_root = %v, want %q", data["project_root"], otherRoot)
 	}
 }
 
@@ -86,17 +147,17 @@ func TestRun_SpawnSignalFailureDoesNotStopParent(t *testing.T) {
 		t.Fatalf("mkdir runDir: %v", err)
 	}
 
+	s := mustOpenStore(t)
+
 	prov := mock.New(
 		mock.WithResponses(
 			mock.Response{
-				StatusJSON: `{
-          "decision":"continue",
-          "reason":"next",
-          "summary":"bad spawn",
-          "work":{"items_completed":[],"files_touched":[]},
-          "errors":[],
-          "agent_signals":{"spawn":[{"run":"definitely-not-a-stage","session":"child-bad"}]}
-        }`,
+				Decision: "continue",
+				Summary:  "bad spawn",
+				Reason:   "next",
+				Signals: &mock.Signals{
+					Spawn: json.RawMessage(`[{"run":"definitely-not-a-stage","session":"child-bad"}]`),
+				},
 			},
 			mock.StopResponse("done", "stop"),
 		),
@@ -113,6 +174,7 @@ func TestRun_SpawnSignalFailureDoesNotStopParent(t *testing.T) {
 		WorkDir:        root,
 		Launcher:       launcher,
 		ExecutablePath: "/usr/bin/ap",
+		Store:          s,
 	})
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
@@ -124,12 +186,12 @@ func TestRun_SpawnSignalFailureDoesNotStopParent(t *testing.T) {
 		t.Fatalf("launcher start calls = %d, want 0", launcher.startCalls)
 	}
 
-	evts := readEvents(t, runDir)
-	failed := filterByType(evts, "signal.spawn.failed")
+	evts := readEvents(t, s, "parent-failure")
+	failed := filterByType(evts, store.TypeSignalSpawnFailed)
 	if len(failed) != 1 {
 		t.Fatalf("signal.spawn.failed count = %d, want 1", len(failed))
 	}
-	data := failed[0].Data
+	data := parseEventData(t, failed[0])
 	if !strings.Contains(data["error"].(string), "parse run spec") {
 		t.Fatalf("unexpected spawn failure error: %v", data["error"])
 	}
@@ -142,21 +204,16 @@ func TestRun_SpawnSignalEnforcesLimits(t *testing.T) {
 		t.Fatalf("mkdir runDir: %v", err)
 	}
 
+	s := mustOpenStore(t)
+
 	prov := mock.New(
 		mock.WithResponses(mock.Response{
-			StatusJSON: `{
-        "decision":"stop",
-        "reason":"done",
-        "summary":"spawn twice",
-        "work":{"items_completed":[],"files_touched":[]},
-        "errors":[],
-        "agent_signals":{
-          "spawn":[
-            {"run":"ralph","session":"child-a"},
-            {"run":"ralph","session":"child-b"}
-          ]
-        }
-      }`,
+			Decision: "stop",
+			Summary:  "spawn twice",
+			Reason:   "done",
+			Signals: &mock.Signals{
+				Spawn: json.RawMessage(`[{"run":"ralph","session":"child-a"},{"run":"ralph","session":"child-b"}]`),
+			},
 		}),
 	)
 
@@ -172,6 +229,7 @@ func TestRun_SpawnSignalEnforcesLimits(t *testing.T) {
 		Launcher:         launcher,
 		ExecutablePath:   "/usr/bin/ap",
 		SpawnMaxChildren: 1,
+		Store:            s,
 	})
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
@@ -181,16 +239,16 @@ func TestRun_SpawnSignalEnforcesLimits(t *testing.T) {
 		t.Fatalf("launcher start calls = %d, want 1", launcher.startCalls)
 	}
 
-	evts := readEvents(t, runDir)
-	spawned := filterByType(evts, "signal.spawn")
-	failed := filterByType(evts, "signal.spawn.failed")
+	evts := readEvents(t, s, "parent-limits")
+	spawned := filterByType(evts, store.TypeSignalSpawn)
+	failed := filterByType(evts, store.TypeSignalSpawnFailed)
 	if len(spawned) != 1 {
 		t.Fatalf("signal.spawn count = %d, want 1", len(spawned))
 	}
 	if len(failed) != 1 {
 		t.Fatalf("signal.spawn.failed count = %d, want 1", len(failed))
 	}
-	data := failed[0].Data
+	data := parseEventData(t, failed[0])
 	if !strings.Contains(data["error"].(string), "max_child_sessions") {
 		t.Fatalf("unexpected max_child_sessions error: %v", data["error"])
 	}
@@ -203,16 +261,16 @@ func TestRun_SpawnSignalDepthLimit(t *testing.T) {
 		t.Fatalf("mkdir runDir: %v", err)
 	}
 
+	s := mustOpenStore(t)
+
 	prov := mock.New(
 		mock.WithResponses(mock.Response{
-			StatusJSON: `{
-        "decision":"stop",
-        "reason":"done",
-        "summary":"spawn once",
-        "work":{"items_completed":[],"files_touched":[]},
-        "errors":[],
-        "agent_signals":{"spawn":[{"run":"ralph","session":"child-depth"}]}
-      }`,
+			Decision: "stop",
+			Summary:  "spawn once",
+			Reason:   "done",
+			Signals: &mock.Signals{
+				Spawn: json.RawMessage(`[{"run":"ralph","session":"child-depth"}]`),
+			},
 		}),
 	)
 
@@ -228,6 +286,7 @@ func TestRun_SpawnSignalDepthLimit(t *testing.T) {
 		Launcher:       launcher,
 		SpawnDepth:     3,
 		SpawnMaxDepth:  3,
+		Store:          s,
 	})
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
@@ -237,12 +296,12 @@ func TestRun_SpawnSignalDepthLimit(t *testing.T) {
 		t.Fatalf("launcher start calls = %d, want 0", launcher.startCalls)
 	}
 
-	evts := readEvents(t, runDir)
-	failed := filterByType(evts, "signal.spawn.failed")
+	evts := readEvents(t, s, "parent-depth")
+	failed := filterByType(evts, store.TypeSignalSpawnFailed)
 	if len(failed) != 1 {
 		t.Fatalf("signal.spawn.failed count = %d, want 1", len(failed))
 	}
-	data := failed[0].Data
+	data := parseEventData(t, failed[0])
 	if !strings.Contains(data["error"].(string), "max_spawn_depth") {
 		t.Fatalf("unexpected max_spawn_depth error: %v", data["error"])
 	}

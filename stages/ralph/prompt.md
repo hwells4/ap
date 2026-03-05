@@ -2,7 +2,6 @@
 
 Context: ${CTX}
 Progress: ${PROGRESS}
-Status: ${STATUS}
 
 ${CONTEXT}
 
@@ -45,13 +44,13 @@ ${CONTEXT}
 
 9. **Update progress** - append to ${PROGRESS} (see format below)
 
-10. **Write status** and STOP:
-    ```bash
-    cat > ${STATUS} << 'EOF'
+10. **Output your decision** and STOP:
+    ```ap-result
     {"decision": "continue", "summary": "Completed <id>: <title>"}
-    EOF
     ```
     If no tasks remain, use `"decision": "stop"` instead.
+
+    Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
 
 **IMPORTANT: Do exactly ONE task, then stop.**
 

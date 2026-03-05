@@ -2,7 +2,6 @@
 
 Read context from: ${CTX}
 Progress file: ${PROGRESS}
-Status output: ${STATUS}
 Iteration: ${ITERATION}
 
 ${CONTEXT}
@@ -97,9 +96,11 @@ Append synthesis summary to `${PROGRESS}`:
 - V2 plan is now ready for implementation
 ```
 
-### Step 7: Write Status
+### Step 7: Write Decision
 
-```json
+When you are done, output your decision in a fenced block:
+
+```ap-result
 {
   "decision": "stop",
   "reason": "Synthesis complete - V2 plan created",
@@ -112,7 +113,7 @@ Append synthesis summary to `${PROGRESS}`:
 }
 ```
 
-Write this to `${STATUS}`.
+Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
 
 ---
 

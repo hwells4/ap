@@ -53,27 +53,24 @@ Look for what doesn't need to exist. Functions that could merge into something c
 
 Append your findings to the progress file.
 
-### Write Result
+### Write Decision
 
-After completing your exploration, write your result to `${RESULT}` (set `signals.plateau_suspected` true when further exploration would yield diminishing returns):
+When you are done, output your decision in a fenced block:
 
-```json
+```ap-result
 {
+  "decision": "continue",
   "summary": "Sharp observations from this iteration—what you discovered, what's suspect, what could be elegant",
   "work": {
     "items_completed": [],
     "files_touched": []
   },
-  "artifacts": {
-    "outputs": [],
-    "paths": []
-  },
-  "signals": {
-    "plateau_suspected": false,
-    "risk": "low",
-    "notes": ""
-  }
+  "errors": []
 }
 ```
+
+Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
+
+Set `"decision": "stop"` when further exploration would yield diminishing returns.
 
 Use ultrathink.

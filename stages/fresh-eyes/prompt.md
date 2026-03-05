@@ -2,7 +2,6 @@
 
 Read context from: ${CTX}
 Progress file: ${PROGRESS}
-Status output: ${STATUS}
 Iteration: ${ITERATION}
 
 ${CONTEXT}
@@ -13,9 +12,9 @@ Now carefully read over the entire plan document with "fresh eyes," looking supe
 
 Carefully fix anything you uncover by revising the plan document in place in a series of small edits, not one big edit.
 
-When you're done, write your result to `${STATUS}`:
+When you are done, output your decision in a fenced block:
 
-```json
+```ap-result
 {
   "decision": "continue or stop",
   "reason": "What you found and fixed",
@@ -24,6 +23,8 @@ When you're done, write your result to `${STATUS}`:
   "errors": []
 }
 ```
+
+Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
 When deciding "continue" or "stop," use your judgment to assess whether the plan has reached a quality plateau. Stop when further review would yield diminishing returns. 
 
 Be honest. Don't stop early just to finish faster. Don't continue just to seem thorough.

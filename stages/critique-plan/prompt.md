@@ -2,7 +2,6 @@
 
 Read context from: ${CTX}
 Progress file: ${PROGRESS}
-Status output: ${STATUS}
 Iteration: ${ITERATION}
 
 ${CONTEXT}
@@ -41,9 +40,11 @@ Don't be diplomatic for the sake of it. Be honest and direct. The goal is to sur
 
 Write your critique to `${PROGRESS}/../critique.md`. Be specific—reference their recommendation numbers, quote their text, explain your reasoning.
 
-## Write Status
+## Write Decision
 
-```json
+When you are done, output your decision in a fenced block:
+
+```ap-result
 {
   "decision": "stop",
   "reason": "Critique complete",
@@ -56,6 +57,6 @@ Write your critique to `${PROGRESS}/../critique.md`. Be specific—reference the
 }
 ```
 
-Write to `${STATUS}`.
+Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
 
 Use ultrathink.

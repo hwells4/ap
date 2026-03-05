@@ -18,10 +18,10 @@ Use ultrathink.
 
 ---
 
-When complete, write status:
+When you are done, output your decision in a fenced block:
 
-```bash
-cat > ${STATUS} << 'EOF'
+```ap-result
 {"decision": "stop", "reason": "Evaluation complete", "summary": "Scored ideas from other model"}
-EOF
 ```
+
+Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).

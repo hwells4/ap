@@ -9,23 +9,23 @@ import (
 	"time"
 
 	"github.com/hwells4/ap/internal/compile"
-	"github.com/hwells4/ap/internal/events"
 	"github.com/hwells4/ap/internal/mock"
-	"github.com/hwells4/ap/internal/state"
+	"github.com/hwells4/ap/internal/store"
 )
 
-func tempSession(t *testing.T) string {
+func tempSession(t *testing.T) (string, *store.Store) {
 	t.Helper()
 	dir := t.TempDir()
 	runDir := filepath.Join(dir, ".ap", "runs", "test-session")
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return runDir
+	s := mustOpenStore(t)
+	return runDir, s
 }
 
 func TestRun_FixedIterations_MockProvider(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(
@@ -43,7 +43,8 @@ func TestRun_FixedIterations_MockProvider(t *testing.T) {
 		Provider:   mp,
 		Iterations: three,
 		PromptTemplate: "You are iteration ${ITERATION} of ${SESSION_NAME}.\n" +
-			"Write status to ${STATUS}.",
+			"Output your decision as an ap-result block.",
+		Store: s,
 	}
 
 	res, err := Run(context.Background(), cfg)
@@ -54,29 +55,28 @@ func TestRun_FixedIterations_MockProvider(t *testing.T) {
 	if res.Iterations != 3 {
 		t.Errorf("iterations = %d, want 3", res.Iterations)
 	}
-	if res.Status != state.StateCompleted {
-		t.Errorf("status = %q, want %q", res.Status, state.StateCompleted)
+	if res.Status != store.StatusCompleted {
+		t.Errorf("status = %q, want %q", res.Status, store.StatusCompleted)
 	}
 	if mp.CallCount() != 3 {
 		t.Errorf("provider calls = %d, want 3", mp.CallCount())
 	}
 
-	// Verify state.json was written and is completed.
-	statePath := filepath.Join(runDir, "state.json")
-	st, err := state.Load(statePath)
+	// Verify session state in store is completed.
+	row, err := s.GetSession(context.Background(), "test-session")
 	if err != nil {
-		t.Fatalf("load state: %v", err)
+		t.Fatalf("get session: %v", err)
 	}
-	if st.Status != state.StateCompleted {
-		t.Errorf("state status = %q, want %q", st.Status, state.StateCompleted)
+	if row.Status != store.StatusCompleted {
+		t.Errorf("state status = %q, want %q", row.Status, store.StatusCompleted)
 	}
-	if st.IterationCompleted != 3 {
-		t.Errorf("iteration_completed = %d, want 3", st.IterationCompleted)
+	if row.IterationCompleted != 3 {
+		t.Errorf("iteration_completed = %d, want 3", row.IterationCompleted)
 	}
 }
 
 func TestRun_EarlyStop(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(
@@ -92,6 +92,7 @@ func TestRun_EarlyStop(t *testing.T) {
 		Provider:       mp,
 		Iterations:     10,
 		PromptTemplate: "iteration ${ITERATION}",
+		Store:          s,
 	}
 
 	res, err := Run(context.Background(), cfg)
@@ -108,7 +109,7 @@ func TestRun_EarlyStop(t *testing.T) {
 }
 
 func TestRun_Pipeline_SequentialStages(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(
@@ -133,13 +134,14 @@ func TestRun_Pipeline_SequentialStages(t *testing.T) {
 		Pipeline:       pipeline,
 		PromptTemplate: "iteration ${ITERATION}",
 		WorkDir:        filepath.Dir(filepath.Dir(runDir)),
+		Store:          s,
 	})
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	if res.Status != state.StateCompleted {
-		t.Fatalf("status = %q, want %q", res.Status, state.StateCompleted)
+	if res.Status != store.StatusCompleted {
+		t.Fatalf("status = %q, want %q", res.Status, store.StatusCompleted)
 	}
 	if res.Iterations != 3 {
 		t.Fatalf("iterations = %d, want 3", res.Iterations)
@@ -173,38 +175,43 @@ func TestRun_Pipeline_SequentialStages(t *testing.T) {
 		}
 	}
 
-	st, err := state.Load(filepath.Join(runDir, "state.json"))
+	row, err := s.GetSession(context.Background(), "pipeline-session")
 	if err != nil {
-		t.Fatalf("load state: %v", err)
+		t.Fatalf("get session: %v", err)
 	}
-	if st.Type != "pipeline" {
-		t.Fatalf("state type = %q, want pipeline", st.Type)
+	if row.Type != "pipeline" {
+		t.Fatalf("state type = %q, want pipeline", row.Type)
 	}
-	if st.CurrentStage != "refine-tasks" {
-		t.Fatalf("current_stage = %q, want refine-tasks", st.CurrentStage)
+	if row.CurrentStage != "refine-tasks" {
+		t.Fatalf("current_stage = %q, want refine-tasks", row.CurrentStage)
 	}
-	if st.NodeID != "refine" {
-		t.Fatalf("node_id = %q, want refine", st.NodeID)
+	if row.NodeID != "refine" {
+		t.Fatalf("node_id = %q, want refine", row.NodeID)
 	}
-	if len(st.Stages) != 2 {
-		t.Fatalf("len(stages) = %d, want 2", len(st.Stages))
+	var stages []map[string]any
+	if err := json.Unmarshal([]byte(row.StagesJSON), &stages); err != nil {
+		t.Fatalf("parse stages_json: %v", err)
 	}
-	if st.Stages[0].CompletedAt == nil || st.Stages[1].CompletedAt == nil {
-		t.Fatalf("expected completed_at on both stages: %#v", st.Stages)
+	if len(stages) != 2 {
+		t.Fatalf("len(stages) = %d, want 2", len(stages))
+	}
+	if stages[0]["completed_at"] == nil || stages[1]["completed_at"] == nil {
+		t.Fatalf("expected completed_at on both stages: %#v", stages)
 	}
 
-	evts := readEvents(t, runDir)
-	completed := filterByType(evts, events.TypeSessionComplete)
+	evts := readEvents(t, s, "pipeline-session")
+	completed := filterByType(evts, store.TypeSessionComplete)
 	if len(completed) != 1 {
 		t.Fatalf("session.completed count = %d, want 1", len(completed))
 	}
-	if got := completed[0].Data["total_iterations"]; got != float64(3) && got != 3 {
+	completedData := parseEventData(t, completed[0])
+	if got := completedData["total_iterations"]; got != float64(3) && got != 3 {
 		t.Fatalf("session.completed total_iterations = %v, want 3", got)
 	}
 }
 
 func TestRun_PipelineStageToStageInputs(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(
@@ -237,12 +244,13 @@ func TestRun_PipelineStageToStageInputs(t *testing.T) {
 		Pipeline:       pipeline,
 		PromptTemplate: "iteration ${ITERATION}",
 		WorkDir:        filepath.Dir(filepath.Dir(runDir)),
+		Store:          s,
 	})
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
-	if res.Status != state.StateCompleted {
-		t.Fatalf("status = %q, want %q", res.Status, state.StateCompleted)
+	if res.Status != store.StatusCompleted {
+		t.Fatalf("status = %q, want %q", res.Status, store.StatusCompleted)
 	}
 
 	upstream1 := filepath.Join(runDir, "stage-00-plan", "iterations", "001", "output.md")
@@ -300,6 +308,8 @@ func TestRun_EscalateAlwaysPausesAndRecordsEscalation(t *testing.T) {
 				t.Fatalf("mkdir run dir: %v", err)
 			}
 
+			s := mustOpenStore(t)
+
 			mp := mock.New(
 				mock.WithResponses(
 					mock.EscalateResponse(tc.decision, "need input", "human", "choose A or B", []string{"A", "B"}),
@@ -314,14 +324,15 @@ func TestRun_EscalateAlwaysPausesAndRecordsEscalation(t *testing.T) {
 				Provider:       mp,
 				Iterations:     3,
 				PromptTemplate: "iteration ${ITERATION}",
+				Store:          s,
 			}
 
 			res, err := Run(context.Background(), cfg)
 			if err != nil {
 				t.Fatalf("Run() error: %v", err)
 			}
-			if res.Status != state.StatePaused {
-				t.Fatalf("status = %q, want %q", res.Status, state.StatePaused)
+			if res.Status != store.StatusPaused {
+				t.Fatalf("status = %q, want %q", res.Status, store.StatusPaused)
 			}
 			if res.Iterations != 1 {
 				t.Fatalf("iterations = %d, want 1", res.Iterations)
@@ -330,70 +341,62 @@ func TestRun_EscalateAlwaysPausesAndRecordsEscalation(t *testing.T) {
 				t.Fatalf("provider calls = %d, want 1", mp.CallCount())
 			}
 
-			snapshot, err := state.Load(filepath.Join(runDir, "state.json"))
+			row, err := s.GetSession(context.Background(), sessionName)
 			if err != nil {
-				t.Fatalf("load state: %v", err)
+				t.Fatalf("get session: %v", err)
 			}
-			if snapshot.Status != state.StatePaused {
-				t.Fatalf("state status = %q, want %q", snapshot.Status, state.StatePaused)
+			if row.Status != store.StatusPaused {
+				t.Fatalf("state status = %q, want %q", row.Status, store.StatusPaused)
 			}
-			if snapshot.Escalation == nil {
-				t.Fatalf("expected escalation snapshot, got nil")
+			if row.EscalationJSON == nil {
+				t.Fatalf("expected escalation, got nil")
 			}
-			if snapshot.Escalation.Type != "human" {
-				t.Fatalf("escalation type = %q, want %q", snapshot.Escalation.Type, "human")
+			var escalation map[string]any
+			if err := json.Unmarshal([]byte(*row.EscalationJSON), &escalation); err != nil {
+				t.Fatalf("parse escalation: %v", err)
 			}
-			if snapshot.Escalation.Reason != "choose A or B" {
-				t.Fatalf("escalation reason = %q, want %q", snapshot.Escalation.Reason, "choose A or B")
+			if escalation["type"] != "human" {
+				t.Fatalf("escalation type = %v, want human", escalation["type"])
 			}
-			if len(snapshot.Escalation.Options) != 2 || snapshot.Escalation.Options[0] != "A" || snapshot.Escalation.Options[1] != "B" {
-				t.Fatalf("escalation options = %#v, want [A B]", snapshot.Escalation.Options)
+			if escalation["reason"] != "choose A or B" {
+				t.Fatalf("escalation reason = %v, want 'choose A or B'", escalation["reason"])
+			}
+			options, ok := escalation["options"].([]any)
+			if !ok || len(options) != 2 || options[0] != "A" || options[1] != "B" {
+				t.Fatalf("escalation options = %#v, want [A B]", escalation["options"])
 			}
 
-			eventsPath := filepath.Join(runDir, "events.jsonl")
-			data, err := os.ReadFile(eventsPath)
-			if err != nil {
-				t.Fatalf("read events: %v", err)
-			}
+			evts := readEvents(t, s, sessionName)
 
-			lines := splitNonEmpty(string(data))
 			foundEscalate := false
-			for _, line := range lines {
-				var evt map[string]any
-				if err := json.Unmarshal([]byte(line), &evt); err != nil {
-					t.Fatalf("parse event: %v", err)
-				}
-
-				switch evt["type"] {
-				case events.TypeSessionComplete:
-					t.Fatalf("unexpected %q event for escalated run", events.TypeSessionComplete)
-				case events.TypeSignalEscalate:
+			for _, evt := range evts {
+				switch evt.Type {
+				case store.TypeSessionComplete:
+					t.Fatalf("unexpected %q event for escalated run", store.TypeSessionComplete)
+				case store.TypeSignalEscalate:
 					foundEscalate = true
-					payload, ok := evt["data"].(map[string]any)
-					if !ok {
-						t.Fatalf("signal.escalate data has unexpected type %T", evt["data"])
-					}
+					payload := parseEventData(t, evt)
 					if payload["reason"] != "choose A or B" {
 						t.Fatalf("event reason = %v, want %q", payload["reason"], "choose A or B")
 					}
-					options, ok := payload["options"].([]any)
+					evtOptions, ok := payload["options"].([]any)
 					if !ok {
 						t.Fatalf("event options has unexpected type %T", payload["options"])
 					}
-					if len(options) != 2 || options[0] != "A" || options[1] != "B" {
-						t.Fatalf("event options = %#v, want [A B]", options)
+					if len(evtOptions) != 2 || evtOptions[0] != "A" || evtOptions[1] != "B" {
+						t.Fatalf("event options = %#v, want [A B]", evtOptions)
 					}
 				}
 			}
 			if !foundEscalate {
-				t.Fatalf("expected %q event, but none found", events.TypeSignalEscalate)
+				t.Fatalf("expected %q event, but none found", store.TypeSignalEscalate)
 			}
 		})
 	}
 }
 
 func TestRun_AgentError(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(
@@ -409,6 +412,7 @@ func TestRun_AgentError(t *testing.T) {
 		Provider:       mp,
 		Iterations:     5,
 		PromptTemplate: "iteration ${ITERATION}",
+		Store:          s,
 	}
 
 	res, err := Run(context.Background(), cfg)
@@ -419,13 +423,13 @@ func TestRun_AgentError(t *testing.T) {
 	if res.Iterations != 2 {
 		t.Errorf("iterations = %d, want 2", res.Iterations)
 	}
-	if res.Status != state.StateCompleted {
-		t.Errorf("status = %q, want %q", res.Status, state.StateCompleted)
+	if res.Status != store.StatusCompleted {
+		t.Errorf("status = %q, want %q", res.Status, store.StatusCompleted)
 	}
 }
 
 func TestRun_ProviderFailure(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(
@@ -440,6 +444,7 @@ func TestRun_ProviderFailure(t *testing.T) {
 		Provider:       mp,
 		Iterations:     3,
 		PromptTemplate: "iteration ${ITERATION}",
+		Store:          s,
 	}
 
 	res, err := Run(context.Background(), cfg)
@@ -447,28 +452,29 @@ func TestRun_ProviderFailure(t *testing.T) {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	if res.Status != state.StateFailed {
-		t.Errorf("status = %q, want %q", res.Status, state.StateFailed)
+	if res.Status != store.StatusFailed {
+		t.Errorf("status = %q, want %q", res.Status, store.StatusFailed)
 	}
 	if res.Iterations != 1 {
 		t.Errorf("iterations = %d, want 1", res.Iterations)
 	}
 }
 
-func TestRun_MissingStatusJSON(t *testing.T) {
-	runDir := tempSession(t)
+func TestRun_NoDecisionEmitted(t *testing.T) {
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
-		mock.WithResponses(mock.NoStatusResponse()),
+		mock.WithResponses(mock.NoDecisionResponse()),
 	)
 
 	cfg := Config{
-		Session:        "test-no-status",
+		Session:        "test-no-decision",
 		RunDir:         runDir,
 		StageName:      "test-stage",
 		Provider:       mp,
 		Iterations:     1,
 		PromptTemplate: "iteration ${ITERATION}",
+		Store:          s,
 	}
 
 	res, err := Run(context.Background(), cfg)
@@ -476,14 +482,13 @@ func TestRun_MissingStatusJSON(t *testing.T) {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	// Missing status.json should be treated as iteration failure.
-	if res.Status != state.StateFailed {
-		t.Errorf("status = %q, want %q", res.Status, state.StateFailed)
+	if res.Status != store.StatusCompleted {
+		t.Errorf("status = %q, want %q", res.Status, store.StatusCompleted)
 	}
 }
 
 func TestRun_IterationArtifacts(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(
@@ -498,6 +503,7 @@ func TestRun_IterationArtifacts(t *testing.T) {
 		Provider:       mp,
 		Iterations:     1,
 		PromptTemplate: "iteration ${ITERATION}",
+		Store:          s,
 	}
 
 	_, err := Run(context.Background(), cfg)
@@ -505,21 +511,19 @@ func TestRun_IterationArtifacts(t *testing.T) {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	// Verify context.json exists for iteration 1.
 	ctxPath := filepath.Join(runDir, "stage-00-test-stage", "iterations", "001", "context.json")
 	if _, err := os.Stat(ctxPath); err != nil {
 		t.Errorf("context.json missing: %v", err)
 	}
 
-	// Verify status.json exists for iteration 1.
-	statusPath := filepath.Join(runDir, "stage-00-test-stage", "iterations", "001", "status.json")
-	if _, err := os.Stat(statusPath); err != nil {
-		t.Errorf("status.json missing: %v", err)
+	outputPath := filepath.Join(runDir, "stage-00-test-stage", "iterations", "001", "output.md")
+	if _, err := os.Stat(outputPath); err != nil {
+		t.Errorf("output.md missing: %v", err)
 	}
 }
 
 func TestRun_EventsEmitted(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(
@@ -534,6 +538,7 @@ func TestRun_EventsEmitted(t *testing.T) {
 		Provider:       mp,
 		Iterations:     1,
 		PromptTemplate: "iteration ${ITERATION}",
+		Store:          s,
 	}
 
 	_, err := Run(context.Background(), cfg)
@@ -541,30 +546,18 @@ func TestRun_EventsEmitted(t *testing.T) {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	// Verify events.jsonl exists and has events.
-	eventsPath := filepath.Join(runDir, "events.jsonl")
-	data, err := os.ReadFile(eventsPath)
-	if err != nil {
-		t.Fatalf("read events: %v", err)
+	evts := readEvents(t, s, "test-events")
+	if len(evts) < 3 {
+		t.Errorf("events count = %d, want >= 3", len(evts))
 	}
 
-	lines := splitNonEmpty(string(data))
-	if len(lines) < 3 {
-		t.Errorf("events lines = %d, want >= 3 (session.started, iteration.started, iteration.completed, session.completed)", len(lines))
-	}
-
-	// Check first event is session.started.
-	var first map[string]any
-	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
-		t.Fatalf("parse first event: %v", err)
-	}
-	if first["type"] != "session.started" {
-		t.Errorf("first event type = %q, want session.started", first["type"])
+	if evts[0].Type != "session.started" {
+		t.Errorf("first event type = %q, want session.started", evts[0].Type)
 	}
 }
 
 func TestRun_ContextCancellation(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithFallback(mock.Response{
@@ -581,20 +574,20 @@ func TestRun_ContextCancellation(t *testing.T) {
 		Provider:       mp,
 		Iterations:     100,
 		PromptTemplate: "iteration ${ITERATION}",
+		Store:          s,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
 	_, err := Run(ctx, cfg)
-	// We expect either a context error or a failed result.
 	if err != nil && err != context.DeadlineExceeded && err != context.Canceled {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
 func TestRun_SingleIteration(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(
@@ -609,6 +602,7 @@ func TestRun_SingleIteration(t *testing.T) {
 		Provider:       mp,
 		Iterations:     1,
 		PromptTemplate: "do the thing",
+		Store:          s,
 	}
 
 	res, err := Run(context.Background(), cfg)
@@ -619,8 +613,8 @@ func TestRun_SingleIteration(t *testing.T) {
 	if res.Iterations != 1 {
 		t.Errorf("iterations = %d, want 1", res.Iterations)
 	}
-	if res.Status != state.StateCompleted {
-		t.Errorf("status = %q, want %q", res.Status, state.StateCompleted)
+	if res.Status != store.StatusCompleted {
+		t.Errorf("status = %q, want %q", res.Status, store.StatusCompleted)
 	}
 }
 
@@ -651,7 +645,7 @@ func splitLines(s string) []string {
 }
 
 func TestRun_ProviderEnvVars(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(mock.StopResponse("done", "ok")),
@@ -664,6 +658,7 @@ func TestRun_ProviderEnvVars(t *testing.T) {
 		Provider:       mp,
 		Iterations:     1,
 		PromptTemplate: "work",
+		Store:          s,
 	}
 
 	_, err := Run(context.Background(), cfg)
@@ -691,7 +686,7 @@ func TestRun_ProviderEnvVars(t *testing.T) {
 }
 
 func TestRun_PromptResolution(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(mock.StopResponse("done", "ok")),
@@ -704,6 +699,7 @@ func TestRun_PromptResolution(t *testing.T) {
 		Provider:       mp,
 		Iterations:     1,
 		PromptTemplate: "Session=${SESSION_NAME} Iter=${ITERATION}",
+		Store:          s,
 	}
 
 	_, err := Run(context.Background(), cfg)
@@ -719,7 +715,6 @@ func TestRun_PromptResolution(t *testing.T) {
 	if prompt == "Session=${SESSION_NAME} Iter=${ITERATION}" {
 		t.Error("prompt template was not resolved")
 	}
-	// The resolved prompt should contain the session name and iteration number.
 	if !containsStr(prompt, "resolve-test") {
 		t.Errorf("prompt %q does not contain session name", prompt)
 	}
@@ -729,7 +724,8 @@ func TestRun_PromptResolution(t *testing.T) {
 }
 
 func TestRun_RunRequestPersisted(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
+	workDir := t.TempDir()
 
 	mp := mock.New(
 		mock.WithResponses(mock.StopResponse("done", "ok")),
@@ -743,8 +739,9 @@ func TestRun_RunRequestPersisted(t *testing.T) {
 		Iterations:     5,
 		PromptTemplate: "work on {{task}}",
 		Model:          "test-model",
-		WorkDir:        "/tmp/test-workdir",
+		WorkDir:        workDir,
 		OnEscalate:     "webhook:http://localhost/hook",
+		Store:          s,
 	}
 
 	_, err := Run(context.Background(), cfg)
@@ -762,21 +759,20 @@ func TestRun_RunRequestPersisted(t *testing.T) {
 		t.Fatalf("parse run_request.json: %v", err)
 	}
 
-	// Verify all fields required by ReadRunRequest validation.
 	checks := map[string]string{
 		"session":         "persist-test",
 		"stage":           "my-stage",
 		"provider":        "mock",
 		"model":           "test-model",
-		"work_dir":        "/tmp/test-workdir",
+		"work_dir":        workDir,
 		"run_dir":         runDir,
 		"prompt_template": "work on {{task}}",
 		"on_escalate":     "webhook:http://localhost/hook",
 	}
-	for key, want := range checks {
+	for key, wantVal := range checks {
 		got, _ := req[key].(string)
-		if got != want {
-			t.Errorf("run_request[%q] = %q, want %q", key, got, want)
+		if got != wantVal {
+			t.Errorf("run_request[%q] = %q, want %q", key, got, wantVal)
 		}
 	}
 	if v, ok := req["iterations"].(float64); !ok || int(v) != 5 {
@@ -784,11 +780,9 @@ func TestRun_RunRequestPersisted(t *testing.T) {
 	}
 }
 
-// TestRun_RunRequestPersisted_ResumeCompatible verifies that the run_request.json
-// written by the runner can be read back by ReadRunRequest (used by `ap resume`).
-// This is a cross-package integration contract: runner writes, internal_run reads.
 func TestRun_RunRequestPersisted_ResumeCompatible(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
+	workDir := t.TempDir()
 
 	mp := mock.New(
 		mock.WithResponses(mock.StopResponse("done", "ok")),
@@ -802,7 +796,8 @@ func TestRun_RunRequestPersisted_ResumeCompatible(t *testing.T) {
 		Iterations:     3,
 		PromptTemplate: "do work",
 		Model:          "opus",
-		WorkDir:        "/tmp/fake-project",
+		WorkDir:        workDir,
+		Store:          s,
 	}
 
 	_, err := Run(context.Background(), cfg)
@@ -810,14 +805,12 @@ func TestRun_RunRequestPersisted_ResumeCompatible(t *testing.T) {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	// Simulate what `ap resume` does: read the persisted file and validate it.
 	reqPath := filepath.Join(runDir, "run_request.json")
 	data, err := os.ReadFile(reqPath)
 	if err != nil {
 		t.Fatalf("run_request.json missing: %v", err)
 	}
 
-	// Parse into the same struct ReadRunRequest uses.
 	type RunRequestFile struct {
 		Session        string `json:"session"`
 		Stage          string `json:"stage"`
@@ -835,7 +828,6 @@ func TestRun_RunRequestPersisted_ResumeCompatible(t *testing.T) {
 		t.Fatalf("unmarshal run_request.json: %v", err)
 	}
 
-	// These are the validations ReadRunRequest enforces:
 	if req.Session == "" {
 		t.Error("persisted run_request missing session")
 	}
@@ -851,10 +843,8 @@ func TestRun_RunRequestPersisted_ResumeCompatible(t *testing.T) {
 	if req.RunDir == "" {
 		t.Error("persisted run_request missing run_dir")
 	}
-
-	// Verify values match what was configured.
-	if req.WorkDir != "/tmp/fake-project" {
-		t.Errorf("work_dir = %q, want /tmp/fake-project", req.WorkDir)
+	if req.WorkDir != workDir {
+		t.Errorf("work_dir = %q, want %q", req.WorkDir, workDir)
 	}
 	if req.PromptTemplate != "do work" {
 		t.Errorf("prompt_template = %q, want 'do work'", req.PromptTemplate)
@@ -862,7 +852,7 @@ func TestRun_RunRequestPersisted_ResumeCompatible(t *testing.T) {
 }
 
 func TestRun_EventOrdering(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(
@@ -878,6 +868,7 @@ func TestRun_EventOrdering(t *testing.T) {
 		Provider:       mp,
 		Iterations:     5,
 		PromptTemplate: "iteration ${ITERATION}",
+		Store:          s,
 	}
 
 	_, err := Run(context.Background(), cfg)
@@ -885,30 +876,19 @@ func TestRun_EventOrdering(t *testing.T) {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	evPath := filepath.Join(runDir, "events.jsonl")
-	data, err := os.ReadFile(evPath)
-	if err != nil {
-		t.Fatalf("read events: %v", err)
-	}
-
-	lines := splitNonEmpty(string(data))
-	// Expected: session.started, iter1 started/completed, iter2 started/completed, session.completed
+	evts := readEvents(t, s, "test-ordering")
 	expectedTypes := []string{
 		"session.started",
 		"iteration.started", "iteration.completed",
 		"iteration.started", "iteration.completed",
 		"session.completed",
 	}
-	if len(lines) != len(expectedTypes) {
-		t.Fatalf("event count = %d, want %d", len(lines), len(expectedTypes))
+	if len(evts) != len(expectedTypes) {
+		t.Fatalf("event count = %d, want %d", len(evts), len(expectedTypes))
 	}
-	for i, line := range lines {
-		var ev map[string]any
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			t.Fatalf("parse event %d: %v", i, err)
-		}
-		if ev["type"] != expectedTypes[i] {
-			t.Errorf("event[%d] type = %q, want %q", i, ev["type"], expectedTypes[i])
+	for i, evt := range evts {
+		if evt.Type != expectedTypes[i] {
+			t.Errorf("event[%d] type = %q, want %q", i, evt.Type, expectedTypes[i])
 		}
 	}
 }
@@ -927,7 +907,7 @@ func containsSubstr(s, sub string) bool {
 }
 
 func TestRun_InjectSignal_AppearsInNextPrompt(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(
@@ -944,6 +924,7 @@ func TestRun_InjectSignal_AppearsInNextPrompt(t *testing.T) {
 		Provider:       mp,
 		Iterations:     3,
 		PromptTemplate: "Do work. Context: ${CONTEXT}",
+		Store:          s,
 	}
 
 	res, err := Run(context.Background(), cfg)
@@ -960,24 +941,21 @@ func TestRun_InjectSignal_AppearsInNextPrompt(t *testing.T) {
 		t.Fatalf("expected 3 calls, got %d", len(calls))
 	}
 
-	// Iteration 1: no inject yet, ${CONTEXT} should be empty.
 	if containsStr(calls[0].Request.Prompt, "focus on tests next") {
 		t.Error("iteration 1 prompt should NOT contain injected text")
 	}
 
-	// Iteration 2: inject from iteration 1 should be present.
 	if !containsStr(calls[1].Request.Prompt, "focus on tests next") {
 		t.Errorf("iteration 2 prompt %q should contain injected text", calls[1].Request.Prompt)
 	}
 
-	// Iteration 3: inject consumed, should NOT appear again.
 	if containsStr(calls[2].Request.Prompt, "focus on tests next") {
 		t.Error("iteration 3 prompt should NOT contain injected text (consumed)")
 	}
 }
 
 func TestRun_InjectSignal_EventEmitted(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(
@@ -993,6 +971,7 @@ func TestRun_InjectSignal_EventEmitted(t *testing.T) {
 		Provider:       mp,
 		Iterations:     2,
 		PromptTemplate: "iteration ${ITERATION}",
+		Store:          s,
 	}
 
 	_, err := Run(context.Background(), cfg)
@@ -1000,24 +979,12 @@ func TestRun_InjectSignal_EventEmitted(t *testing.T) {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(runDir, "events.jsonl"))
-	if err != nil {
-		t.Fatalf("read events: %v", err)
-	}
-
-	lines := splitNonEmpty(string(data))
+	evts := readEvents(t, s, "test-inject-event")
 	found := false
-	for _, line := range lines {
-		var ev map[string]any
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			t.Fatalf("parse event: %v", err)
-		}
-		if ev["type"] == "signal.inject" {
+	for _, evt := range evts {
+		if evt.Type == "signal.inject" {
 			found = true
-			evData, ok := ev["data"].(map[string]any)
-			if !ok {
-				t.Fatal("signal.inject event missing data")
-			}
+			evData := parseEventData(t, evt)
 			if evData["iteration"] != float64(1) {
 				t.Errorf("event data.iteration = %v, want 1", evData["iteration"])
 			}
@@ -1025,14 +992,13 @@ func TestRun_InjectSignal_EventEmitted(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("signal.inject event not found in events.jsonl")
+		t.Error("signal.inject event not found in store events")
 	}
 }
 
 func TestRun_InjectSignal_OverwrittenByLaterInject(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
-	// Both iteration 1 and 2 inject — only iteration 2's inject should appear in iteration 3.
 	mp := mock.New(
 		mock.WithResponses(
 			mock.InjectResponse("continue", "iter 1", "first inject"),
@@ -1048,6 +1014,7 @@ func TestRun_InjectSignal_OverwrittenByLaterInject(t *testing.T) {
 		Provider:       mp,
 		Iterations:     3,
 		PromptTemplate: "Context: ${CONTEXT}",
+		Store:          s,
 	}
 
 	_, err := Run(context.Background(), cfg)
@@ -1057,12 +1024,10 @@ func TestRun_InjectSignal_OverwrittenByLaterInject(t *testing.T) {
 
 	calls := mp.Calls()
 
-	// Iteration 2: should have first inject.
 	if !containsStr(calls[1].Request.Prompt, "first inject") {
 		t.Errorf("iteration 2 prompt %q should contain 'first inject'", calls[1].Request.Prompt)
 	}
 
-	// Iteration 3: should have second inject (overwritten).
 	if !containsStr(calls[2].Request.Prompt, "second inject") {
 		t.Errorf("iteration 3 prompt %q should contain 'second inject'", calls[2].Request.Prompt)
 	}
@@ -1072,7 +1037,7 @@ func TestRun_InjectSignal_OverwrittenByLaterInject(t *testing.T) {
 }
 
 func TestRun_EscalateSignal_PausesSession(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(
@@ -1088,6 +1053,7 @@ func TestRun_EscalateSignal_PausesSession(t *testing.T) {
 		Provider:       mp,
 		Iterations:     10,
 		PromptTemplate: "iteration ${ITERATION}",
+		Store:          s,
 	}
 
 	res, err := Run(context.Background(), cfg)
@@ -1095,9 +1061,8 @@ func TestRun_EscalateSignal_PausesSession(t *testing.T) {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	// Escalate should pause after iteration 2, regardless of "continue" decision.
-	if res.Status != state.StatePaused {
-		t.Errorf("status = %q, want %q", res.Status, state.StatePaused)
+	if res.Status != store.StatusPaused {
+		t.Errorf("status = %q, want %q", res.Status, store.StatusPaused)
 	}
 	if res.Iterations != 2 {
 		t.Errorf("iterations = %d, want 2", res.Iterations)
@@ -1108,9 +1073,8 @@ func TestRun_EscalateSignal_PausesSession(t *testing.T) {
 }
 
 func TestRun_EscalateSignal_OverridesStopDecision(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
-	// Agent says "stop" but also escalates — escalate wins, session pauses.
 	mp := mock.New(
 		mock.WithResponses(
 			mock.EscalateResponse("stop", "done", "human", "review before finishing", nil),
@@ -1124,6 +1088,7 @@ func TestRun_EscalateSignal_OverridesStopDecision(t *testing.T) {
 		Provider:       mp,
 		Iterations:     5,
 		PromptTemplate: "iteration ${ITERATION}",
+		Store:          s,
 	}
 
 	res, err := Run(context.Background(), cfg)
@@ -1131,9 +1096,8 @@ func TestRun_EscalateSignal_OverridesStopDecision(t *testing.T) {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	// Should be paused, not completed (even though agent said "stop").
-	if res.Status != state.StatePaused {
-		t.Errorf("status = %q, want %q", res.Status, state.StatePaused)
+	if res.Status != store.StatusPaused {
+		t.Errorf("status = %q, want %q", res.Status, store.StatusPaused)
 	}
 	if res.Iterations != 1 {
 		t.Errorf("iterations = %d, want 1", res.Iterations)
@@ -1141,7 +1105,7 @@ func TestRun_EscalateSignal_OverridesStopDecision(t *testing.T) {
 }
 
 func TestRun_EscalateSignal_StateHasEscalation(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(
@@ -1156,6 +1120,7 @@ func TestRun_EscalateSignal_StateHasEscalation(t *testing.T) {
 		Provider:       mp,
 		Iterations:     5,
 		PromptTemplate: "iteration ${ITERATION}",
+		Store:          s,
 	}
 
 	_, err := Run(context.Background(), cfg)
@@ -1163,30 +1128,34 @@ func TestRun_EscalateSignal_StateHasEscalation(t *testing.T) {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	// Verify state.json contains escalation info.
-	st, err := state.Load(filepath.Join(runDir, "state.json"))
+	row, err := s.GetSession(context.Background(), "test-escalate-state")
 	if err != nil {
-		t.Fatalf("load state: %v", err)
+		t.Fatalf("get session: %v", err)
 	}
-	if st.Status != state.StatePaused {
-		t.Fatalf("state status = %q, want %q", st.Status, state.StatePaused)
+	if row.Status != store.StatusPaused {
+		t.Fatalf("state status = %q, want %q", row.Status, store.StatusPaused)
 	}
-	if st.Escalation == nil {
-		t.Fatal("state.Escalation is nil, want non-nil")
+	if row.EscalationJSON == nil {
+		t.Fatal("state escalation_json is nil, want non-nil")
 	}
-	if st.Escalation.Type != "human" {
-		t.Errorf("escalation type = %q, want %q", st.Escalation.Type, "human")
+	var escalation map[string]any
+	if err := json.Unmarshal([]byte(*row.EscalationJSON), &escalation); err != nil {
+		t.Fatalf("parse escalation: %v", err)
 	}
-	if st.Escalation.Reason != "needs approval" {
-		t.Errorf("escalation reason = %q, want %q", st.Escalation.Reason, "needs approval")
+	if escalation["type"] != "human" {
+		t.Errorf("escalation type = %v, want human", escalation["type"])
 	}
-	if len(st.Escalation.Options) != 3 {
-		t.Errorf("escalation options = %v, want 3 options", st.Escalation.Options)
+	if escalation["reason"] != "needs approval" {
+		t.Errorf("escalation reason = %v, want 'needs approval'", escalation["reason"])
+	}
+	opts, ok := escalation["options"].([]any)
+	if !ok || len(opts) != 3 {
+		t.Errorf("escalation options = %v, want 3 options", escalation["options"])
 	}
 }
 
 func TestRun_EscalateSignal_EventEmitted(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(
@@ -1201,6 +1170,7 @@ func TestRun_EscalateSignal_EventEmitted(t *testing.T) {
 		Provider:       mp,
 		Iterations:     5,
 		PromptTemplate: "iteration ${ITERATION}",
+		Store:          s,
 	}
 
 	_, err := Run(context.Background(), cfg)
@@ -1208,25 +1178,12 @@ func TestRun_EscalateSignal_EventEmitted(t *testing.T) {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	// Verify events.jsonl contains signal.escalate event.
-	data, err := os.ReadFile(filepath.Join(runDir, "events.jsonl"))
-	if err != nil {
-		t.Fatalf("read events: %v", err)
-	}
-
-	lines := splitNonEmpty(string(data))
+	evts := readEvents(t, s, "test-escalate-event")
 	found := false
-	for _, line := range lines {
-		var ev map[string]any
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			t.Fatalf("parse event: %v", err)
-		}
-		if ev["type"] == "signal.escalate" {
+	for _, evt := range evts {
+		if evt.Type == "signal.escalate" {
 			found = true
-			evData, ok := ev["data"].(map[string]any)
-			if !ok {
-				t.Fatal("signal.escalate event missing data")
-			}
+			evData := parseEventData(t, evt)
 			if evData["type"] != "human" {
 				t.Errorf("event data.type = %v, want human", evData["type"])
 			}
@@ -1237,6 +1194,6 @@ func TestRun_EscalateSignal_EventEmitted(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("signal.escalate event not found in events.jsonl")
+		t.Error("signal.escalate event not found in store events")
 	}
 }

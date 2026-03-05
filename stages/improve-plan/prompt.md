@@ -2,7 +2,6 @@
 
 Read context from: ${CTX}
 Progress file: ${PROGRESS}
-Status output: ${STATUS}
 Iteration: ${ITERATION}
 
 ${CONTEXT}
@@ -57,11 +56,11 @@ Each edit should be focused and surgical. This keeps edits reliable and lets you
 
 Be thoughtful about deletion. If something should be removed, think carefully about why. Removal should be rare and deliberate.
 
-## Write Status
+## Write Decision
 
-When you've made your improvements:
+When you've made your improvements, output your decision in a fenced block:
 
-```json
+```ap-result
 {
   "decision": "continue",
   "reason": "What still needs attention",
@@ -74,6 +73,8 @@ When you've made your improvements:
 }
 ```
 
-Write to `${STATUS}`. Set `"decision": "stop"` only when the plan is genuinely ready for implementation and further changes would be cosmetic.
+Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
+
+Set `"decision": "stop"` only when the plan is genuinely ready for implementation and further changes would be cosmetic.
 
 Use ultrathink.

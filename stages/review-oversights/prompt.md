@@ -2,7 +2,6 @@
 
 Read context from: ${CTX}
 Progress file: ${PROGRESS}
-Status output: ${STATUS}
 Session: ${SESSION_NAME}
 Iteration: ${ITERATION}
 
@@ -39,11 +38,11 @@ Save the reviewed and corrected plan to `docs/PLAN_FOR_ADVANCED_OPTIMIZATIONS_RO
 
 Append a summary of corrections to `${PROGRESS}`.
 
-### Write Status
+### Write Decision
 
-When complete, write to `${STATUS}`:
+When you are done, output your decision in a fenced block:
 
-```json
+```ap-result
 {
   "decision": "stop",
   "reason": "Review complete",
@@ -52,3 +51,5 @@ When complete, write to `${STATUS}`:
   "errors": []
 }
 ```
+
+Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).

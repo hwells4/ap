@@ -70,7 +70,7 @@ func TestJudge_StopVerdict(t *testing.T) {
 }
 
 func TestJudge_MalformedJSON_ReturnsError(t *testing.T) {
-	prov := mock.New(mock.WithResponses(mock.Response{
+	prov := mock.New(mock.WithFallback(mock.Response{
 		Stdout: "this is not json",
 	}))
 
@@ -87,7 +87,7 @@ func TestJudge_MalformedJSON_ReturnsError(t *testing.T) {
 }
 
 func TestJudge_EmptyOutput_ReturnsError(t *testing.T) {
-	prov := mock.New(mock.WithResponses(mock.Response{
+	prov := mock.New(mock.WithFallback(mock.Response{
 		Stdout: "",
 	}))
 
@@ -104,7 +104,7 @@ func TestJudge_EmptyOutput_ReturnsError(t *testing.T) {
 }
 
 func TestJudge_InvalidDecision_ReturnsError(t *testing.T) {
-	prov := mock.New(mock.WithResponses(mock.Response{
+	prov := mock.New(mock.WithFallback(mock.Response{
 		Stdout: marshalVerdict(Verdict{
 			Decision:   "maybe",
 			Confidence: 0.5,

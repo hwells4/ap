@@ -2,7 +2,6 @@
 
 Context: ${CTX}
 Progress: ${PROGRESS}
-Status: ${STATUS}
 
 ${CONTEXT}
 
@@ -52,12 +51,12 @@ Systematically identify and fix performance bottlenecks. Every optimization must
 
 5. **Verify:** Run tests + benchmark. Compare before/after.
 
-6. **Write status:**
-   ```bash
-   cat > ${STATUS} << 'EOF'
+6. **Output your decision:**
+   ```ap-result
    {"decision": "continue", "summary": "Optimized <target>: <before> → <after> (<improvement>)"}
-   EOF
    ```
+
+   Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
 
 ## Update Progress
 

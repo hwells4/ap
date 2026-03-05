@@ -1,18 +1,17 @@
 package main
 
 import (
-	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
-	"os"
 	osExec "os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/hwells4/ap/internal/config"
 	"github.com/hwells4/ap/internal/output"
+	"github.com/hwells4/ap/internal/store"
 )
 
 // watchHook maps an event type pattern to a shell command.
@@ -25,13 +24,6 @@ func runWatch(args []string, deps cliDeps) int {
 	sessionName, hooks, errResp := parseWatchArgs(args)
 	if errResp != nil {
 		return renderError(deps, output.ExitInvalidArgs, *errResp)
-	}
-
-	projectRoot := "."
-	if deps.getwd != nil {
-		if cwd, err := deps.getwd(); err == nil {
-			projectRoot = cwd
-		}
 	}
 
 	// Merge config hooks if no CLI hooks provided.
@@ -62,82 +54,77 @@ func runWatch(args []string, deps cliDeps) int {
 		))
 	}
 
-	eventsPath := filepath.Join(projectRoot, ".ap", "runs", sessionName, "events.jsonl")
-	sessionDir := filepath.Join(projectRoot, ".ap", "runs", sessionName)
-	if _, err := os.Stat(sessionDir); err != nil {
-		return renderError(deps, output.ExitNotFound, output.NewError(
-			"SESSION_NOT_FOUND",
-			fmt.Sprintf("session %q not found", sessionName),
-			fmt.Sprintf("No session directory at %s", sessionDir),
-			"ap watch <session> --on <event> <cmd> [--json]",
-			[]string{"ap list"},
-		))
-	}
+	ctx := context.Background()
 
-	return watchEvents(eventsPath, sessionName, hooks, deps)
-}
-
-func watchEvents(eventsPath, session string, hooks []watchHook, deps cliDeps) int {
-	// Wait for events file to appear.
-	for {
-		if _, err := os.Stat(eventsPath); err == nil {
-			break
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-
-	file, err := os.Open(eventsPath)
+	// Verify session exists.
+	_, err := deps.store.GetSession(ctx, sessionName)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return renderError(deps, output.ExitNotFound, output.NewError(
+				"SESSION_NOT_FOUND",
+				fmt.Sprintf("session %q not found", sessionName),
+				"No session with that name in the store.",
+				"ap watch <session> --on <event> <cmd> [--json]",
+				[]string{"ap list"},
+			))
+		}
 		return renderError(deps, output.ExitGeneralError, output.NewError(
 			"EVENTS_READ_FAILED",
-			"failed to open events file",
+			"failed to check session",
 			err.Error(),
 			"ap watch <session> --on <event> <cmd>",
 			nil,
 		))
 	}
-	defer file.Close()
 
-	reader := bufio.NewReader(file)
+	return watchEventsStore(ctx, sessionName, hooks, deps)
+}
+
+func watchEventsStore(ctx context.Context, session string, hooks []watchHook, deps cliDeps) int {
+	lastSeq := 0
 	for {
-		line, err := reader.ReadString('\n')
-		line = strings.TrimSpace(line)
-		if line != "" {
-			processWatchLine(line, session, hooks, deps)
-			// Check for session-ending events.
-			if isSessionEnd(line) {
-				return output.ExitSuccess
-			}
-		}
+		events, err := deps.store.TailEvents(ctx, session, lastSeq)
 		if err != nil {
-			if err == io.EOF {
-				time.Sleep(250 * time.Millisecond)
-				continue
-			}
 			_, _ = fmt.Fprintf(deps.stderr, "error watching events: %v\n", err)
 			return output.ExitGeneralError
 		}
+		for _, evt := range events {
+			processWatchEvent(evt, session, hooks, deps)
+			if evt.Seq > lastSeq {
+				lastSeq = evt.Seq
+			}
+			// Check for session-ending events.
+			if isSessionEndType(evt.Type) {
+				return output.ExitSuccess
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
 	}
 }
 
-func processWatchLine(line, session string, hooks []watchHook, deps cliDeps) {
-	var evt map[string]any
-	if err := json.Unmarshal([]byte(line), &evt); err != nil {
-		return
-	}
-
-	eventType, _ := evt["type"].(string)
+func processWatchEvent(evt store.EventRow, session string, hooks []watchHook, deps cliDeps) {
 	for _, hook := range hooks {
-		if matchEventType(eventType, hook.EventType) {
-			cmd := expandWatchVars(hook.Command, session, evt)
+		if matchEventType(evt.Type, hook.EventType) {
+			// Build event map for variable expansion.
+			evtMap := map[string]any{"type": evt.Type}
+			var cursor map[string]any
+			if json.Unmarshal([]byte(evt.CursorJSON), &cursor) == nil {
+				evtMap["cursor"] = cursor
+			}
+			var data map[string]any
+			if json.Unmarshal([]byte(evt.DataJSON), &data) == nil {
+				evtMap["data"] = data
+			}
+
+			cmd := expandWatchVars(hook.Command, session, evtMap)
 			if deps.mode == output.ModeJSON {
 				payload := map[string]any{
-					"event":   eventType,
+					"event":   evt.Type,
 					"hook":    hook.EventType,
 					"command": cmd,
 				}
-				data, _ := json.Marshal(payload)
-				_, _ = fmt.Fprintln(deps.stdout, string(data))
+				out, _ := json.Marshal(payload)
+				_, _ = fmt.Fprintln(deps.stdout, string(out))
 			}
 			execWatchCommand(cmd, deps)
 		}
@@ -197,14 +184,8 @@ func execWatchCommand(cmd string, deps cliDeps) {
 	_ = c.Run()
 }
 
-func isSessionEnd(line string) bool {
-	var evt struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal([]byte(line), &evt); err != nil {
-		return false
-	}
-	switch evt.Type {
+func isSessionEndType(eventType string) bool {
+	switch eventType {
 	case "session.completed", "session.failed", "session.aborted":
 		return true
 	}

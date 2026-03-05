@@ -2,7 +2,6 @@
 
 Read context from: ${CTX}
 Progress file: ${PROGRESS}
-Status output: ${STATUS}
 Iteration: ${ITERATION}
 
 ${CONTEXT}
@@ -171,28 +170,25 @@ If you have actionable findings, edit the plan file directly:
 
 ---
 
-## Step 6: Write Result
+## Step 6: Write Decision
 
-Write your result to `${RESULT}` (set `signals.plateau_suspected` true when research is complete and remaining changes are cosmetic):
+When you are done, output your decision in a fenced block:
 
-```json
+```ap-result
 {
+  "decision": "continue",
   "summary": "One paragraph describing this iteration's findings and changes",
   "work": {
     "items_completed": ["Researched X", "Updated section Y"],
     "files_touched": ["tdd-prose-plan.md"]
   },
-  "artifacts": {
-    "outputs": [],
-    "paths": []
-  },
-  "signals": {
-    "plateau_suspected": false,
-    "risk": "low",
-    "notes": ""
-  }
+  "errors": []
 }
 ```
+
+Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
+
+Set `"decision": "stop"` when research is complete and remaining changes are cosmetic.
 
 ---
 

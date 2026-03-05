@@ -15,7 +15,7 @@ import (
 // TestResolve_SupportedVariables verifies all Contract 2 variables are
 // substituted when present in a prompt template.
 func TestResolve_SupportedVariables(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	// Record what prompt the provider receives.
 	var capturedPrompt string
@@ -30,7 +30,6 @@ func TestResolve_SupportedVariables(t *testing.T) {
 	template := strings.Join([]string{
 		"CTX=${CTX}",
 		"PROGRESS=${PROGRESS}",
-		"STATUS=${STATUS}",
 		"ITERATION=${ITERATION}",
 		"SESSION_NAME=${SESSION_NAME}",
 		"OUTPUT=${OUTPUT}",
@@ -43,6 +42,7 @@ func TestResolve_SupportedVariables(t *testing.T) {
 		Provider:       mp,
 		Iterations:     1,
 		PromptTemplate: template,
+		Store:          s,
 	}
 
 	_, err := Run(context.Background(), cfg)
@@ -64,7 +64,6 @@ func TestResolve_SupportedVariables(t *testing.T) {
 	}{
 		{"CTX", "CTX="},
 		{"PROGRESS", "PROGRESS="},
-		{"STATUS", "STATUS="},
 		{"ITERATION", "ITERATION="},
 		{"SESSION_NAME", "SESSION_NAME="},
 		{"OUTPUT", "OUTPUT="},
@@ -111,7 +110,7 @@ func TestResolve_SupportedVariables(t *testing.T) {
 // TestResolve_UndefinedVariablesLeftLiteral verifies that unknown
 // ${VAR} placeholders are left as literal text.
 func TestResolve_UndefinedVariablesLeftLiteral(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(mock.Response{
@@ -129,6 +128,7 @@ func TestResolve_UndefinedVariablesLeftLiteral(t *testing.T) {
 		Provider:       mp,
 		Iterations:     1,
 		PromptTemplate: template,
+		Store:          s,
 	}
 
 	_, err := Run(context.Background(), cfg)
@@ -200,7 +200,7 @@ func TestResolve_SinglePassNonRecursive(t *testing.T) {
 // TestResolve_NewlinesPreserved verifies multiline prompt templates
 // and multiline variable values preserve newlines exactly.
 func TestResolve_NewlinesPreserved(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(mock.Response{
@@ -219,6 +219,7 @@ func TestResolve_NewlinesPreserved(t *testing.T) {
 		Provider:       mp,
 		Iterations:     1,
 		PromptTemplate: template,
+		Store:          s,
 	}
 
 	_, err := Run(context.Background(), cfg)
@@ -299,7 +300,7 @@ func TestResolve_NestedLikeTokens(t *testing.T) {
 // TestResolve_ContextVariables verifies that context.json generated
 // paths are correctly wired into the resolve variables.
 func TestResolve_ContextVariables(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	mp := mock.New(
 		mock.WithResponses(mock.Response{
@@ -308,7 +309,7 @@ func TestResolve_ContextVariables(t *testing.T) {
 		}),
 	)
 
-	template := "ctx=${CTX} status=${STATUS} output=${OUTPUT} progress=${PROGRESS}"
+	template := "ctx=${CTX} output=${OUTPUT} progress=${PROGRESS}"
 
 	cfg := Config{
 		Session:        "test-ctx-vars",
@@ -317,6 +318,7 @@ func TestResolve_ContextVariables(t *testing.T) {
 		Provider:       mp,
 		Iterations:     1,
 		PromptTemplate: template,
+		Store:          s,
 	}
 
 	_, err := Run(context.Background(), cfg)
@@ -333,11 +335,6 @@ func TestResolve_ContextVariables(t *testing.T) {
 	// CTX should be a path to context.json.
 	if !strings.Contains(prompt, "context.json") {
 		t.Errorf("CTX not resolved to context.json path: %s", prompt)
-	}
-
-	// STATUS should be a path to status.json.
-	if !strings.Contains(prompt, "status.json") {
-		t.Errorf("STATUS not resolved to status.json path: %s", prompt)
 	}
 
 	// OUTPUT should be a path to output.md.

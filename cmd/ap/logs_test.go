@@ -2,54 +2,56 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/hwells4/ap/internal/events"
 	"github.com/hwells4/ap/internal/output"
+	"github.com/hwells4/ap/internal/store"
 )
 
-// setupLogsSession creates .ap/runs/{session}/events.jsonl with the given events.
-func setupLogsSession(t *testing.T, session string, evts []events.Event) string {
+// setupLogsStore creates an in-memory store with a session and optional events.
+func setupLogsStore(t *testing.T, session string, events []struct{ eventType, cursorJSON, dataJSON string }) *store.Store {
 	t.Helper()
-	dir := t.TempDir()
-	sessionDir := filepath.Join(dir, ".ap", "runs", session)
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+	s, err := store.Open(":memory:")
+	if err != nil {
 		t.Fatal(err)
 	}
-	eventsPath := filepath.Join(sessionDir, "events.jsonl")
-	for _, evt := range evts {
-		if err := events.Append(eventsPath, evt); err != nil {
+	ctx := context.Background()
+	if err := s.CreateSession(ctx, session, "loop", "", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	for _, evt := range events {
+		if err := s.AppendEvent(ctx, session, evt.eventType, evt.cursorJSON, evt.dataJSON); err != nil {
 			t.Fatal(err)
 		}
 	}
-	return dir
+	return s
 }
 
 func TestLogsJSON(t *testing.T) {
-	dir := setupLogsSession(t, "my-logs", []events.Event{
-		events.NewEvent(events.TypeSessionStart, "my-logs", nil, map[string]any{"stage": "ralph"}),
-		events.NewEvent(events.TypeIterationStart, "my-logs", &events.Cursor{Iteration: 1}, nil),
-		events.NewEvent(events.TypeIterationComplete, "my-logs", &events.Cursor{Iteration: 1}, map[string]any{"decision": "continue"}),
+	s := setupLogsStore(t, "my-logs", []struct{ eventType, cursorJSON, dataJSON string }{
+		{"session.started", "{}", `{"stage":"ralph"}`},
+		{"iteration.started", `{"iteration":1}`, "{}"},
+		{"iteration.completed", `{"iteration":1}`, `{"decision":"continue"}`},
 	})
+	defer s.Close()
 
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
 		mode:   output.ModeJSON,
 		stdout: &stdout,
 		stderr: &stderr,
-		getwd:  func() (string, error) { return dir, nil },
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"logs", "my-logs", "--json"}, deps)
+	code := runLogs([]string{"my-logs", "--json"}, deps)
 	if code != output.ExitSuccess {
 		t.Fatalf("exit code = %d; stderr: %s", code, stderr.String())
 	}
 
-	// Each line should be valid JSON (raw JSONL passthrough).
 	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
 	if len(lines) != 3 {
 		t.Fatalf("expected 3 lines, got %d: %s", len(lines), stdout.String())
@@ -67,29 +69,31 @@ func TestLogsJSON(t *testing.T) {
 		}
 	}
 
-	// Verify event types in order.
+	// Verify first event type.
 	var first map[string]any
 	_ = json.Unmarshal([]byte(lines[0]), &first)
-	if first["type"] != events.TypeSessionStart {
-		t.Fatalf("first event type = %v, want %s", first["type"], events.TypeSessionStart)
+	if first["type"] != "session.started" {
+		t.Fatalf("first event type = %v, want session.started", first["type"])
 	}
 }
 
 func TestLogsHuman(t *testing.T) {
-	dir := setupLogsSession(t, "human-logs", []events.Event{
-		events.NewEvent(events.TypeSessionStart, "human-logs", nil, map[string]any{"stage": "ralph"}),
-		events.NewEvent(events.TypeIterationComplete, "human-logs", &events.Cursor{Iteration: 1}, map[string]any{"decision": "continue"}),
+	s := setupLogsStore(t, "human-logs", []struct{ eventType, cursorJSON, dataJSON string }{
+		{"session.started", "{}", `{"stage":"ralph"}`},
+		{"iteration.completed", `{"iteration":1}`, `{"decision":"continue"}`},
 	})
+	defer s.Close()
 
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
 		mode:   output.ModeHuman,
 		stdout: &stdout,
 		stderr: &stderr,
-		getwd:  func() (string, error) { return dir, nil },
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"logs", "human-logs"}, deps)
+	code := runLogs([]string{"human-logs"}, deps)
 	if code != output.ExitSuccess {
 		t.Fatalf("exit code = %d; stderr: %s", code, stderr.String())
 	}
@@ -98,24 +102,28 @@ func TestLogsHuman(t *testing.T) {
 	if out == "" {
 		t.Fatal("expected human-readable output")
 	}
-	// Should contain event type and session.
 	if !strings.Contains(out, "session.started") {
 		t.Fatalf("human output missing session.started: %s", out)
 	}
 }
 
 func TestLogsSessionNotFound(t *testing.T) {
-	dir := t.TempDir()
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
 
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
 		mode:   output.ModeJSON,
 		stdout: &stdout,
 		stderr: &stderr,
-		getwd:  func() (string, error) { return dir, nil },
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"logs", "ghost", "--json"}, deps)
+	code := runLogs([]string{"ghost", "--json"}, deps)
 	if code != output.ExitNotFound {
 		t.Fatalf("exit code = %d, want %d", code, output.ExitNotFound)
 	}
@@ -140,29 +148,30 @@ func TestLogsMissingArg(t *testing.T) {
 		getwd:  func() (string, error) { return t.TempDir(), nil },
 	}
 
-	code := runWithDeps([]string{"logs", "--json"}, deps)
+	code := runLogs([]string{"--json"}, deps)
 	if code != output.ExitInvalidArgs {
 		t.Fatalf("exit code = %d, want %d", code, output.ExitInvalidArgs)
 	}
 }
 
-func TestLogsEmptyEventsFile(t *testing.T) {
-	dir := setupLogsSession(t, "empty-logs", nil)
+func TestLogsEmptyEvents(t *testing.T) {
+	s := setupLogsStore(t, "empty-logs", nil)
+	defer s.Close()
 
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
 		mode:   output.ModeJSON,
 		stdout: &stdout,
 		stderr: &stderr,
-		getwd:  func() (string, error) { return dir, nil },
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"logs", "empty-logs", "--json"}, deps)
+	code := runLogs([]string{"empty-logs", "--json"}, deps)
 	if code != output.ExitSuccess {
 		t.Fatalf("exit code = %d; stderr: %s", code, stderr.String())
 	}
 
-	// Empty file → no output.
 	if strings.TrimSpace(stdout.String()) != "" {
 		t.Fatalf("expected empty output for empty events, got: %s", stdout.String())
 	}
@@ -177,7 +186,7 @@ func TestLogsUnknownFlag(t *testing.T) {
 		getwd:  func() (string, error) { return t.TempDir(), nil },
 	}
 
-	code := runWithDeps([]string{"logs", "--verbose", "--json"}, deps)
+	code := runLogs([]string{"--verbose", "--json"}, deps)
 	if code != output.ExitInvalidArgs {
 		t.Fatalf("exit code = %d, want %d", code, output.ExitInvalidArgs)
 	}

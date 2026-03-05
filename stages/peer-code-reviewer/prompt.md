@@ -2,7 +2,6 @@
 
 Context: ${CTX}
 Progress: ${PROGRESS}
-Status: ${STATUS}
 
 ${CONTEXT}
 
@@ -39,12 +38,12 @@ Review code written by other agents (or in prior sessions). Look for issues with
    $TEST_CMD
    ```
 
-7. **Write status:**
-   ```bash
-   cat > ${STATUS} << 'EOF'
+7. **Output your decision:**
+   ```ap-result
    {"decision": "continue", "summary": "Reviewed N files, found N issues, fixed N critical"}
-   EOF
    ```
+
+   Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
 
 ## Update Progress
 

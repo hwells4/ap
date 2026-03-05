@@ -83,28 +83,25 @@ Append your findings to the progress file:
 [Specific tests that should be added]
 ```
 
-### Step 6: Write Result
+### Step 6: Write Decision
 
-After scanning, write your result to `${RESULT}` (set `signals.plateau_suspected` true when major areas are covered and remaining gaps are documented):
+When you are done, output your decision in a fenced block:
 
-```json
+```ap-result
 {
+  "decision": "continue",
   "summary": "One paragraph describing what gaps you found this iteration",
   "work": {
     "items_completed": [],
     "files_touched": []
   },
-  "artifacts": {
-    "outputs": [],
-    "paths": []
-  },
-  "signals": {
-    "plateau_suspected": false,
-    "risk": "low",
-    "notes": ""
-  }
+  "errors": []
 }
 ```
+
+Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
+
+Set `"decision": "stop"` when major areas are covered and remaining gaps are documented.
 
 **Priority guide for gaps:**
 - **Critical**: Core business logic with no tests

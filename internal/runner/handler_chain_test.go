@@ -14,9 +14,8 @@ import (
 	"time"
 
 	"github.com/hwells4/ap/internal/config"
-	"github.com/hwells4/ap/internal/events"
 	"github.com/hwells4/ap/internal/mock"
-	"github.com/hwells4/ap/internal/state"
+	"github.com/hwells4/ap/internal/store"
 )
 
 func TestRun_EscalateHandlerChain_MixedSuccessAndFailure(t *testing.T) {
@@ -25,6 +24,8 @@ func TestRun_EscalateHandlerChain_MixedSuccessAndFailure(t *testing.T) {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatalf("mkdir run dir: %v", err)
 	}
+
+	s := mustOpenStore(t)
 
 	tracePath := filepath.Join(root, "handler-order.log")
 	scriptPath := filepath.Join(root, "record-handler.sh")
@@ -55,6 +56,7 @@ func TestRun_EscalateHandlerChain_MixedSuccessAndFailure(t *testing.T) {
 		PromptTemplate:       "iteration ${ITERATION}",
 		SignalHandlerTimeout: 2 * time.Second,
 		SignalOutput:         &stdout,
+		Store:                s,
 		EscalateHandlers: []config.SignalHandler{
 			{Type: "exec", Argv: []string{scriptPath, "first", tracePath}},
 			{Type: "webhook", URL: webhook.URL},
@@ -64,8 +66,8 @@ func TestRun_EscalateHandlerChain_MixedSuccessAndFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
-	if res.Status != state.StatePaused {
-		t.Fatalf("status = %q, want %q", res.Status, state.StatePaused)
+	if res.Status != store.StatusPaused {
+		t.Fatalf("status = %q, want %q", res.Status, store.StatusPaused)
 	}
 	if res.Iterations != 1 {
 		t.Fatalf("iterations = %d, want 1", res.Iterations)
@@ -81,16 +83,17 @@ func TestRun_EscalateHandlerChain_MixedSuccessAndFailure(t *testing.T) {
 		t.Fatalf("handler order = %#v, want %#v", gotOrder, wantOrder)
 	}
 
-	evts := readEvents(t, runDir)
-	handlerErrors := filterByType(evts, events.TypeSignalHandlerError)
+	evts := readEvents(t, s, "handler-chain")
+	handlerErrors := filterByType(evts, store.TypeSignalHandlerError)
 	if len(handlerErrors) != 1 {
 		t.Fatalf("signal.handler.error count = %d, want 1", len(handlerErrors))
 	}
-	if handlerErrors[0].Data["handler_type"] != "webhook" {
-		t.Fatalf("handler_type = %v, want webhook", handlerErrors[0].Data["handler_type"])
+	errData := parseEventData(t, handlerErrors[0])
+	if errData["handler_type"] != "webhook" {
+		t.Fatalf("handler_type = %v, want webhook", errData["handler_type"])
 	}
-	if handlerErrors[0].Data["signal_id"] != "sig-1-escalate-0" {
-		t.Fatalf("signal_id = %v, want sig-1-escalate-0", handlerErrors[0].Data["signal_id"])
+	if errData["signal_id"] != "sig-1-escalate-0" {
+		t.Fatalf("signal_id = %v, want sig-1-escalate-0", errData["signal_id"])
 	}
 
 	// stdout fallback is always appended even when not explicitly configured.
@@ -128,6 +131,8 @@ func TestRun_WebhookEscalatePayloadContract(t *testing.T) {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatalf("mkdir run dir: %v", err)
 	}
+
+	s := mustOpenStore(t)
 
 	type webhookRequest struct {
 		Method  string
@@ -167,6 +172,7 @@ func TestRun_WebhookEscalatePayloadContract(t *testing.T) {
 		PromptTemplate:       "iteration ${ITERATION}",
 		SignalHandlerTimeout: 2 * time.Second,
 		SignalOutput:         &stdout,
+		Store:                s,
 		EscalateHandlers: []config.SignalHandler{
 			{Type: "webhook", URL: webhook.URL, Headers: map[string]string{"X-Test-Header": "ok"}},
 		},
@@ -176,8 +182,8 @@ func TestRun_WebhookEscalatePayloadContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
-	if res.Status != state.StatePaused {
-		t.Fatalf("status = %q, want %q", res.Status, state.StatePaused)
+	if res.Status != store.StatusPaused {
+		t.Fatalf("status = %q, want %q", res.Status, store.StatusPaused)
 	}
 
 	var req webhookRequest
@@ -239,6 +245,8 @@ func TestRun_WebhookSpawnPayloadContract(t *testing.T) {
 		t.Fatalf("mkdir run dir: %v", err)
 	}
 
+	s := mustOpenStore(t)
+
 	type webhookRequest struct {
 		Payload map[string]any
 	}
@@ -257,14 +265,12 @@ func TestRun_WebhookSpawnPayloadContract(t *testing.T) {
 
 	prov := mock.New(
 		mock.WithResponses(mock.Response{
-			StatusJSON: `{
-				"decision":"stop",
-				"reason":"done",
-				"summary":"spawn child",
-				"work":{"items_completed":[],"files_touched":[]},
-				"errors":[],
-				"agent_signals":{"spawn":[{"run":"ralph","session":"child-hook"}]}
-			}`,
+			Decision: "stop",
+			Reason:   "done",
+			Summary:  "spawn child",
+			Signals: &mock.Signals{
+				Spawn: json.RawMessage(`[{"run":"ralph","session":"child-hook"}]`),
+			},
 		}),
 	)
 
@@ -279,6 +285,7 @@ func TestRun_WebhookSpawnPayloadContract(t *testing.T) {
 		WorkDir:              root,
 		Launcher:             launcher,
 		SignalHandlerTimeout: 2 * time.Second,
+		Store:                s,
 		SpawnHandlers: []config.SignalHandler{
 			{Type: "webhook", URL: webhook.URL},
 		},
@@ -288,8 +295,8 @@ func TestRun_WebhookSpawnPayloadContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
-	if res.Status != state.StateCompleted {
-		t.Fatalf("status = %q, want %q", res.Status, state.StateCompleted)
+	if res.Status != store.StatusCompleted {
+		t.Fatalf("status = %q, want %q", res.Status, store.StatusCompleted)
 	}
 
 	var req webhookRequest
@@ -333,6 +340,8 @@ func TestRun_WebhookTimeoutEmitsHandlerError(t *testing.T) {
 		t.Fatalf("mkdir run dir: %v", err)
 	}
 
+	s := mustOpenStore(t)
+
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(200 * time.Millisecond)
 		w.WriteHeader(http.StatusNoContent)
@@ -353,6 +362,7 @@ func TestRun_WebhookTimeoutEmitsHandlerError(t *testing.T) {
 		Iterations:           3,
 		PromptTemplate:       "iteration ${ITERATION}",
 		SignalHandlerTimeout: 25 * time.Millisecond,
+		Store:                s,
 		EscalateHandlers: []config.SignalHandler{
 			{Type: "webhook", URL: webhook.URL},
 		},
@@ -360,19 +370,20 @@ func TestRun_WebhookTimeoutEmitsHandlerError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
-	if res.Status != state.StatePaused {
-		t.Fatalf("status = %q, want %q", res.Status, state.StatePaused)
+	if res.Status != store.StatusPaused {
+		t.Fatalf("status = %q, want %q", res.Status, store.StatusPaused)
 	}
 
-	evts := readEvents(t, runDir)
-	handlerErrors := filterByType(evts, events.TypeSignalHandlerError)
+	evts := readEvents(t, s, "webhook-timeout")
+	handlerErrors := filterByType(evts, store.TypeSignalHandlerError)
 	if len(handlerErrors) != 1 {
 		t.Fatalf("signal.handler.error count = %d, want 1", len(handlerErrors))
 	}
-	if handlerErrors[0].Data["handler_type"] != "webhook" {
-		t.Fatalf("handler_type = %v, want webhook", handlerErrors[0].Data["handler_type"])
+	errData := parseEventData(t, handlerErrors[0])
+	if errData["handler_type"] != "webhook" {
+		t.Fatalf("handler_type = %v, want webhook", errData["handler_type"])
 	}
-	errMsg, _ := handlerErrors[0].Data["error"].(string)
+	errMsg, _ := errData["error"].(string)
 	msg := strings.ToLower(errMsg)
 	if !strings.Contains(msg, "timeout") && !strings.Contains(msg, "deadline exceeded") {
 		t.Fatalf("handler error = %q, want timeout/deadline exceeded", errMsg)

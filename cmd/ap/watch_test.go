@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/hwells4/ap/internal/output"
+	"github.com/hwells4/ap/internal/store"
 )
 
 // ---------------------------------------------------------------------------
@@ -230,29 +232,27 @@ func TestExpandWatchVars_TableDriven(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// isSessionEnd — unit tests
+// isSessionEndType — unit tests
 // ---------------------------------------------------------------------------
 
-func TestIsSessionEnd(t *testing.T) {
+func TestIsSessionEndType(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		line string
-		want bool
+		eventType string
+		want      bool
 	}{
-		{`{"type":"session.completed"}`, true},
-		{`{"type":"session.failed"}`, true},
-		{`{"type":"session.aborted"}`, true},
-		{`{"type":"iteration.completed"}`, false},
-		{`{"type":"session.started"}`, false},
-		{`{"type":"signal.escalate"}`, false},
-		{`{"type":"session.idle"}`, false},
-		{`invalid json`, false},
-		{`{}`, false},
-		{`{"type":""}`, false},
+		{"session.completed", true},
+		{"session.failed", true},
+		{"session.aborted", true},
+		{"iteration.completed", false},
+		{"session.started", false},
+		{"signal.escalate", false},
+		{"session.idle", false},
+		{"", false},
 	}
 	for _, tc := range cases {
-		if got := isSessionEnd(tc.line); got != tc.want {
-			t.Errorf("isSessionEnd(%q) = %v, want %v", tc.line, got, tc.want)
+		if got := isSessionEndType(tc.eventType); got != tc.want {
+			t.Errorf("isSessionEndType(%q) = %v, want %v", tc.eventType, got, tc.want)
 		}
 	}
 }
@@ -409,27 +409,10 @@ func TestParseWatchArgs_SessionBeforeAndAfterOn(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// processWatchLine — unit tests
+// processWatchEvent — unit tests
 // ---------------------------------------------------------------------------
 
-func TestProcessWatchLine_InvalidJSON(t *testing.T) {
-	t.Parallel()
-	var stdout, stderr bytes.Buffer
-	deps := cliDeps{
-		mode:   output.ModeJSON,
-		stdout: &stdout,
-		stderr: &stderr,
-	}
-	hooks := []watchHook{{EventType: "completed", Command: "echo done"}}
-
-	// Should not panic or produce output for invalid JSON.
-	processWatchLine("not json at all", "sess", hooks, deps)
-	if stdout.Len() > 0 {
-		t.Errorf("expected no output for invalid JSON, got: %s", stdout.String())
-	}
-}
-
-func TestProcessWatchLine_NonMatchingEvent(t *testing.T) {
+func TestProcessWatchEvent_NonMatchingEvent(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
@@ -440,13 +423,14 @@ func TestProcessWatchLine_NonMatchingEvent(t *testing.T) {
 	hooks := []watchHook{{EventType: "completed", Command: "echo done"}}
 
 	// session.started does not match "completed" hook.
-	processWatchLine(`{"type":"session.started"}`, "sess", hooks, deps)
+	evt := store.EventRow{Type: "session.started", CursorJSON: "{}", DataJSON: "{}"}
+	processWatchEvent(evt, "sess", hooks, deps)
 	if stdout.Len() > 0 {
 		t.Errorf("expected no JSON output for non-matching event, got: %s", stdout.String())
 	}
 }
 
-func TestProcessWatchLine_MatchingEvent_JSONOutput(t *testing.T) {
+func TestProcessWatchEvent_MatchingEvent_JSONOutput(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
@@ -455,10 +439,11 @@ func TestProcessWatchLine_MatchingEvent_JSONOutput(t *testing.T) {
 		stderr: &stderr,
 	}
 	// Use "true" as the hook command (produces no output) so that stdout
-	// contains only the JSON payload emitted by processWatchLine.
+	// contains only the JSON payload emitted by processWatchEvent.
 	hooks := []watchHook{{EventType: "completed", Command: "true"}}
 
-	processWatchLine(`{"type":"session.completed"}`, "my-sess", hooks, deps)
+	evt := store.EventRow{Type: "session.completed", CursorJSON: "{}", DataJSON: "{}"}
+	processWatchEvent(evt, "my-sess", hooks, deps)
 
 	// stdout contains the JSON line followed by any command output.
 	// Parse only the first line (the JSON payload).
@@ -481,7 +466,7 @@ func TestProcessWatchLine_MatchingEvent_JSONOutput(t *testing.T) {
 	}
 }
 
-func TestProcessWatchLine_MultipleHooksMatchSameEvent(t *testing.T) {
+func TestProcessWatchEvent_MultipleHooksMatchSameEvent(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
@@ -494,7 +479,8 @@ func TestProcessWatchLine_MultipleHooksMatchSameEvent(t *testing.T) {
 		{EventType: "session.completed", Command: "cmd2"},
 	}
 
-	processWatchLine(`{"type":"session.completed"}`, "s", hooks, deps)
+	evt := store.EventRow{Type: "session.completed", CursorJSON: "{}", DataJSON: "{}"}
+	processWatchEvent(evt, "s", hooks, deps)
 
 	// Both hooks match session.completed: shorthand "completed" and direct "session.completed".
 	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
@@ -503,7 +489,7 @@ func TestProcessWatchLine_MultipleHooksMatchSameEvent(t *testing.T) {
 	}
 }
 
-func TestProcessWatchLine_HumanMode_NoJSON(t *testing.T) {
+func TestProcessWatchEvent_HumanMode_NoJSON(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
@@ -513,7 +499,8 @@ func TestProcessWatchLine_HumanMode_NoJSON(t *testing.T) {
 	}
 	hooks := []watchHook{{EventType: "completed", Command: "true"}}
 
-	processWatchLine(`{"type":"session.completed"}`, "s", hooks, deps)
+	evt := store.EventRow{Type: "session.completed", CursorJSON: "{}", DataJSON: "{}"}
+	processWatchEvent(evt, "s", hooks, deps)
 
 	// In human mode, no JSON payload is written to stdout (only the command's own output).
 	raw := stdout.String()
@@ -523,19 +510,43 @@ func TestProcessWatchLine_HumanMode_NoJSON(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// runWatch — integration tests
+// runWatch — integration tests (store-based)
 // ---------------------------------------------------------------------------
+
+// setupWatchStore creates an in-memory store with a session and events.
+func setupWatchStore(t *testing.T, session string, events []struct{ eventType, cursorJSON, dataJSON string }) *store.Store {
+	t.Helper()
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := s.CreateSession(ctx, session, "loop", "", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	for _, evt := range events {
+		if err := s.AppendEvent(ctx, session, evt.eventType, evt.cursorJSON, evt.dataJSON); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return s
+}
 
 func TestRunWatch_SessionNotFound(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	var stdout, stderr bytes.Buffer
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
 
+	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
 		mode:   output.ModeJSON,
 		stdout: &stdout,
 		stderr: &stderr,
-		getwd:  func() (string, error) { return dir, nil },
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+		store:  s,
 	}
 
 	code := runWatch([]string{"nonexistent", "--on", "completed", "echo done"}, deps)
@@ -560,13 +571,12 @@ func TestRunWatch_SessionNotFound(t *testing.T) {
 func TestRunWatch_NoHooksError(t *testing.T) {
 	// Cannot use t.Parallel() because t.Setenv modifies process environment.
 	dir := t.TempDir()
-	sessionDir := filepath.Join(dir, ".ap", "runs", "sess")
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
 
 	// Set HOME to temp to avoid loading real config.
 	t.Setenv("HOME", dir)
+
+	s := setupWatchStore(t, "sess", nil)
+	defer s.Close()
 
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
@@ -574,6 +584,7 @@ func TestRunWatch_NoHooksError(t *testing.T) {
 		stdout: &stdout,
 		stderr: &stderr,
 		getwd:  func() (string, error) { return dir, nil },
+		store:  s,
 	}
 
 	code := runWatch([]string{"sess"}, deps)
@@ -585,26 +596,11 @@ func TestRunWatch_NoHooksError(t *testing.T) {
 func TestRunWatch_CompletedEventFiresHook(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	sessionDir := filepath.Join(dir, ".ap", "runs", "test-watch")
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	// Write an events file that ends with session.completed.
-	events := []map[string]any{
-		{"type": "session.started", "ts": "2026-03-04T00:00:00Z", "session": "test-watch", "data": map[string]any{}},
-		{"type": "session.completed", "ts": "2026-03-04T00:01:00Z", "session": "test-watch", "data": map[string]any{"reason": "done"}},
-	}
-	var eventsData bytes.Buffer
-	for _, evt := range events {
-		line, _ := json.Marshal(evt)
-		eventsData.Write(line)
-		eventsData.WriteByte('\n')
-	}
-	eventsPath := filepath.Join(sessionDir, "events.jsonl")
-	if err := os.WriteFile(eventsPath, eventsData.Bytes(), 0o644); err != nil {
-		t.Fatalf("write events: %v", err)
-	}
+	s := setupWatchStore(t, "test-watch", []struct{ eventType, cursorJSON, dataJSON string }{
+		{"session.started", "{}", `{"stage":"ralph"}`},
+		{"session.completed", "{}", `{"reason":"done"}`},
+	})
+	defer s.Close()
 
 	// Write a marker file on completed event.
 	markerPath := filepath.Join(dir, "hook-fired")
@@ -614,6 +610,7 @@ func TestRunWatch_CompletedEventFiresHook(t *testing.T) {
 		stdout: &stdout,
 		stderr: &stderr,
 		getwd:  func() (string, error) { return dir, nil },
+		store:  s,
 	}
 
 	code := runWatch([]string{"test-watch", "--on", "completed", "touch " + markerPath}, deps)
@@ -630,25 +627,11 @@ func TestRunWatch_CompletedEventFiresHook(t *testing.T) {
 func TestRunWatch_EscalateEventFiresHook(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	sessionDir := filepath.Join(dir, ".ap", "runs", "esc-watch")
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	events := []map[string]any{
-		{"type": "signal.escalate", "data": map[string]any{"reason": "stuck"}},
-		{"type": "session.completed"},
-	}
-	var eventsData bytes.Buffer
-	for _, evt := range events {
-		line, _ := json.Marshal(evt)
-		eventsData.Write(line)
-		eventsData.WriteByte('\n')
-	}
-	eventsPath := filepath.Join(sessionDir, "events.jsonl")
-	if err := os.WriteFile(eventsPath, eventsData.Bytes(), 0o644); err != nil {
-		t.Fatalf("write events: %v", err)
-	}
+	s := setupWatchStore(t, "esc-watch", []struct{ eventType, cursorJSON, dataJSON string }{
+		{"signal.escalate", "{}", `{"reason":"stuck"}`},
+		{"session.completed", "{}", "{}"},
+	})
+	defer s.Close()
 
 	markerPath := filepath.Join(dir, "escalate-fired")
 	var stdout, stderr bytes.Buffer
@@ -657,6 +640,7 @@ func TestRunWatch_EscalateEventFiresHook(t *testing.T) {
 		stdout: &stdout,
 		stderr: &stderr,
 		getwd:  func() (string, error) { return dir, nil },
+		store:  s,
 	}
 
 	code := runWatch([]string{"esc-watch", "--on", "escalate", "touch " + markerPath}, deps)
@@ -672,24 +656,10 @@ func TestRunWatch_EscalateEventFiresHook(t *testing.T) {
 func TestRunWatch_FailedEventFiresHook(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	sessionDir := filepath.Join(dir, ".ap", "runs", "fail-watch")
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	events := []map[string]any{
-		{"type": "session.failed", "data": map[string]any{"reason": "crash"}},
-	}
-	var eventsData bytes.Buffer
-	for _, evt := range events {
-		line, _ := json.Marshal(evt)
-		eventsData.Write(line)
-		eventsData.WriteByte('\n')
-	}
-	eventsPath := filepath.Join(sessionDir, "events.jsonl")
-	if err := os.WriteFile(eventsPath, eventsData.Bytes(), 0o644); err != nil {
-		t.Fatalf("write events: %v", err)
-	}
+	s := setupWatchStore(t, "fail-watch", []struct{ eventType, cursorJSON, dataJSON string }{
+		{"session.failed", "{}", `{"reason":"crash"}`},
+	})
+	defer s.Close()
 
 	markerPath := filepath.Join(dir, "failed-fired")
 	var stdout, stderr bytes.Buffer
@@ -698,6 +668,7 @@ func TestRunWatch_FailedEventFiresHook(t *testing.T) {
 		stdout: &stdout,
 		stderr: &stderr,
 		getwd:  func() (string, error) { return dir, nil },
+		store:  s,
 	}
 
 	code := runWatch([]string{"fail-watch", "--on", "failed", "touch " + markerPath}, deps)
@@ -713,25 +684,11 @@ func TestRunWatch_FailedEventFiresHook(t *testing.T) {
 func TestRunWatch_MultipleHooksDifferentEvents(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	sessionDir := filepath.Join(dir, ".ap", "runs", "multi-watch")
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	events := []map[string]any{
-		{"type": "signal.escalate", "data": map[string]any{"reason": "help"}},
-		{"type": "session.completed", "data": map[string]any{"reason": "done"}},
-	}
-	var eventsData bytes.Buffer
-	for _, evt := range events {
-		line, _ := json.Marshal(evt)
-		eventsData.Write(line)
-		eventsData.WriteByte('\n')
-	}
-	eventsPath := filepath.Join(sessionDir, "events.jsonl")
-	if err := os.WriteFile(eventsPath, eventsData.Bytes(), 0o644); err != nil {
-		t.Fatalf("write events: %v", err)
-	}
+	s := setupWatchStore(t, "multi-watch", []struct{ eventType, cursorJSON, dataJSON string }{
+		{"signal.escalate", "{}", `{"reason":"help"}`},
+		{"session.completed", "{}", `{"reason":"done"}`},
+	})
+	defer s.Close()
 
 	escalateMarker := filepath.Join(dir, "escalate-marker")
 	completedMarker := filepath.Join(dir, "completed-marker")
@@ -741,6 +698,7 @@ func TestRunWatch_MultipleHooksDifferentEvents(t *testing.T) {
 		stdout: &stdout,
 		stderr: &stderr,
 		getwd:  func() (string, error) { return dir, nil },
+		store:  s,
 	}
 
 	code := runWatch([]string{
@@ -763,30 +721,10 @@ func TestRunWatch_MultipleHooksDifferentEvents(t *testing.T) {
 func TestRunWatch_HookReceivesExpandedVars(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	sessionDir := filepath.Join(dir, ".ap", "runs", "var-watch")
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	events := []map[string]any{
-		{
-			"type": "session.completed",
-			"data": map[string]any{"reason": "all-done"},
-			"cursor": map[string]any{
-				"iteration": float64(7),
-			},
-		},
-	}
-	var eventsData bytes.Buffer
-	for _, evt := range events {
-		line, _ := json.Marshal(evt)
-		eventsData.Write(line)
-		eventsData.WriteByte('\n')
-	}
-	eventsPath := filepath.Join(sessionDir, "events.jsonl")
-	if err := os.WriteFile(eventsPath, eventsData.Bytes(), 0o644); err != nil {
-		t.Fatalf("write events: %v", err)
-	}
+	s := setupWatchStore(t, "var-watch", []struct{ eventType, cursorJSON, dataJSON string }{
+		{"session.completed", `{"iteration":7}`, `{"reason":"all-done"}`},
+	})
+	defer s.Close()
 
 	outFile := filepath.Join(dir, "var-output.txt")
 	var stdout, stderr bytes.Buffer
@@ -795,6 +733,7 @@ func TestRunWatch_HookReceivesExpandedVars(t *testing.T) {
 		stdout: &stdout,
 		stderr: &stderr,
 		getwd:  func() (string, error) { return dir, nil },
+		store:  s,
 	}
 
 	// The hook command writes expanded variables to a file.
@@ -817,33 +756,19 @@ func TestRunWatch_HookReceivesExpandedVars(t *testing.T) {
 
 func TestRunWatch_AbortedEventEndsWatch(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	sessionDir := filepath.Join(dir, ".ap", "runs", "abort-watch")
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	events := []map[string]any{
-		{"type": "session.started"},
-		{"type": "session.aborted"},
-	}
-	var eventsData bytes.Buffer
-	for _, evt := range events {
-		line, _ := json.Marshal(evt)
-		eventsData.Write(line)
-		eventsData.WriteByte('\n')
-	}
-	eventsPath := filepath.Join(sessionDir, "events.jsonl")
-	if err := os.WriteFile(eventsPath, eventsData.Bytes(), 0o644); err != nil {
-		t.Fatalf("write events: %v", err)
-	}
+	s := setupWatchStore(t, "abort-watch", []struct{ eventType, cursorJSON, dataJSON string }{
+		{"session.started", "{}", "{}"},
+		{"session.aborted", "{}", "{}"},
+	})
+	defer s.Close()
 
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
 		mode:   output.ModeJSON,
 		stdout: &stdout,
 		stderr: &stderr,
-		getwd:  func() (string, error) { return dir, nil },
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+		store:  s,
 	}
 
 	// Even though hook is on "completed", watch should still exit on session.aborted.
@@ -856,27 +781,13 @@ func TestRunWatch_AbortedEventEndsWatch(t *testing.T) {
 func TestRunWatch_NonMatchingEventsSkipped(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	sessionDir := filepath.Join(dir, ".ap", "runs", "skip-watch")
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	events := []map[string]any{
-		{"type": "session.started"},
-		{"type": "iteration.completed"},
-		{"type": "iteration.started"},
-		{"type": "session.completed"},
-	}
-	var eventsData bytes.Buffer
-	for _, evt := range events {
-		line, _ := json.Marshal(evt)
-		eventsData.Write(line)
-		eventsData.WriteByte('\n')
-	}
-	eventsPath := filepath.Join(sessionDir, "events.jsonl")
-	if err := os.WriteFile(eventsPath, eventsData.Bytes(), 0o644); err != nil {
-		t.Fatalf("write events: %v", err)
-	}
+	s := setupWatchStore(t, "skip-watch", []struct{ eventType, cursorJSON, dataJSON string }{
+		{"session.started", "{}", "{}"},
+		{"iteration.completed", "{}", "{}"},
+		{"iteration.started", "{}", "{}"},
+		{"session.completed", "{}", "{}"},
+	})
+	defer s.Close()
 
 	markerPath := filepath.Join(dir, "escalate-not-fired")
 	var stdout, stderr bytes.Buffer
@@ -885,6 +796,7 @@ func TestRunWatch_NonMatchingEventsSkipped(t *testing.T) {
 		stdout: &stdout,
 		stderr: &stderr,
 		getwd:  func() (string, error) { return dir, nil },
+		store:  s,
 	}
 
 	// Hook on "escalate" — none of the events match escalate.

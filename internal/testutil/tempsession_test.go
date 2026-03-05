@@ -1,12 +1,12 @@
 package testutil
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/hwells4/ap/internal/events"
-	"github.com/hwells4/ap/internal/state"
+	"github.com/hwells4/ap/internal/store"
 )
 
 func TestNewTempSession_Defaults(t *testing.T) {
@@ -21,30 +21,24 @@ func TestNewTempSession_Defaults(t *testing.T) {
 	if _, err := os.Stat(sess.Dir); err != nil {
 		t.Errorf("session dir missing: %v", err)
 	}
-	if _, err := os.Stat(sess.StatePath); err != nil {
-		t.Errorf("state.json missing: %v", err)
-	}
-	if _, err := os.Stat(sess.EventsPath); err != nil {
-		t.Errorf("events.jsonl missing: %v", err)
-	}
 
-	// Verify state.json content.
-	ss := sess.LoadState()
-	if ss.Status != state.StateRunning {
-		t.Errorf("Status = %q, want %q", ss.Status, state.StateRunning)
+	// Verify store session content.
+	row := sess.GetSession()
+	if row.Status != store.StatusRunning {
+		t.Errorf("Status = %q, want %q", row.Status, store.StatusRunning)
 	}
-	if ss.Session != "test-session" {
-		t.Errorf("Session = %q, want %q", ss.Session, "test-session")
+	if row.Name != "test-session" {
+		t.Errorf("Name = %q, want %q", row.Name, "test-session")
 	}
 }
 
 func TestNewTempSession_WithState(t *testing.T) {
 	t.Parallel()
-	sess := NewTempSession(t, "paused-session", WithState(state.StatePaused))
+	sess := NewTempSession(t, "paused-session", WithState(store.StatusPaused))
 
-	ss := sess.LoadState()
-	if ss.Status != state.StatePaused {
-		t.Errorf("Status = %q, want %q", ss.Status, state.StatePaused)
+	row := sess.GetSession()
+	if row.Status != store.StatusPaused {
+		t.Errorf("Status = %q, want %q", row.Status, store.StatusPaused)
 	}
 }
 
@@ -55,9 +49,9 @@ func TestNewTempSession_WithIterations(t *testing.T) {
 		WithStageName("ralph"),
 	)
 
-	ss := sess.LoadState()
-	if ss.IterationCompleted != 3 {
-		t.Errorf("IterationCompleted = %d, want 3", ss.IterationCompleted)
+	row := sess.GetSession()
+	if row.IterationCompleted != 3 {
+		t.Errorf("IterationCompleted = %d, want 3", row.IterationCompleted)
 	}
 
 	// Verify iteration directories exist.
@@ -75,19 +69,26 @@ func TestNewTempSession_WithIterations(t *testing.T) {
 
 func TestNewTempSession_WithEvents(t *testing.T) {
 	t.Parallel()
-	evts := []events.Event{
-		{Timestamp: "2026-01-01T00:00:00Z", Type: events.TypeSessionStart, Session: "test"},
-		{Timestamp: "2026-01-01T00:01:00Z", Type: events.TypeIterationStart, Session: "test"},
+	evts := []EventSpec{
+		{Type: store.TypeSessionStart, Data: map[string]any{"info": "started"}},
+		{Type: store.TypeIterationStart, Data: map[string]any{"iteration": 1}},
 	}
 
 	sess := NewTempSession(t, "event-session", WithEvents(evts))
 
-	data, err := os.ReadFile(sess.EventsPath)
+	ctx := context.Background()
+	rows, err := sess.Store.GetEvents(ctx, "event-session", "", 0)
 	if err != nil {
-		t.Fatalf("read events.jsonl: %v", err)
+		t.Fatalf("get events: %v", err)
 	}
-	if len(data) == 0 {
-		t.Error("events.jsonl is empty")
+	if len(rows) != 2 {
+		t.Fatalf("got %d events, want 2", len(rows))
+	}
+	if rows[0].Type != store.TypeSessionStart {
+		t.Errorf("event[0].Type = %q, want %q", rows[0].Type, store.TypeSessionStart)
+	}
+	if rows[1].Type != store.TypeIterationStart {
+		t.Errorf("event[1].Type = %q, want %q", rows[1].Type, store.TypeIterationStart)
 	}
 }
 
@@ -95,9 +96,9 @@ func TestNewTempSession_WithPipeline(t *testing.T) {
 	t.Parallel()
 	sess := NewTempSession(t, "pipeline-session", WithPipeline("go-engine-full"))
 
-	ss := sess.LoadState()
-	if ss.Pipeline != "go-engine-full" {
-		t.Errorf("Pipeline = %q, want %q", ss.Pipeline, "go-engine-full")
+	row := sess.GetSession()
+	if row.Pipeline != "go-engine-full" {
+		t.Errorf("Pipeline = %q, want %q", row.Pipeline, "go-engine-full")
 	}
 }
 

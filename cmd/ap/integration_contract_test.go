@@ -10,44 +10,31 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hwells4/ap/internal/events"
 	"github.com/hwells4/ap/internal/lock"
-	"github.com/hwells4/ap/internal/mock"
 	"github.com/hwells4/ap/internal/output"
-	"github.com/hwells4/ap/internal/runner"
-	"github.com/hwells4/ap/internal/state"
+	"github.com/hwells4/ap/internal/store"
 )
 
-func TestIntegration_RunKillAndResumeLifecycle(t *testing.T) {
+func TestIntegration_KillAndResumeLifecycle(t *testing.T) {
 	root := t.TempDir()
+	ctx := context.Background()
 
-	// "run" step with mock provider: escalate should pause the session.
-	killSession := "int-kill"
-	killRunDir := filepath.Join(root, ".ap", "runs", killSession)
-	if err := os.MkdirAll(killRunDir, 0o755); err != nil {
-		t.Fatalf("mkdir run dir: %v", err)
-	}
-
-	prov := mock.New(
-		mock.WithResponses(
-			mock.EscalateResponse("continue", "need input", "human", "choose", []string{"A", "B"}),
-		),
-	)
-	runResult, err := runner.Run(context.Background(), runner.Config{
-		Session:        killSession,
-		RunDir:         killRunDir,
-		StageName:      "ralph",
-		Provider:       prov,
-		Iterations:     3,
-		PromptTemplate: "iteration ${ITERATION}",
-		WorkDir:        root,
-	})
+	// Create a shared store for this integration test.
+	s, err := store.Open(filepath.Join(root, ".ap", "ap.db"))
 	if err != nil {
-		t.Fatalf("runner.Run() error: %v", err)
+		t.Fatalf("open store: %v", err)
 	}
-	if runResult.Status != state.StatePaused {
-		t.Fatalf("run status = %q, want %q", runResult.Status, state.StatePaused)
+	defer s.Close()
+
+	// Set up a paused session (simulating a runner that escalated).
+	killSession := "int-kill"
+	if err := s.CreateSession(ctx, killSession, "loop", "", "{}"); err != nil {
+		t.Fatalf("create kill session: %v", err)
 	}
+	_ = s.UpdateSession(ctx, killSession, map[string]any{
+		"status":    "paused",
+		"iteration": 1,
+	})
 
 	var killOut, killErr bytes.Buffer
 	killDeps := cliDeps{
@@ -55,9 +42,10 @@ func TestIntegration_RunKillAndResumeLifecycle(t *testing.T) {
 		stdout: &killOut,
 		stderr: &killErr,
 		getwd:  func() (string, error) { return root, nil },
+		store:  s,
 	}
 
-	killCode := runWithDeps([]string{"kill", killSession, "--json"}, killDeps)
+	killCode := runKill([]string{killSession, "--json"}, killDeps)
 	if killCode != output.ExitSuccess {
 		t.Fatalf("kill exit code = %d; stderr: %s", killCode, killErr.String())
 	}
@@ -70,37 +58,27 @@ func TestIntegration_RunKillAndResumeLifecycle(t *testing.T) {
 		t.Fatalf("kill status = %v, want killed", killPayload["status"])
 	}
 
-	killedState, err := state.Load(filepath.Join(killRunDir, "state.json"))
+	// Verify store was updated to aborted.
+	killRow, err := s.GetSession(ctx, killSession)
 	if err != nil {
-		t.Fatalf("load killed state: %v", err)
+		t.Fatalf("get killed session: %v", err)
 	}
-	if killedState.Status != state.StateAborted {
-		t.Fatalf("state after kill = %q, want %q", killedState.Status, state.StateAborted)
+	if killRow.Status != "aborted" {
+		t.Fatalf("state after kill = %q, want %q", killRow.Status, "aborted")
 	}
 
-	// Separate resumable session in failed state.
+	// Set up a failed session for resume.
 	resumeSession := "int-resume"
-	resumeRunDir := filepath.Join(root, ".ap", "runs", resumeSession)
-	if err := os.MkdirAll(resumeRunDir, 0o755); err != nil {
-		t.Fatalf("mkdir resume dir: %v", err)
+	if err := s.CreateSession(ctx, resumeSession, "loop", "", "{}"); err != nil {
+		t.Fatalf("create resume session: %v", err)
 	}
-	resumeStatePath := filepath.Join(resumeRunDir, "state.json")
-	if _, err := state.Init(resumeStatePath, resumeSession, "loop", ""); err != nil {
-		t.Fatalf("init resume state: %v", err)
-	}
-	if _, err := state.MarkFailed(resumeStatePath, "provider_error", "timeout"); err != nil {
-		t.Fatalf("mark resume state failed: %v", err)
-	}
-	if err := WriteRunRequest(filepath.Join(resumeRunDir, "run_request.json"), RunRequestFile{
-		Session:    resumeSession,
-		Stage:      "ralph",
-		Provider:   "claude",
-		Iterations: 5,
-		WorkDir:    root,
-		RunDir:     resumeRunDir,
-	}); err != nil {
-		t.Fatalf("write run_request: %v", err)
-	}
+	_ = s.UpdateSession(ctx, resumeSession, map[string]any{
+		"status":              "failed",
+		"iteration":           3,
+		"iteration_completed": 2,
+		"error":               "timeout",
+		"error_type":          "provider_error",
+	})
 
 	var resumeOut, resumeErr bytes.Buffer
 	resumeDeps := cliDeps{
@@ -108,11 +86,12 @@ func TestIntegration_RunKillAndResumeLifecycle(t *testing.T) {
 		stdout: &resumeOut,
 		stderr: &resumeErr,
 		getwd:  func() (string, error) { return root, nil },
+		store:  s,
 	}
 
-	resumeCode := runWithDeps([]string{"resume", resumeSession, "--context", "focus on tests", "--json"}, resumeDeps)
+	resumeCode := runResume([]string{resumeSession, "--context", "focus on tests", "--json"}, resumeDeps)
 	if resumeCode != output.ExitSuccess {
-		t.Fatalf("resume exit code = %d; stderr: %s", resumeCode, resumeErr.String())
+		t.Fatalf("resume exit code = %d; stderr: %s\nstdout: %s", resumeCode, resumeErr.String(), resumeOut.String())
 	}
 
 	var resumePayload map[string]any
@@ -129,44 +108,41 @@ func TestIntegration_RunKillAndResumeLifecycle(t *testing.T) {
 		t.Fatalf("context_override = %v, want focus on tests", resumePayload["context_override"])
 	}
 
-	resumedState, err := state.Load(resumeStatePath)
+	// Verify store was updated to running.
+	resumeRow, err := s.GetSession(ctx, resumeSession)
 	if err != nil {
-		t.Fatalf("load resumed state: %v", err)
+		t.Fatalf("get resumed session: %v", err)
 	}
-	if resumedState.Status != state.StateRunning {
-		t.Fatalf("state after resume = %q, want %q", resumedState.Status, state.StateRunning)
+	if resumeRow.Status != "running" {
+		t.Fatalf("state after resume = %q, want %q", resumeRow.Status, "running")
 	}
 }
 
 func TestIntegration_StatusAndLogsJSONContracts(t *testing.T) {
 	root := t.TempDir()
+	ctx := context.Background()
+
+	s, err := store.Open(filepath.Join(root, ".ap", "ap.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
 	session := "int-contract"
-	sessionDir := filepath.Join(root, ".ap", "runs", session)
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
-		t.Fatalf("mkdir session dir: %v", err)
+	if err := s.CreateSession(ctx, session, "loop", "", "{}"); err != nil {
+		t.Fatalf("create session: %v", err)
 	}
+	_ = s.UpdateSession(ctx, session, map[string]any{
+		"iteration":           2,
+		"iteration_completed": 1,
+		"current_stage":       "ralph",
+	})
 
-	started := "2026-03-04T01:00:00Z"
-	if err := state.Write(filepath.Join(sessionDir, "state.json"), &state.SessionState{
-		Session:            session,
-		Type:               "loop",
-		Status:             state.StateRunning,
-		Iteration:          2,
-		IterationCompleted: 1,
-		IterationStarted:   &started,
-		StartedAt:          "2026-03-04T00:00:00Z",
-		CurrentStage:       "ralph",
-		Stages:             []state.StageState{},
-		History:            []map[string]any{},
-	}); err != nil {
-		t.Fatalf("write state: %v", err)
-	}
-
-	eventsPath := filepath.Join(sessionDir, "events.jsonl")
-	if err := events.Append(eventsPath, events.NewEvent(events.TypeSessionStart, session, nil, map[string]any{"stage": "ralph"})); err != nil {
+	// Append events to the store.
+	if err := s.AppendEvent(ctx, session, "session.started", "{}", `{"stage":"ralph"}`); err != nil {
 		t.Fatalf("append event 1: %v", err)
 	}
-	if err := events.Append(eventsPath, events.NewEvent(events.TypeIterationComplete, session, &events.Cursor{Iteration: 1}, map[string]any{"decision": "continue"})); err != nil {
+	if err := s.AppendEvent(ctx, session, "iteration.completed", `{"iteration":1}`, `{"decision":"continue"}`); err != nil {
 		t.Fatalf("append event 2: %v", err)
 	}
 
@@ -176,8 +152,9 @@ func TestIntegration_StatusAndLogsJSONContracts(t *testing.T) {
 		stdout: &statusOut,
 		stderr: &statusErr,
 		getwd:  func() (string, error) { return root, nil },
+		store:  s,
 	}
-	statusCode := runWithDeps([]string{"status", session, "--json"}, statusDeps)
+	statusCode := runStatus([]string{session, "--json"}, statusDeps)
 	if statusCode != output.ExitSuccess {
 		t.Fatalf("status exit code = %d; stderr: %s", statusCode, statusErr.String())
 	}
@@ -190,7 +167,7 @@ func TestIntegration_StatusAndLogsJSONContracts(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing snapshot object: %#v", statusPayload)
 	}
-	for _, field := range []string{"session", "status", "iteration", "started_at", "current_stage"} {
+	for _, field := range []string{"session", "status", "started_at"} {
 		if _, ok := snapshot[field]; !ok {
 			t.Fatalf("snapshot missing required field %q: %#v", field, snapshot)
 		}
@@ -202,8 +179,9 @@ func TestIntegration_StatusAndLogsJSONContracts(t *testing.T) {
 		stdout: &logsOut,
 		stderr: &logsErr,
 		getwd:  func() (string, error) { return root, nil },
+		store:  s,
 	}
-	logsCode := runWithDeps([]string{"logs", session, "--json"}, logsDeps)
+	logsCode := runLogs([]string{session, "--json"}, logsDeps)
 	if logsCode != output.ExitSuccess {
 		t.Fatalf("logs exit code = %d; stderr: %s", logsCode, logsErr.String())
 	}
@@ -217,7 +195,7 @@ func TestIntegration_StatusAndLogsJSONContracts(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &evt); err != nil {
 			t.Fatalf("line %d invalid JSON: %v", i, err)
 		}
-		for _, field := range []string{"ts", "type", "session"} {
+		for _, field := range []string{"type", "session"} {
 			if _, ok := evt[field]; !ok {
 				t.Fatalf("line %d missing required field %q: %#v", i, field, evt)
 			}

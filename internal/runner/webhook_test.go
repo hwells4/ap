@@ -7,17 +7,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/hwells4/ap/internal/config"
-	"github.com/hwells4/ap/internal/events"
 	"github.com/hwells4/ap/internal/mock"
 	"github.com/hwells4/ap/internal/signals"
-	"github.com/hwells4/ap/internal/state"
+	"github.com/hwells4/ap/internal/store"
 )
 
 func TestWebhookHandler_PayloadSchema(t *testing.T) {
@@ -36,11 +33,7 @@ func TestWebhookHandler_PayloadSchema(t *testing.T) {
 	}))
 	defer server.Close()
 
-	root := t.TempDir()
-	runDir := filepath.Join(root, ".ap", "runs", "webhook-schema")
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		t.Fatalf("mkdir run dir: %v", err)
-	}
+	runDir, s := tempSession(t)
 
 	prov := mock.New(
 		mock.WithResponses(
@@ -58,6 +51,7 @@ func TestWebhookHandler_PayloadSchema(t *testing.T) {
 		PromptTemplate:       "iteration ${ITERATION}",
 		SignalHandlerTimeout: 5 * time.Second,
 		SignalOutput:         &stdout,
+		Store:                s,
 		EscalateHandlers: []config.SignalHandler{
 			{
 				Type: "webhook",
@@ -72,7 +66,7 @@ func TestWebhookHandler_PayloadSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
-	if res.Status != state.StatePaused {
+	if res.Status != store.StatusPaused {
 		t.Fatalf("status = %q, want paused", res.Status)
 	}
 
@@ -121,13 +115,13 @@ func TestWebhookHandler_CallbackFieldsIncluded(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tmpDir := t.TempDir()
-	eventsPath := filepath.Join(tmpDir, "events.jsonl")
-	ew := events.NewWriter(eventsPath)
+	s := mustOpenStore(t)
+	session := "callback-test"
+	s.CreateSession(t.Context(), session, "stage", "test", "{}")
 
 	err := dispatchSignalHandlers(dispatchSignalInput{
-		Writer:        ew,
-		Session:       "callback-test",
+		Store:         s,
+		Session:       session,
 		Stage:         "ralph",
 		Iteration:     1,
 		SignalID:      "sig-1-escalate-0",
@@ -164,13 +158,13 @@ func TestWebhookHandler_CallbackFieldsOmittedWhenEmpty(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tmpDir := t.TempDir()
-	eventsPath := filepath.Join(tmpDir, "events.jsonl")
-	ew := events.NewWriter(eventsPath)
+	s := mustOpenStore(t)
+	session := "no-callback"
+	s.CreateSession(t.Context(), session, "stage", "test", "{}")
 
 	err := dispatchSignalHandlers(dispatchSignalInput{
-		Writer:     ew,
-		Session:    "no-callback",
+		Store:      s,
+		Session:    session,
 		Stage:      "ralph",
 		Iteration:  1,
 		SignalID:   "sig-1-escalate-0",
@@ -204,13 +198,13 @@ func TestWebhookHandler_HTTPErrorReportsHandlerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tmpDir := t.TempDir()
-	eventsPath := filepath.Join(tmpDir, "events.jsonl")
-	ew := events.NewWriter(eventsPath)
+	s := mustOpenStore(t)
+	session := "http-error"
+	s.CreateSession(t.Context(), session, "stage", "test", "{}")
 
 	err := dispatchSignalHandlers(dispatchSignalInput{
-		Writer:     ew,
-		Session:    "http-error",
+		Store:      s,
+		Session:    session,
 		Stage:      "ralph",
 		Iteration:  2,
 		SignalID:   "sig-2-escalate-0",
@@ -228,15 +222,16 @@ func TestWebhookHandler_HTTPErrorReportsHandlerError(t *testing.T) {
 	}
 
 	// Verify signal.handler.error event was emitted.
-	evts := readEventsFromPath(t, eventsPath)
-	handlerErrors := filterByType(evts, events.TypeSignalHandlerError)
+	evts := readEvents(t, s, session)
+	handlerErrors := filterByType(evts, store.TypeSignalHandlerError)
 	if len(handlerErrors) != 1 {
 		t.Fatalf("signal.handler.error count = %d, want 1", len(handlerErrors))
 	}
-	if handlerErrors[0].Data["handler_type"] != "webhook" {
-		t.Fatalf("handler_type = %v, want webhook", handlerErrors[0].Data["handler_type"])
+	errData := parseEventData(t, handlerErrors[0])
+	if errData["handler_type"] != "webhook" {
+		t.Fatalf("handler_type = %v, want webhook", errData["handler_type"])
 	}
-	errStr, _ := handlerErrors[0].Data["error"].(string)
+	errStr, _ := errData["error"].(string)
 	if !strings.Contains(errStr, "503") {
 		t.Fatalf("error should contain status 503, got %q", errStr)
 	}
@@ -251,14 +246,14 @@ func TestWebhookHandler_TimeoutReportsHandlerError(t *testing.T) {
 	defer server.Close()
 	defer close(done)
 
-	tmpDir := t.TempDir()
-	eventsPath := filepath.Join(tmpDir, "events.jsonl")
-	ew := events.NewWriter(eventsPath)
+	s := mustOpenStore(t)
+	session := "timeout-test"
+	s.CreateSession(t.Context(), session, "stage", "test", "{}")
 
 	started := time.Now()
 	err := dispatchSignalHandlers(dispatchSignalInput{
-		Writer:     ew,
-		Session:    "timeout-test",
+		Store:      s,
+		Session:    session,
 		Stage:      "ralph",
 		Iteration:  1,
 		SignalID:   "sig-1-escalate-0",
@@ -280,8 +275,8 @@ func TestWebhookHandler_TimeoutReportsHandlerError(t *testing.T) {
 		t.Fatalf("timeout took too long: %v", elapsed)
 	}
 
-	evts := readEventsFromPath(t, eventsPath)
-	handlerErrors := filterByType(evts, events.TypeSignalHandlerError)
+	evts := readEvents(t, s, session)
+	handlerErrors := filterByType(evts, store.TypeSignalHandlerError)
 	if len(handlerErrors) != 1 {
 		t.Fatalf("signal.handler.error count = %d, want 1", len(handlerErrors))
 	}
@@ -297,13 +292,13 @@ func TestWebhookHandler_SpawnPayloadIncludesChildSession(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tmpDir := t.TempDir()
-	eventsPath := filepath.Join(tmpDir, "events.jsonl")
-	ew := events.NewWriter(eventsPath)
+	s := mustOpenStore(t)
+	session := "parent-session"
+	s.CreateSession(t.Context(), session, "stage", "test", "{}")
 
 	err := dispatchSignalHandlers(dispatchSignalInput{
-		Writer:       ew,
-		Session:      "parent-session",
+		Store:        s,
+		Session:      session,
 		Stage:        "ralph",
 		Iteration:    1,
 		SignalID:     "sig-1-spawn-0",
@@ -327,25 +322,4 @@ func TestWebhookHandler_SpawnPayloadIncludesChildSession(t *testing.T) {
 	if capturedPayload.ChildStage != "refine:5" {
 		t.Fatalf("child_stage = %q, want refine:5", capturedPayload.ChildStage)
 	}
-}
-
-// readEventsFromPath reads events from a specific events.jsonl path.
-func readEventsFromPath(t *testing.T, path string) []events.Event {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read events: %v", err)
-	}
-	var evts []events.Event
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var ev events.Event
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			t.Fatalf("parse event: %v", err)
-		}
-		evts = append(evts, ev)
-	}
-	return evts
 }

@@ -1,8 +1,9 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -10,7 +11,7 @@ import (
 	"github.com/hwells4/ap/internal/output"
 	"github.com/hwells4/ap/internal/runner"
 	"github.com/hwells4/ap/internal/session"
-	"github.com/hwells4/ap/internal/state"
+	"github.com/hwells4/ap/internal/store"
 )
 
 func runKill(args []string, deps cliDeps) int {
@@ -26,10 +27,7 @@ func runKill(args []string, deps cliDeps) int {
 		}
 	}
 
-	runsDir := filepath.Join(projectRoot, ".ap", "runs")
 	locksDir := filepath.Join(projectRoot, ".ap", "locks")
-	sessionDir := filepath.Join(runsDir, sessionName)
-	statePath := filepath.Join(sessionDir, "state.json")
 
 	wasRunning := false
 	var childrenKilled []string
@@ -46,27 +44,30 @@ func runKill(args []string, deps cliDeps) int {
 		_ = launcher.Kill(sessionName)
 	}
 
-	// Update state.json if it exists.
-	if _, err := os.Stat(statePath); err == nil {
-		st, loadErr := state.Load(statePath)
-		if loadErr == nil {
-			switch st.Status {
-			case state.StateCompleted, state.StateFailed, state.StateAborted:
+	ctx := context.Background()
+
+	// Update session state via store.
+	if deps.store != nil {
+		row, storeErr := deps.store.GetSession(ctx, sessionName)
+		if storeErr == nil {
+			switch row.Status {
+			case "completed", "failed", "aborted":
 				// Already terminal — nothing to do.
 			default:
 				wasRunning = true
-				_, _ = state.Update(statePath, func(s *state.SessionState) error {
-					s.Status = state.StateAborted
-					return nil
+				_ = deps.store.UpdateSession(ctx, sessionName, map[string]any{
+					"status": "aborted",
 				})
 			}
-
 			// Cascade kill to child sessions.
-			for _, child := range st.ChildSessions {
-				if killChildSession(runsDir, locksDir, child, launcher) {
+			children, _ := deps.store.GetChildren(ctx, sessionName)
+			for _, child := range children {
+				if killChildSessionStore(ctx, deps.store, locksDir, child, launcher) {
 					childrenKilled = append(childrenKilled, child)
 				}
 			}
+		} else if !errors.Is(storeErr, store.ErrNotFound) {
+			_, _ = fmt.Fprintf(deps.stderr, "warning: store error: %v\n", storeErr)
 		}
 	}
 
@@ -124,27 +125,22 @@ func runKill(args []string, deps cliDeps) int {
 	return output.ExitSuccess
 }
 
-// killChildSession attempts to abort a child session. Returns true if the
-// child was running and was successfully aborted.
-func killChildSession(runsDir, locksDir, child string, launcher session.Launcher) bool {
-	childStatePath := filepath.Join(runsDir, child, "state.json")
-	if _, err := os.Stat(childStatePath); err != nil {
-		return false
-	}
-	st, err := state.Load(childStatePath)
+// killChildSessionStore attempts to abort a child session via the store.
+// Returns true if the child was running and was successfully aborted.
+func killChildSessionStore(ctx context.Context, s *store.Store, locksDir, child string, launcher session.Launcher) bool {
+	row, err := s.GetSession(ctx, child)
 	if err != nil {
 		return false
 	}
-	switch st.Status {
-	case state.StateCompleted, state.StateFailed, state.StateAborted:
+	switch row.Status {
+	case "completed", "failed", "aborted":
 		return false // already terminal
 	}
 	if launcher != nil && launcher.Available() {
 		_ = launcher.Kill(child)
 	}
-	_, _ = state.Update(childStatePath, func(s *state.SessionState) error {
-		s.Status = state.StateAborted
-		return nil
+	_ = s.UpdateSession(ctx, child, map[string]any{
+		"status": "aborted",
 	})
 	lk, err := lock.Acquire(locksDir, child)
 	if err == nil {

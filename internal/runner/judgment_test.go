@@ -2,21 +2,16 @@ package runner
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 
-	"github.com/hwells4/ap/internal/events"
 	"github.com/hwells4/ap/internal/mock"
-	"github.com/hwells4/ap/internal/state"
+	"github.com/hwells4/ap/internal/store"
 )
 
 func TestRun_JudgmentStopsOnConsensus(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
-	// Agent says "continue" for 5 iterations, but judge says "stop" twice.
 	agentProv := mock.New(mock.WithFallback(mock.ContinueResponse("working")))
-
-	// Judge returns stop verdict as JSON in stdout.
 	judgeProv := mock.New(mock.WithFallback(mock.Response{
 		Stdout: `{"decision":"stop","confidence":0.9,"rationale":"task complete"}`,
 	}))
@@ -31,29 +26,28 @@ func TestRun_JudgmentStopsOnConsensus(t *testing.T) {
 		JudgeProvider:      judgeProv,
 		JudgeConsensus:     2,
 		JudgeMinIterations: 1,
+		Store:              s,
 	})
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	// Should stop after 2 iterations (consensus=2, judge always says stop).
 	if res.Iterations != 2 {
 		t.Errorf("iterations = %d, want 2", res.Iterations)
 	}
-	if res.Status != state.StateCompleted {
+	if res.Status != store.StatusCompleted {
 		t.Errorf("status = %v, want completed", res.Status)
 	}
 
-	// Verify judge verdict events were emitted.
-	evts := readEvents(t, runDir)
-	verdicts := filterByType(evts, events.TypeJudgeVerdict)
+	evts := readEvents(t, s, "judgment-consensus")
+	verdicts := filterByType(evts, store.TypeJudgeVerdict)
 	if len(verdicts) < 1 {
 		t.Error("expected at least one judge.verdict event")
 	}
 }
 
 func TestRun_JudgmentContinueDoesNotStop(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	agentProv := mock.New(mock.WithFallback(mock.ContinueResponse("working")))
 	judgeProv := mock.New(mock.WithFallback(mock.Response{
@@ -70,19 +64,19 @@ func TestRun_JudgmentContinueDoesNotStop(t *testing.T) {
 		JudgeProvider:      judgeProv,
 		JudgeConsensus:     2,
 		JudgeMinIterations: 1,
+		Store:              s,
 	})
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	// Judge always says continue, so we should complete all 3 iterations.
 	if res.Iterations != 3 {
 		t.Errorf("iterations = %d, want 3", res.Iterations)
 	}
 }
 
 func TestRun_JudgmentRespectsMinIterations(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	agentProv := mock.New(mock.WithFallback(mock.ContinueResponse("working")))
 	judgeProv := mock.New(mock.WithFallback(mock.Response{
@@ -99,21 +93,20 @@ func TestRun_JudgmentRespectsMinIterations(t *testing.T) {
 		JudgeProvider:      judgeProv,
 		JudgeConsensus:     1,
 		JudgeMinIterations: 5,
+		Store:              s,
 	})
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	// Min iterations = 5, consensus = 1, so should stop at iteration 5.
 	if res.Iterations != 5 {
 		t.Errorf("iterations = %d, want 5", res.Iterations)
 	}
 }
 
 func TestRun_JudgmentFallbackToFixed(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
-	// Agent stops at iteration 4.
 	agentProv := mock.New(mock.WithResponses(
 		mock.ContinueResponse("iter 1"),
 		mock.ContinueResponse("iter 2"),
@@ -121,7 +114,6 @@ func TestRun_JudgmentFallbackToFixed(t *testing.T) {
 		mock.StopResponse("done", "finished"),
 	))
 
-	// Judge always returns garbage → 3 failures → fallback.
 	judgeProv := mock.New(mock.WithFallback(mock.Response{
 		Stdout: "this is not json at all",
 	}))
@@ -136,28 +128,26 @@ func TestRun_JudgmentFallbackToFixed(t *testing.T) {
 		JudgeProvider:      judgeProv,
 		JudgeConsensus:     1,
 		JudgeMinIterations: 1,
-		JudgeMaxRetries:    1, // 1 retry per judge call → fails quickly
+		JudgeMaxRetries:    1,
+		Store:              s,
 	})
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	// After 3 judge failures, falls back to fixed strategy.
-	// Agent says stop at iteration 4.
 	if res.Iterations != 4 {
 		t.Errorf("iterations = %d, want 4", res.Iterations)
 	}
 
-	// Verify fallback event was emitted.
-	evts := readEvents(t, runDir)
-	fallbacks := filterByType(evts, events.TypeJudgeFallback)
+	evts := readEvents(t, s, "judgment-fallback")
+	fallbacks := filterByType(evts, store.TypeJudgeFallback)
 	if len(fallbacks) != 1 {
 		t.Errorf("judge.fallback events = %d, want 1", len(fallbacks))
 	}
 }
 
 func TestRun_WithoutJudge_UsesFixedOnly(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	agentProv := mock.New(mock.WithFallback(mock.ContinueResponse("working")))
 
@@ -168,7 +158,7 @@ func TestRun_WithoutJudge_UsesFixedOnly(t *testing.T) {
 		Provider:       agentProv,
 		Iterations:     3,
 		PromptTemplate: "iteration ${ITERATION}",
-		// No JudgeProvider — fixed strategy only.
+		Store:          s,
 	})
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
@@ -178,16 +168,15 @@ func TestRun_WithoutJudge_UsesFixedOnly(t *testing.T) {
 		t.Errorf("iterations = %d, want 3", res.Iterations)
 	}
 
-	// No judge events should exist.
-	evts := readEvents(t, runDir)
-	verdicts := filterByType(evts, events.TypeJudgeVerdict)
+	evts := readEvents(t, s, "no-judge")
+	verdicts := filterByType(evts, store.TypeJudgeVerdict)
 	if len(verdicts) != 0 {
 		t.Errorf("judge.verdict events = %d, want 0", len(verdicts))
 	}
 }
 
 func TestRun_JudgmentVerdictEventData(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
 	agentProv := mock.New(mock.WithFallback(mock.ContinueResponse("working")))
 	judgeProv := mock.New(mock.WithResponses(
@@ -206,23 +195,15 @@ func TestRun_JudgmentVerdictEventData(t *testing.T) {
 		JudgeProvider:      judgeProv,
 		JudgeConsensus:     2,
 		JudgeMinIterations: 1,
+		Store:              s,
 	})
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	evts := readEvents(t, runDir)
-	verdicts := filterByType(evts, events.TypeJudgeVerdict)
+	evts := readEvents(t, s, "verdict-data")
+	verdicts := filterByType(evts, store.TypeJudgeVerdict)
 
-	// First verdict: continue, consecutive_stops = 0
-	if len(verdicts) < 1 {
-		t.Fatal("expected at least 1 verdict event")
-	}
-	if stops, _ := verdicts[0].Data["consecutive_stops"].(json.Number); stops.String() != "0" {
-		// json.Number for numbers from json.Unmarshal
-	}
-
-	// Should have emitted at least 2 verdict events (continue + stop + stop).
 	if len(verdicts) < 2 {
 		t.Errorf("verdict events = %d, want >= 2", len(verdicts))
 	}

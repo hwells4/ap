@@ -13,8 +13,6 @@ import (
 // Vars contains supported template variables.
 type Vars struct {
 	CTX           string
-	STATUS        string
-	RESULT        string
 	PROGRESS      string
 	OUTPUT        string
 	SESSION       string
@@ -36,8 +34,6 @@ func ResolveTemplate(template string, vars Vars) string {
 		value string
 	}{
 		{"CTX", vars.CTX},
-		{"STATUS", vars.STATUS},
-		{"RESULT", vars.RESULT},
 		{"PROGRESS", vars.PROGRESS},
 		{"OUTPUT", vars.OUTPUT},
 		{"SESSION", vars.SESSION},
@@ -93,8 +89,6 @@ func VarsFromContext(path string) (Vars, error) {
 		Paths     struct {
 			Progress string `json:"progress"`
 			Output   string `json:"output"`
-			Status   string `json:"status"`
-			Result   string `json:"result"`
 			Messages string `json:"messages"`
 		} `json:"paths"`
 	}
@@ -109,8 +103,6 @@ func VarsFromContext(path string) (Vars, error) {
 
 	vars := Vars{
 		CTX:           path,
-		STATUS:        payload.Paths.Status,
-		RESULT:        payload.Paths.Result,
 		PROGRESS:      payload.Paths.Progress,
 		OUTPUT:        payload.Paths.Output,
 		SESSION:       payload.Session,
@@ -151,8 +143,6 @@ func VarsFromLegacyJSON(raw []byte) (Vars, error) {
 		PROGRESS_FILE: get("progress_file"),
 		CONTEXT:       get("context"),
 		CTX:           get("context_file"),
-		STATUS:        get("status_file"),
-		RESULT:        get("result_file"),
 	}
 	return vars.normalized(), nil
 }

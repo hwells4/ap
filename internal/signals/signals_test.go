@@ -112,3 +112,16 @@ func TestParseInvalidSpawnUnknownField(t *testing.T) {
 		t.Fatalf("error = %q", got)
 	}
 }
+
+func TestParseSpawnProjectRoot(t *testing.T) {
+	parsed, err := Parse(json.RawMessage(`{"spawn":[{"run":"ralph","session":"child","project_root":"../other"}]}`))
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	if len(parsed.Spawn) != 1 {
+		t.Fatalf("spawn count = %d, want 1", len(parsed.Spawn))
+	}
+	if parsed.Spawn[0].ProjectRoot != "../other" {
+		t.Fatalf("project_root = %q, want %q", parsed.Spawn[0].ProjectRoot, "../other")
+	}
+}

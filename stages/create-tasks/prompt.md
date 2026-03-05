@@ -92,25 +92,20 @@ Created N beads from plan:
 - [Key dependencies established]
 ```
 
-### Step 6: Write Result
+### Step 6: Write Decision
 
-```bash
-cat > ${RESULT} << 'EOF'
+When you are done, output your decision in a fenced block:
+
+```ap-result
 {
+  "decision": "stop",
   "summary": "Created initial beads from plan",
   "work": {
     "items_completed": [],
     "files_touched": []
   },
-  "artifacts": {
-    "outputs": [],
-    "paths": []
-  },
-  "signals": {
-    "plateau_suspected": false,
-    "risk": "low",
-    "notes": "Tasks created, ready for refinement"
-  }
+  "errors": []
 }
-EOF
 ```
+
+Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).

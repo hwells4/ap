@@ -2,67 +2,52 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/hwells4/ap/internal/output"
-	"github.com/hwells4/ap/internal/state"
+	"github.com/hwells4/ap/internal/store"
 )
 
-// setupResumeSession creates .ap/runs/{session}/ with state.json and run_request.json.
-func setupResumeSession(t *testing.T, session string, st *state.SessionState) string {
+// setupResumeStore creates an in-memory store with a session in the given status.
+func setupResumeStore(t *testing.T, session, status string, iteration, iterCompleted int) *store.Store {
 	t.Helper()
-	dir := t.TempDir()
-	sessionDir := filepath.Join(dir, ".ap", "runs", session)
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+	s, err := store.Open(":memory:")
+	if err != nil {
 		t.Fatal(err)
 	}
-	statePath := filepath.Join(sessionDir, "state.json")
-	if err := state.Write(statePath, st); err != nil {
+	ctx := context.Background()
+	if err := s.CreateSession(ctx, session, "loop", "", "{}"); err != nil {
 		t.Fatal(err)
 	}
-	// Write a minimal run_request.json.
-	reqPath := filepath.Join(sessionDir, "run_request.json")
-	reqData := RunRequestFile{
-		Session:        session,
-		Stage:          "ralph",
-		Provider:       "claude",
-		Model:          "",
-		Iterations:     10,
-		PromptTemplate: "Run iteration ${ITERATION}",
-		WorkDir:        dir,
-		RunDir:         sessionDir,
+	updates := map[string]any{
+		"iteration":           iteration,
+		"iteration_completed": iterCompleted,
 	}
-	if err := WriteRunRequest(reqPath, reqData); err != nil {
+	if status != "running" {
+		updates["status"] = status
+	}
+	if err := s.UpdateSession(ctx, session, updates); err != nil {
 		t.Fatal(err)
 	}
-	return dir
+	return s
 }
 
 func TestResumePausedSession(t *testing.T) {
-	dir := setupResumeSession(t, "paused-sess", &state.SessionState{
-		Session:            "paused-sess",
-		Type:               "loop",
-		Status:             state.StatePaused,
-		Iteration:          5,
-		IterationCompleted: 4,
-		StartedAt:          "2026-03-04T00:00:00Z",
-		CurrentStage:       "ralph",
-		Stages:             []state.StageState{},
-		History:            []map[string]any{},
-	})
+	s := setupResumeStore(t, "paused-sess", "paused", 5, 4)
+	defer s.Close()
 
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
 		mode:   output.ModeJSON,
 		stdout: &stdout,
 		stderr: &stderr,
-		getwd:  func() (string, error) { return dir, nil },
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"resume", "paused-sess", "--json"}, deps)
+	code := runResume([]string{"paused-sess", "--json"}, deps)
 	if code != output.ExitSuccess {
 		t.Fatalf("exit code = %d; stderr: %s\nstdout: %s", code, stderr.String(), stdout.String())
 	}
@@ -83,30 +68,24 @@ func TestResumePausedSession(t *testing.T) {
 		t.Fatalf("resume_from = %v, want 5", result["resume_from"])
 	}
 
-	updated, err := state.Load(filepath.Join(dir, ".ap", "runs", "paused-sess", "state.json"))
+	// Verify store was updated.
+	row, err := s.GetSession(context.Background(), "paused-sess")
 	if err != nil {
-		t.Fatalf("load resumed state: %v", err)
+		t.Fatalf("get session: %v", err)
 	}
-	if updated.Status != state.StateRunning {
-		t.Fatalf("status after resume = %q, want %q", updated.Status, state.StateRunning)
+	if row.Status != "running" {
+		t.Fatalf("status after resume = %q, want %q", row.Status, "running")
 	}
 }
 
 func TestResumeFailedSession(t *testing.T) {
-	errMsg := "provider crash"
-	errType := "provider_failed"
-	dir := setupResumeSession(t, "failed-sess", &state.SessionState{
-		Session:            "failed-sess",
-		Type:               "loop",
-		Status:             state.StateFailed,
-		Iteration:          3,
-		IterationCompleted: 2,
-		StartedAt:          "2026-03-04T00:00:00Z",
-		CurrentStage:       "ralph",
-		Stages:             []state.StageState{},
-		History:            []map[string]any{},
-		Error:              &errMsg,
-		ErrorType:          &errType,
+	s := setupResumeStore(t, "failed-sess", "failed", 3, 2)
+	defer s.Close()
+	// Set error fields.
+	ctx := context.Background()
+	_ = s.UpdateSession(ctx, "failed-sess", map[string]any{
+		"error":      "provider crash",
+		"error_type": "provider_failed",
 	})
 
 	var stdout, stderr bytes.Buffer
@@ -114,10 +93,11 @@ func TestResumeFailedSession(t *testing.T) {
 		mode:   output.ModeJSON,
 		stdout: &stdout,
 		stderr: &stderr,
-		getwd:  func() (string, error) { return dir, nil },
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"resume", "failed-sess", "--json"}, deps)
+	code := runResume([]string{"failed-sess", "--json"}, deps)
 	if code != output.ExitSuccess {
 		t.Fatalf("exit code = %d; stderr: %s\nstdout: %s", code, stderr.String(), stdout.String())
 	}
@@ -135,37 +115,30 @@ func TestResumeFailedSession(t *testing.T) {
 		t.Fatalf("resume_from = %v, want 3", result["resume_from"])
 	}
 
-	updated, err := state.Load(filepath.Join(dir, ".ap", "runs", "failed-sess", "state.json"))
+	// Verify store was updated.
+	row, err := s.GetSession(ctx, "failed-sess")
 	if err != nil {
-		t.Fatalf("load resumed state: %v", err)
+		t.Fatalf("get session: %v", err)
 	}
-	if updated.Status != state.StateRunning {
-		t.Fatalf("status after resume = %q, want %q", updated.Status, state.StateRunning)
+	if row.Status != "running" {
+		t.Fatalf("status after resume = %q, want %q", row.Status, "running")
 	}
 }
 
 func TestResumeRunningSession(t *testing.T) {
-	dir := setupResumeSession(t, "running-sess", &state.SessionState{
-		Session:            "running-sess",
-		Type:               "loop",
-		Status:             state.StateRunning,
-		Iteration:          2,
-		IterationCompleted: 1,
-		StartedAt:          "2026-03-04T00:00:00Z",
-		CurrentStage:       "ralph",
-		Stages:             []state.StageState{},
-		History:            []map[string]any{},
-	})
+	s := setupResumeStore(t, "running-sess", "running", 2, 1)
+	defer s.Close()
 
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
 		mode:   output.ModeJSON,
 		stdout: &stdout,
 		stderr: &stderr,
-		getwd:  func() (string, error) { return dir, nil },
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"resume", "running-sess", "--json"}, deps)
+	code := runResume([]string{"running-sess", "--json"}, deps)
 	if code != output.ExitSuccess {
 		t.Fatalf("exit code = %d; stderr: %s", code, stderr.String())
 	}
@@ -181,29 +154,19 @@ func TestResumeRunningSession(t *testing.T) {
 }
 
 func TestResumeCompletedSession(t *testing.T) {
-	completedAt := "2026-03-04T02:00:00Z"
-	dir := setupResumeSession(t, "done-sess", &state.SessionState{
-		Session:            "done-sess",
-		Type:               "loop",
-		Status:             state.StateCompleted,
-		Iteration:          10,
-		IterationCompleted: 10,
-		StartedAt:          "2026-03-04T00:00:00Z",
-		CompletedAt:        &completedAt,
-		CurrentStage:       "ralph",
-		Stages:             []state.StageState{},
-		History:            []map[string]any{},
-	})
+	s := setupResumeStore(t, "done-sess", "completed", 10, 10)
+	defer s.Close()
 
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
 		mode:   output.ModeJSON,
 		stdout: &stdout,
 		stderr: &stderr,
-		getwd:  func() (string, error) { return dir, nil },
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"resume", "done-sess", "--json"}, deps)
+	code := runResume([]string{"done-sess", "--json"}, deps)
 	if code != output.ExitInvalidArgs {
 		t.Fatalf("exit code = %d, want %d; stdout: %s", code, output.ExitInvalidArgs, stdout.String())
 	}
@@ -220,17 +183,22 @@ func TestResumeCompletedSession(t *testing.T) {
 }
 
 func TestResumeSessionNotFound(t *testing.T) {
-	dir := t.TempDir()
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
 
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
 		mode:   output.ModeJSON,
 		stdout: &stdout,
 		stderr: &stderr,
-		getwd:  func() (string, error) { return dir, nil },
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"resume", "ghost", "--json"}, deps)
+	code := runResume([]string{"ghost", "--json"}, deps)
 	if code != output.ExitNotFound {
 		t.Fatalf("exit code = %d, want %d", code, output.ExitNotFound)
 	}
@@ -255,34 +223,26 @@ func TestResumeMissingSessionArg(t *testing.T) {
 		getwd:  func() (string, error) { return t.TempDir(), nil },
 	}
 
-	code := runWithDeps([]string{"resume", "--json"}, deps)
+	code := runResume([]string{"--json"}, deps)
 	if code != output.ExitInvalidArgs {
 		t.Fatalf("exit code = %d, want %d", code, output.ExitInvalidArgs)
 	}
 }
 
 func TestResumeWithContextOverride(t *testing.T) {
-	dir := setupResumeSession(t, "ctx-sess", &state.SessionState{
-		Session:            "ctx-sess",
-		Type:               "loop",
-		Status:             state.StatePaused,
-		Iteration:          3,
-		IterationCompleted: 2,
-		StartedAt:          "2026-03-04T00:00:00Z",
-		CurrentStage:       "ralph",
-		Stages:             []state.StageState{},
-		History:            []map[string]any{},
-	})
+	s := setupResumeStore(t, "ctx-sess", "paused", 3, 2)
+	defer s.Close()
 
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
 		mode:   output.ModeJSON,
 		stdout: &stdout,
 		stderr: &stderr,
-		getwd:  func() (string, error) { return dir, nil },
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"resume", "ctx-sess", "--context", "focus on tests", "--json"}, deps)
+	code := runResume([]string{"ctx-sess", "--context", "focus on tests", "--json"}, deps)
 	if code != output.ExitSuccess {
 		t.Fatalf("exit code = %d; stderr: %s\nstdout: %s", code, stderr.String(), stdout.String())
 	}
@@ -301,27 +261,19 @@ func TestResumeWithContextOverride(t *testing.T) {
 }
 
 func TestResumeAbortedSession(t *testing.T) {
-	dir := setupResumeSession(t, "aborted-sess", &state.SessionState{
-		Session:            "aborted-sess",
-		Type:               "loop",
-		Status:             state.StateAborted,
-		Iteration:          5,
-		IterationCompleted: 4,
-		StartedAt:          "2026-03-04T00:00:00Z",
-		CurrentStage:       "ralph",
-		Stages:             []state.StageState{},
-		History:            []map[string]any{},
-	})
+	s := setupResumeStore(t, "aborted-sess", "aborted", 5, 4)
+	defer s.Close()
 
 	var stdout, stderr bytes.Buffer
 	deps := cliDeps{
 		mode:   output.ModeJSON,
 		stdout: &stdout,
 		stderr: &stderr,
-		getwd:  func() (string, error) { return dir, nil },
+		getwd:  func() (string, error) { return t.TempDir(), nil },
+		store:  s,
 	}
 
-	code := runWithDeps([]string{"resume", "aborted-sess", "--json"}, deps)
+	code := runResume([]string{"aborted-sess", "--json"}, deps)
 	if code != output.ExitInvalidArgs {
 		t.Fatalf("exit code = %d, want %d", code, output.ExitInvalidArgs)
 	}

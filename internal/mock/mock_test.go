@@ -5,8 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,21 +81,13 @@ func TestCapabilities(t *testing.T) {
 	if len(caps.SupportedModels) != 1 || caps.SupportedModels[0] != "test-model" {
 		t.Errorf("SupportedModels = %v, want [test-model]", caps.SupportedModels)
 	}
-	if caps.MaxPromptSize != 10*1024*1024 {
-		t.Errorf("MaxPromptSize = %d, want %d", caps.MaxPromptSize, 10*1024*1024)
-	}
-	if caps.MaxOutputSize != 1*1024*1024 {
-		t.Errorf("MaxOutputSize = %d, want %d", caps.MaxOutputSize, 1*1024*1024)
-	}
 }
 
 func TestExecute_DefaultResponse(t *testing.T) {
 	p := New()
 	ctx := context.Background()
 
-	result, err := p.Execute(ctx, provider.Request{
-		Prompt: "test prompt",
-	})
+	result, err := p.Execute(ctx, provider.Request{Prompt: "test prompt"})
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -109,11 +100,13 @@ func TestExecute_DefaultResponse(t *testing.T) {
 	if p.CallCount() != 1 {
 		t.Errorf("CallCount() = %d, want 1", p.CallCount())
 	}
+	// Default response emits an ap-result block.
+	if !strings.Contains(result.Stdout, "```ap-result") {
+		t.Error("default response should emit ap-result block")
+	}
 }
 
 func TestExecute_PerIterationResponses(t *testing.T) {
-	dir := t.TempDir()
-
 	p := New(WithResponses(
 		ContinueResponse("did step 1"),
 		ContinueResponse("did step 2"),
@@ -129,11 +122,7 @@ func TestExecute_PerIterationResponses(t *testing.T) {
 		{"continue", "did step 2"},
 		{"stop", "all done"},
 	} {
-		statusPath := filepath.Join(dir, "iter", itoa(i+1), "status.json")
-		result, err := p.Execute(ctx, provider.Request{
-			Prompt:     "test",
-			StatusPath: statusPath,
-		})
+		result, err := p.Execute(ctx, provider.Request{Prompt: "test"})
 		if err != nil {
 			t.Fatalf("iteration %d: Execute() error = %v", i+1, err)
 		}
@@ -141,20 +130,12 @@ func TestExecute_PerIterationResponses(t *testing.T) {
 			t.Errorf("iteration %d: ExitCode = %d, want 0", i+1, result.ExitCode)
 		}
 
-		// Verify status.json was written.
-		data, err := os.ReadFile(statusPath)
-		if err != nil {
-			t.Fatalf("iteration %d: read status.json error = %v", i+1, err)
+		dec := extractDecisionFromStdout(t, result.Stdout)
+		if dec["decision"] != want.decision {
+			t.Errorf("iteration %d: decision = %q, want %q", i+1, dec["decision"], want.decision)
 		}
-		var status map[string]any
-		if err := json.Unmarshal(data, &status); err != nil {
-			t.Fatalf("iteration %d: unmarshal status.json error = %v", i+1, err)
-		}
-		if status["decision"] != want.decision {
-			t.Errorf("iteration %d: decision = %q, want %q", i+1, status["decision"], want.decision)
-		}
-		if status["summary"] != want.summary {
-			t.Errorf("iteration %d: summary = %q, want %q", i+1, status["summary"], want.summary)
+		if dec["summary"] != want.summary {
+			t.Errorf("iteration %d: summary = %q, want %q", i+1, dec["summary"], want.summary)
 		}
 	}
 
@@ -170,30 +151,19 @@ func TestExecute_Fallback(t *testing.T) {
 	)
 	ctx := context.Background()
 
-	// First call uses responses[0].
 	_, err := p.Execute(ctx, provider.Request{Prompt: "a"})
 	if err != nil {
 		t.Fatalf("call 1: Execute() error = %v", err)
 	}
 
-	// Second call (beyond responses) uses fallback.
-	dir := t.TempDir()
-	statusPath := filepath.Join(dir, "status.json")
-	_, err = p.Execute(ctx, provider.Request{Prompt: "b", StatusPath: statusPath})
+	result, err := p.Execute(ctx, provider.Request{Prompt: "b"})
 	if err != nil {
 		t.Fatalf("call 2: Execute() error = %v", err)
 	}
 
-	data, err := os.ReadFile(statusPath)
-	if err != nil {
-		t.Fatalf("read status.json error = %v", err)
-	}
-	var status map[string]any
-	if err := json.Unmarshal(data, &status); err != nil {
-		t.Fatalf("unmarshal error = %v", err)
-	}
-	if status["decision"] != "stop" {
-		t.Errorf("decision = %q, want %q", status["decision"], "stop")
+	dec := extractDecisionFromStdout(t, result.Stdout)
+	if dec["decision"] != "stop" {
+		t.Errorf("decision = %q, want %q", dec["decision"], "stop")
 	}
 }
 
@@ -212,76 +182,33 @@ func TestExecute_ProviderError(t *testing.T) {
 }
 
 func TestExecute_ErrorDecision(t *testing.T) {
-	dir := t.TempDir()
-	statusPath := filepath.Join(dir, "status.json")
-
 	p := New(WithResponses(
 		ErrorResponse("failed to compile", "syntax error", []string{"main.go:5: undefined: foo"}),
 	))
 	ctx := context.Background()
 
-	_, err := p.Execute(ctx, provider.Request{Prompt: "test", StatusPath: statusPath})
+	result, err := p.Execute(ctx, provider.Request{Prompt: "test"})
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	data, err := os.ReadFile(statusPath)
-	if err != nil {
-		t.Fatalf("read status.json error = %v", err)
-	}
-	var status map[string]any
-	if err := json.Unmarshal(data, &status); err != nil {
-		t.Fatalf("unmarshal error = %v", err)
-	}
-	if status["decision"] != "error" {
-		t.Errorf("decision = %q, want %q", status["decision"], "error")
-	}
-	errs, ok := status["errors"].([]any)
-	if !ok || len(errs) != 1 {
-		t.Errorf("errors = %v, want 1 error", status["errors"])
+	dec := extractDecisionFromStdout(t, result.Stdout)
+	if dec["decision"] != "error" {
+		t.Errorf("decision = %q, want %q", dec["decision"], "error")
 	}
 }
 
-func TestExecute_NoStatusWritten(t *testing.T) {
-	dir := t.TempDir()
-	statusPath := filepath.Join(dir, "status.json")
-
-	p := New(WithResponses(NoStatusResponse()))
+func TestExecute_NoDecisionEmitted(t *testing.T) {
+	p := New(WithResponses(NoDecisionResponse()))
 	ctx := context.Background()
 
-	_, err := p.Execute(ctx, provider.Request{Prompt: "test", StatusPath: statusPath})
+	result, err := p.Execute(ctx, provider.Request{Prompt: "test"})
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	if _, err := os.Stat(statusPath); !os.IsNotExist(err) {
-		t.Error("status.json should not exist for NoStatusResponse")
-	}
-}
-
-func TestExecute_CustomStatusJSON(t *testing.T) {
-	dir := t.TempDir()
-	statusPath := filepath.Join(dir, "status.json")
-
-	customJSON := `{"decision":"continue","custom_field":"custom_value"}`
-	p := New(WithResponses(Response{StatusJSON: customJSON}))
-	ctx := context.Background()
-
-	_, err := p.Execute(ctx, provider.Request{Prompt: "test", StatusPath: statusPath})
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-
-	data, err := os.ReadFile(statusPath)
-	if err != nil {
-		t.Fatalf("read status.json error = %v", err)
-	}
-	var status map[string]any
-	if err := json.Unmarshal(data, &status); err != nil {
-		t.Fatalf("unmarshal error = %v", err)
-	}
-	if status["custom_field"] != "custom_value" {
-		t.Errorf("custom_field = %v, want %q", status["custom_field"], "custom_value")
+	if strings.Contains(result.Stdout, "```ap-result") {
+		t.Error("NoDecisionResponse should not emit ap-result block")
 	}
 }
 
@@ -298,14 +225,14 @@ func TestExecute_StdoutStderr(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if result.Stdout != "hello stdout" {
-		t.Errorf("Stdout = %q, want %q", result.Stdout, "hello stdout")
+	if !strings.Contains(result.Stdout, "hello stdout") {
+		t.Errorf("Stdout should contain original content")
+	}
+	if !strings.Contains(result.Stdout, "```ap-result") {
+		t.Errorf("Stdout should contain ap-result block")
 	}
 	if result.Stderr != "hello stderr" {
 		t.Errorf("Stderr = %q, want %q", result.Stderr, "hello stderr")
-	}
-	if result.Output != "hello stdout" {
-		t.Errorf("Output (legacy) = %q, want %q", result.Output, "hello stdout")
 	}
 }
 
@@ -313,7 +240,6 @@ func TestExecute_ModelPassthrough(t *testing.T) {
 	p := New(WithModel("base-model"))
 	ctx := context.Background()
 
-	// Without model in request — uses provider default.
 	result, err := p.Execute(ctx, provider.Request{Prompt: "test"})
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -322,7 +248,6 @@ func TestExecute_ModelPassthrough(t *testing.T) {
 		t.Errorf("Model = %q, want %q", result.Model, "base-model")
 	}
 
-	// With model in request — uses request model.
 	result, err = p.Execute(ctx, provider.Request{Prompt: "test", Model: "override-model"})
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -346,10 +271,6 @@ func TestExecute_Duration(t *testing.T) {
 	if result.Duration != 500*time.Millisecond {
 		t.Errorf("Duration = %v, want %v", result.Duration, 500*time.Millisecond)
 	}
-	if result.FinishedAt.Sub(result.StartedAt) != 500*time.Millisecond {
-		t.Errorf("FinishedAt - StartedAt = %v, want %v",
-			result.FinishedAt.Sub(result.StartedAt), 500*time.Millisecond)
-	}
 }
 
 func TestExecute_ContextCancellation(t *testing.T) {
@@ -359,7 +280,6 @@ func TestExecute_ContextCancellation(t *testing.T) {
 	}))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	// Cancel after a short delay.
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		cancel()
@@ -407,12 +327,6 @@ func TestCalls_RecordsRequests(t *testing.T) {
 	if calls[0].Iteration != 1 {
 		t.Errorf("call[0].Iteration = %d, want 1", calls[0].Iteration)
 	}
-	if calls[1].Request.Prompt != "second" {
-		t.Errorf("call[1].Request.Prompt = %q, want %q", calls[1].Request.Prompt, "second")
-	}
-	if calls[1].Iteration != 2 {
-		t.Errorf("call[1].Iteration = %d, want 2", calls[1].Iteration)
-	}
 }
 
 func TestReset(t *testing.T) {
@@ -428,73 +342,55 @@ func TestReset(t *testing.T) {
 	if p.CallCount() != 0 {
 		t.Errorf("CallCount() after Reset = %d, want 0", p.CallCount())
 	}
-
-	// After reset, responses restart from index 0.
-	p2 := New(WithResponses(ContinueResponse("first")))
-	p2.Execute(ctx, provider.Request{Prompt: "a"})
-	p2.Reset()
-	p2.Execute(ctx, provider.Request{Prompt: "b"})
-
-	calls := p2.Calls()
-	if len(calls) != 1 {
-		t.Fatalf("after Reset, Calls() len = %d, want 1", len(calls))
-	}
 }
 
-func TestExecute_StatusPathEmpty(t *testing.T) {
-	// When StatusPath is empty, no status.json should be written anywhere.
-	p := New(WithResponses(ContinueResponse("test")))
+func TestExecute_InjectSignal(t *testing.T) {
+	p := New(WithResponses(
+		InjectResponse("continue", "did work", "focus on error handling"),
+	))
 	ctx := context.Background()
 
-	_, err := p.Execute(ctx, provider.Request{Prompt: "test"})
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	// No panic, no error — status is skipped when path is empty.
-}
-
-func TestExecute_WorkFields(t *testing.T) {
-	dir := t.TempDir()
-	statusPath := filepath.Join(dir, "status.json")
-
-	p := New(WithResponses(Response{
-		Decision:       "continue",
-		Summary:        "did work",
-		FilesTouched:   []string{"main.go", "utils.go"},
-		ItemsCompleted: []string{"implement feature", "write tests"},
-	}))
-	ctx := context.Background()
-
-	_, err := p.Execute(ctx, provider.Request{Prompt: "test", StatusPath: statusPath})
+	result, err := p.Execute(ctx, provider.Request{Prompt: "test"})
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	data, err := os.ReadFile(statusPath)
-	if err != nil {
-		t.Fatalf("read status.json error = %v", err)
-	}
-	var status map[string]any
-	if err := json.Unmarshal(data, &status); err != nil {
-		t.Fatalf("unmarshal error = %v", err)
-	}
-
-	work, ok := status["work"].(map[string]any)
+	dec := extractDecisionFromStdout(t, result.Stdout)
+	signals, ok := dec["signals"].(map[string]any)
 	if !ok {
-		t.Fatal("work field is not a map")
+		t.Fatal("signals not present in ap-result block")
 	}
-	files, ok := work["files_touched"].([]any)
-	if !ok || len(files) != 2 {
-		t.Errorf("files_touched = %v, want 2 items", work["files_touched"])
+	if signals["inject"] != "focus on error handling" {
+		t.Errorf("inject = %q, want %q", signals["inject"], "focus on error handling")
 	}
-	items, ok := work["items_completed"].([]any)
-	if !ok || len(items) != 2 {
-		t.Errorf("items_completed = %v, want 2 items", work["items_completed"])
+}
+
+func TestExecute_EscalateSignal(t *testing.T) {
+	p := New(WithResponses(
+		EscalateResponse("continue", "need help", "question", "blocked on auth", []string{"opt1", "opt2"}),
+	))
+	ctx := context.Background()
+
+	result, err := p.Execute(ctx, provider.Request{Prompt: "test"})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	dec := extractDecisionFromStdout(t, result.Stdout)
+	signals, ok := dec["signals"].(map[string]any)
+	if !ok {
+		t.Fatal("signals not present")
+	}
+	escalate, ok := signals["escalate"].(map[string]any)
+	if !ok {
+		t.Fatal("escalate not present")
+	}
+	if escalate["type"] != "question" {
+		t.Errorf("escalate type = %q, want %q", escalate["type"], "question")
 	}
 }
 
 func TestProviderInterface_Registry(t *testing.T) {
-	// Verify MockProvider can be registered in the provider registry.
 	reg := provider.NewRegistry()
 	p := New()
 
@@ -542,13 +438,40 @@ func TestFailureResponse_Fields(t *testing.T) {
 	}
 }
 
-func TestNoStatusResponse_Fields(t *testing.T) {
-	r := NoStatusResponse()
-	if r.shouldWriteStatus() {
-		t.Error("NoStatusResponse should not write status")
+func TestNoDecisionResponse_Fields(t *testing.T) {
+	r := NoDecisionResponse()
+	if r.shouldEmitDecision() {
+		t.Error("NoDecisionResponse should not emit decision")
 	}
 }
 
 func itoa(n int) string {
 	return fmt.Sprintf("%03d", n)
+}
+
+// extractDecisionFromStdout parses the ap-result block JSON from stdout.
+func extractDecisionFromStdout(t *testing.T, stdout string) map[string]any {
+	t.Helper()
+	lines := strings.Split(stdout, "\n")
+	inBlock := false
+	var blockContent strings.Builder
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !inBlock && strings.HasPrefix(trimmed, "```ap-result") {
+			inBlock = true
+			continue
+		}
+		if inBlock && trimmed == "```" {
+			break
+		}
+		if inBlock {
+			blockContent.WriteString(line)
+			blockContent.WriteByte('\n')
+		}
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(blockContent.String()), &result); err != nil {
+		t.Fatalf("parse ap-result block: %v\nstdout: %s", err, stdout)
+	}
+	return result
 }

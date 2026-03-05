@@ -7,7 +7,7 @@
 //     a. Build context.json (via internal/context)
 //     b. Resolve prompt template (via internal/resolve)
 //     c. Execute provider
-//     d. Parse status.json → normalized result
+//     d. Extract decision from provider stdout (via internal/extract)
 //     e. Evaluate termination
 //     f. Update state
 //     g. Emit events
@@ -28,15 +28,47 @@ import (
 	"github.com/hwells4/ap/internal/compile"
 	"github.com/hwells4/ap/internal/config"
 	apcontext "github.com/hwells4/ap/internal/context"
-	"github.com/hwells4/ap/internal/events"
+	"github.com/hwells4/ap/internal/extract"
 	"github.com/hwells4/ap/internal/judge"
 	"github.com/hwells4/ap/internal/resolve"
-	"github.com/hwells4/ap/internal/result"
+	"github.com/hwells4/ap/internal/runtarget"
 	"github.com/hwells4/ap/internal/session"
-	"github.com/hwells4/ap/internal/state"
+	"github.com/hwells4/ap/internal/signals"
+	"github.com/hwells4/ap/internal/store"
 	"github.com/hwells4/ap/internal/termination"
 	"github.com/hwells4/ap/pkg/provider"
 )
+
+// extractToEscalate converts extract.EscalateSignal to signals.EscalateSignal.
+func extractToEscalate(e *extract.EscalateSignal) *signals.EscalateSignal {
+	if e == nil {
+		return nil
+	}
+	return &signals.EscalateSignal{
+		Type:    e.Type,
+		Reason:  e.Reason,
+		Options: e.Options,
+	}
+}
+
+// extractToSpawnSignals parses the raw spawn JSON from extract.Signals
+// into the typed []signals.SpawnSignal via the signals package.
+func extractToSpawnSignals(raw json.RawMessage) []signals.SpawnSignal {
+	if len(raw) == 0 {
+		return nil
+	}
+	// Build a minimal agent_signals wrapper for the signals parser.
+	wrapper := map[string]json.RawMessage{"spawn": raw}
+	data, err := json.Marshal(wrapper)
+	if err != nil {
+		return nil
+	}
+	parsed, err := signals.Parse(data)
+	if err != nil {
+		return nil
+	}
+	return parsed.Spawn
+}
 
 // Config holds the parameters for a single-stage foreground run.
 type Config struct {
@@ -69,8 +101,14 @@ type Config struct {
 	// Defaults to the current directory if empty.
 	WorkDir string
 
+	// RunTarget captures immutable project/repo/config spawn metadata.
+	RunTarget runtarget.Target
+
 	// Env contains additional environment variables for the provider.
 	Env map[string]string
+
+	// Store is the SQLite session store (required).
+	Store *store.Store
 
 	// Launcher is used for spawn signal child-session starts.
 	Launcher session.Launcher
@@ -153,8 +191,8 @@ type Result struct {
 	// Iterations is the number of iterations actually completed.
 	Iterations int
 
-	// Status is the final session state.
-	Status state.State
+	// Status is the final session state (e.g. store.StatusCompleted).
+	Status string
 
 	// Reason is the termination reason (if early stop).
 	Reason string
@@ -172,31 +210,41 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 		}
 	}()
 
+	if cfg.Store == nil {
+		return Result{}, fmt.Errorf("runner: store is required")
+	}
+	normalizedCfg, err := normalizeRunTargetConfig(cfg)
+	if err != nil {
+		return Result{}, fmt.Errorf("runner: resolve run target: %w", err)
+	}
+	cfg = normalizedCfg
+
 	if cfg.Pipeline != nil && len(cfg.Pipeline.Nodes) > 0 {
 		return runPipeline(ctx, cfg)
 	}
-
-	statePath := statePath(cfg.RunDir)
-	eventsPath := eventsPath(cfg.RunDir)
-	ew := events.NewWriter(eventsPath)
 
 	// Persist run request for crash recovery and auditing.
 	if err := persistRunRequest(cfg); err != nil {
 		return Result{}, fmt.Errorf("runner: persist run request: %w", err)
 	}
 
-	// Initialize session state.
-	initState, err := state.Init(statePath, cfg.Session, "stage", cfg.StageName)
-	if err != nil {
-		return Result{}, fmt.Errorf("runner: init state: %w", err)
+	// Create session in store.
+	reqJSON := marshalRunRequestJSON(cfg)
+	if err := cfg.Store.CreateSession(ctx, cfg.Session, "stage", cfg.StageName, reqJSON); err != nil {
+		return Result{}, fmt.Errorf("runner: create session: %w", err)
 	}
-
-	// Record parent session lineage if this is a child session.
+	_ = cfg.Store.UpdateSession(ctx, cfg.Session, map[string]any{
+		"project_root":  cfg.RunTarget.ProjectRoot,
+		"repo_root":     cfg.RunTarget.RepoRoot,
+		"config_root":   cfg.RunTarget.ConfigRoot,
+		"project_key":   cfg.RunTarget.ProjectKey,
+		"target_source": cfg.RunTarget.Source,
+	})
 	if cfg.ParentSession != "" {
-		initState.ParentSession = cfg.ParentSession
-		if err := state.Write(statePath, initState); err != nil {
-			return Result{}, fmt.Errorf("runner: write parent session: %w", err)
-		}
+		_ = cfg.Store.AddChild(ctx, cfg.ParentSession, cfg.Session)
+		_ = cfg.Store.UpdateSession(ctx, cfg.Session, map[string]any{
+			"node_id": cfg.ParentSession,
+		})
 	}
 
 	// Emit session_start event.
@@ -204,13 +252,12 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 		"stage":      cfg.StageName,
 		"iterations": cfg.Iterations,
 		"provider":   cfg.Provider.Name(),
+		"run_target": runTargetPayload(cfg.RunTarget),
 	}
 	if cfg.ParentSession != "" {
 		startData["parent_session"] = cfg.ParentSession
 	}
-	if err := ew.Append(events.NewEvent(events.TypeSessionStart, cfg.Session, nil, startData)); err != nil {
-		return Result{}, fmt.Errorf("runner: emit session_start: %w", err)
-	}
+	emitEvent(ctx, cfg, store.TypeSessionStart, "{}", startData)
 
 	fixed := termination.NewFixed(termination.FixedConfig{Iterations: &cfg.Iterations})
 	stageConfig := buildStageConfig(cfg)
@@ -230,7 +277,7 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 		})
 	}
 
-	var lastResult result.Result
+	var lastResult extract.Result
 	completed := 0
 	spawnedChildren := 0
 	injectedContext := "" // text from inject signal, consumed once
@@ -239,40 +286,36 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 	for i := 1; i <= fixed.Target(); i++ {
 		// Check context before starting iteration.
 		if err := ctx.Err(); err != nil {
-			_ = ew.Append(events.NewEvent(events.TypeError, cfg.Session, nil, map[string]any{
+			emitEvent(ctx, cfg, store.TypeError, "{}", map[string]any{
 				"error":      err.Error(),
 				"type":       "signal",
 				"iteration":  completed,
 				"terminated": true,
-			}))
-			markFailed(statePath, "signal_terminated", err.Error())
-			_ = ew.Append(events.NewEvent(events.TypeSessionComplete, cfg.Session, nil, map[string]any{
+			})
+			storeMarkFailed(ctx, cfg, "signal_terminated", err.Error())
+			emitEvent(ctx, cfg, store.TypeSessionComplete, "{}", map[string]any{
 				"iterations":  completed,
 				"reason":      "signal: " + err.Error(),
 				"termination": "signal",
-			}))
+			})
 			return Result{
 				Iterations: completed,
-				Status:     state.StateFailed,
+				Status:     store.StatusFailed,
 				Error:      err.Error(),
 			}, nil
 		}
 
-		// Mark iteration started in state.
-		if _, err := state.MarkIterationStarted(statePath, i); err != nil {
-			return Result{}, fmt.Errorf("runner: mark iteration %d started: %w", i, err)
-		}
-
-		// Emit iteration_start event.
-		cursor := &events.Cursor{Iteration: i, Provider: cfg.Provider.Name()}
-		if err := ew.Append(events.NewEvent(events.TypeIterationStart, cfg.Session, cursor, map[string]any{
-			"iteration": i,
-		})); err != nil {
-			return Result{}, fmt.Errorf("runner: emit iteration_start: %w", err)
-		}
+		// Mark iteration started in store.
+		iterStartTime := time.Now()
+		_ = cfg.Store.StartIteration(ctx, store.IterationInput{
+			SessionName:  cfg.Session,
+			StageName:    cfg.StageName,
+			Iteration:    i,
+			ProviderName: cfg.Provider.Name(),
+		})
 
 		// Generate context.json.
-		ctxPath, err := apcontext.GenerateContext(cfg.Session, i, stageConfig, cfg.RunDir)
+		ctxPath, err := apcontext.GenerateContext(cfg.Session, i, stageConfig, cfg.RunDir, nil)
 		if err != nil {
 			return Result{}, fmt.Errorf("runner: generate context for iteration %d: %w", i, err)
 		}
@@ -281,19 +324,15 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 		prompt := resolvePrompt(cfg.PromptTemplate, ctxPath, cfg.Session, i, stageConfig, injectedContext)
 		injectedContext = "" // consumed
 
-		// Read status path from context.json for provider request.
+		// Read output path from context.json.
 		ctxVars, _ := resolve.VarsFromContext(ctxPath)
-		statusFilePath := ctxVars.STATUS
-		resultFilePath := ctxVars.RESULT
 
 		// Build provider request.
 		req := provider.Request{
-			Prompt:     prompt,
-			Model:      cfg.Model,
-			WorkDir:    cfg.WorkDir,
-			Env:        buildEnv(cfg, i),
-			StatusPath: statusFilePath,
-			ResultPath: resultFilePath,
+			Prompt:  prompt,
+			Model:   cfg.Model,
+			WorkDir: cfg.WorkDir,
+			Env:     buildEnv(cfg, i),
 		}
 
 		// Execute provider with retry.
@@ -301,18 +340,16 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 		backoff := retryBackoff(cfg)
 		var provResult provider.Result
 		var provErr error
-		var iterResult result.Result
+		var iterResult extract.Result
+
+		cursorJSON := marshalCursorJSON(i, cfg.Provider.Name(), "", 0)
 
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
 			provResult, provErr = cfg.Provider.Execute(ctx, req)
 			if provErr == nil {
-				// Provider succeeded — try to load result.
-				var loadErr error
-				iterResult, _, loadErr = result.Load(resultFilePath, statusFilePath)
-				if loadErr == nil {
-					break // success
-				}
-				provErr = fmt.Errorf("result load: %w", loadErr)
+				// Provider succeeded — extract decision from stdout.
+				iterResult, _, _ = extract.Extract(provResult.Stdout, provResult.ExitCode)
+				break
 			}
 
 			// On last attempt, don't retry.
@@ -321,13 +358,13 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 			}
 
 			// Emit retry event.
-			_ = ew.Append(events.NewEvent(events.TypeIterationRetried, cfg.Session, cursor, map[string]any{
+			emitEvent(ctx, cfg, store.TypeIterationRetried, cursorJSON, map[string]any{
 				"iteration":    i,
 				"attempt":      attempt,
 				"max_attempts": maxAttempts,
 				"error":        provErr.Error(),
 				"backoff_ms":   backoff.Milliseconds(),
-			}))
+			})
 
 			// Wait with exponential backoff, respecting context cancellation.
 			select {
@@ -345,33 +382,35 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 
 		if provErr != nil {
 			// All attempts exhausted or context canceled.
-			_ = ew.Append(events.NewEvent(events.TypeIterationFailed, cfg.Session, cursor, map[string]any{
+			emitEvent(ctx, cfg, store.TypeIterationFailed, cursorJSON, map[string]any{
 				"iteration": i,
 				"error":     provErr.Error(),
 				"exit_code": provResult.ExitCode,
 				"attempts":  retryMaxAttempts(cfg),
-			}))
+			})
 			completed = i
 
 			// Check on_exhausted policy.
 			if strings.ToLower(strings.TrimSpace(cfg.RetryOnExhausted)) == "pause" {
-				if _, err := state.MarkPaused(statePath, &state.EscalationInfo{
-					Type:   "retry_exhausted",
-					Reason: fmt.Sprintf("retry exhausted after %d attempts: %s", retryMaxAttempts(cfg), provErr.Error()),
-				}); err != nil {
-					return Result{}, fmt.Errorf("runner: mark paused on retry exhaustion: %w", err)
-				}
+				escJSON, _ := json.Marshal(map[string]any{
+					"type":   "retry_exhausted",
+					"reason": fmt.Sprintf("retry exhausted after %d attempts: %s", retryMaxAttempts(cfg), provErr.Error()),
+				})
+				_ = cfg.Store.UpdateSession(ctx, cfg.Session, map[string]any{
+					"status":          "paused",
+					"escalation_json": string(escJSON),
+				})
 				return Result{
 					Iterations: completed,
-					Status:     state.StatePaused,
+					Status:     store.StatusPaused,
 					Reason:     "retry exhausted: " + provErr.Error(),
 				}, nil
 			}
 
-			markFailed(statePath, "provider_error", provErr.Error())
+			storeMarkFailed(ctx, cfg, "provider_error", provErr.Error())
 			return Result{
 				Iterations: completed,
-				Status:     state.StateFailed,
+				Status:     store.StatusFailed,
 				Error:      provErr.Error(),
 			}, nil
 		}
@@ -382,89 +421,80 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 			return Result{}, fmt.Errorf("runner: write iteration %d output: %w", i, err)
 		}
 
-		// Update state with iteration output.
-		outputVars := map[string]any{
-			"decision": iterResult.Decision,
-			"summary":  iterResult.Summary,
-		}
-		if _, err := state.UpdateIteration(statePath, i, outputVars, cfg.StageName); err != nil {
-			return Result{}, fmt.Errorf("runner: update iteration %d state: %w", i, err)
-		}
-
-		// Mark iteration completed in state.
-		if _, err := state.MarkIterationCompleted(statePath, i); err != nil {
-			return Result{}, fmt.Errorf("runner: mark iteration %d completed: %w", i, err)
-		}
-
-		// Emit iteration_complete event.
-		if err := ew.Append(events.NewEvent(events.TypeIterationComplete, cfg.Session, cursor, map[string]any{
-			"iteration": i,
-			"decision":  iterResult.Decision,
-			"summary":   iterResult.Summary,
-			"duration":  provResult.Duration.String(),
-		})); err != nil {
-			return Result{}, fmt.Errorf("runner: emit iteration_complete: %w", err)
-		}
+		// Complete iteration in store (updates iteration_completed, emits event).
+		signalsJSON, _ := json.Marshal(iterResult.Signals)
+		_ = cfg.Store.CompleteIteration(ctx, store.IterationComplete{
+			SessionName:  cfg.Session,
+			StageName:    cfg.StageName,
+			Iteration:    i,
+			Decision:     iterResult.Decision,
+			Summary:      iterResult.Summary,
+			ExitCode:     provResult.ExitCode,
+			SignalsJSON:  string(signalsJSON),
+			Stdout:       provResult.Stdout,
+			Stderr:       provResult.Stderr,
+			ProviderName: cfg.Provider.Name(),
+			DurationMS:   time.Since(iterStartTime).Milliseconds(),
+		})
 
 		// Inject signal — store text for next iteration's ${CONTEXT}.
-		if iterResult.AgentSignals.Inject != "" {
-			injectedContext = iterResult.AgentSignals.Inject
-			_ = ew.Append(events.NewEvent(events.TypeSignalInject, cfg.Session, cursor, map[string]any{
+		if iterResult.Signals.Inject != "" {
+			injectedContext = iterResult.Signals.Inject
+			emitEvent(ctx, cfg, store.TypeSignalInject, cursorJSON, map[string]any{
 				"iteration": i,
 				"length":    len(injectedContext),
-			}))
+			})
 		}
 
 		// Collect summary for judgment history.
 		summaries = append(summaries, iterResult.Summary)
 
-		spawnRes, spawnErr := processSpawnSignals(cfg, ew, i, iterResult.AgentSignals.Spawn, spawnedChildren)
+		spawnRes, spawnErr := processSpawnSignals(cfg, i, extractToSpawnSignals(iterResult.Signals.Spawn), spawnedChildren)
 		if spawnErr != nil {
 			return Result{}, fmt.Errorf("runner: process spawn signals: %w", spawnErr)
 		}
 		spawnedChildren = spawnRes.ChildCount
 
-		// Record child sessions in state for lineage tracking.
+		// Record child sessions in store for lineage tracking.
 		if len(spawnRes.ChildNames) > 0 {
-			if _, err := state.Update(statePath, func(s *state.SessionState) error {
-				for _, child := range spawnRes.ChildNames {
-					s.AddChildSession(child)
-				}
-				return nil
-			}); err != nil {
-				return Result{}, fmt.Errorf("runner: record child sessions: %w", err)
+			for _, child := range spawnRes.ChildNames {
+				_ = cfg.Store.AddChild(ctx, cfg.Session, child)
 			}
 		}
 
 		completed = i
 
 		// Escalate signal — always pauses, overrides agent decision.
-		if iterResult.AgentSignals.Escalate != nil {
-			esc := iterResult.AgentSignals.Escalate
+		if iterResult.Signals.Escalate != nil {
+			esc := extractToEscalate(iterResult.Signals.Escalate)
 			sigID := SignalID(i, "escalate", 0)
 
 			// Two-phase: emit dispatching before the side effect.
-			if err := emitDispatching(ew, cfg.Session, cursor, sigID, "escalate", i); err != nil {
-				return Result{}, fmt.Errorf("runner: emit escalate dispatching: %w", err)
-			}
-			if _, err := state.MarkPaused(statePath, &state.EscalationInfo{
-				Type:    esc.Type,
-				Reason:  esc.Reason,
-				Options: esc.Options,
-			}); err != nil {
-				return Result{}, fmt.Errorf("runner: mark paused on escalation: %w", err)
-			}
-			if err := ew.Append(events.NewEvent(events.TypeSignalEscalate, cfg.Session, cursor, map[string]any{
+			emitEvent(ctx, cfg, store.TypeSignalDispatching, cursorJSON, map[string]any{
+				"signal_id":   sigID,
+				"signal_type": "escalate",
+				"iteration":   i,
+			})
+
+			escJSON, _ := json.Marshal(map[string]any{
+				"type":    esc.Type,
+				"reason":  esc.Reason,
+				"options": esc.Options,
+			})
+			_ = cfg.Store.UpdateSession(ctx, cfg.Session, map[string]any{
+				"status":          "paused",
+				"escalation_json": string(escJSON),
+			})
+
+			emitEvent(ctx, cfg, store.TypeSignalEscalate, cursorJSON, map[string]any{
 				"signal_id": sigID,
 				"iteration": i,
 				"type":      esc.Type,
 				"reason":    esc.Reason,
 				"options":   esc.Options,
-			})); err != nil {
-				return Result{}, fmt.Errorf("runner: emit signal.escalate: %w", err)
-			}
+			})
 			if err := dispatchSignalHandlers(dispatchSignalInput{
-				Writer:        ew,
+				Store:         cfg.Store,
 				Session:       cfg.Session,
 				Stage:         cfg.StageName,
 				Iteration:     i,
@@ -481,49 +511,48 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 			}
 			return Result{
 				Iterations: completed,
-				Status:     state.StatePaused,
+				Status:     store.StatusPaused,
 				Reason:     "escalation: " + esc.Reason,
 			}, nil
 		}
 
 		// Evaluate judgment termination if configured.
 		if judgment != nil && judgeEval != nil && !judgment.InFallback() {
-			judgeStop, judgeReason := judgment.ShouldStop(ctx, i, lastResult, judgeEval, summaries)
-			cursor := &events.Cursor{Iteration: i, Provider: cfg.Provider.Name()}
+			judgeStop, judgeReason := judgment.ShouldStop(ctx, i, judgeEval, summaries)
 
 			// Emit judge verdict event.
-			_ = ew.Append(events.NewEvent(events.TypeJudgeVerdict, cfg.Session, cursor, map[string]any{
+			emitEvent(ctx, cfg, store.TypeJudgeVerdict, cursorJSON, map[string]any{
 				"iteration":         i,
 				"consecutive_stops": judgment.ConsecutiveStops(),
 				"in_fallback":       judgment.InFallback(),
 				"stop":              judgeStop,
-			}))
+			})
 
 			// Emit fallback warning if triggered.
 			if judgment.InFallback() {
-				_ = ew.Append(events.NewEvent(events.TypeJudgeFallback, cfg.Session, cursor, map[string]any{
+				emitEvent(ctx, cfg, store.TypeJudgeFallback, cursorJSON, map[string]any{
 					"iteration": i,
 					"reason":    "judge failed 3 consecutive times, falling back to fixed-iteration termination",
-				}))
+				})
 			}
 
 			if judgeStop {
-				finishSession(statePath, ew, cfg.Session, completed, judgeReason)
+				finishSession(ctx, cfg, completed, judgeReason)
 				return Result{
 					Iterations: completed,
-					Status:     state.StateCompleted,
+					Status:     store.StatusCompleted,
 					Reason:     judgeReason,
 				}, nil
 			}
 		}
 
 		// Evaluate fixed termination.
-		shouldStop, reason := fixed.ShouldStop(i, lastResult)
+		shouldStop, reason := fixed.ShouldStop(i, lastResult.Decision)
 		if shouldStop {
-			finishSession(statePath, ew, cfg.Session, completed, reason)
+			finishSession(ctx, cfg, completed, reason)
 			return Result{
 				Iterations: completed,
-				Status:     state.StateCompleted,
+				Status:     store.StatusCompleted,
 				Reason:     reason,
 			}, nil
 		}
@@ -531,10 +560,10 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 
 	// All iterations complete.
 	reason := fmt.Sprintf("Completed %d iterations (max: %d)", completed, fixed.Target())
-	finishSession(statePath, ew, cfg.Session, completed, reason)
+	finishSession(ctx, cfg, completed, reason)
 	return Result{
 		Iterations: completed,
-		Status:     state.StateCompleted,
+		Status:     store.StatusCompleted,
 		Reason:     reason,
 	}, nil
 }
@@ -548,10 +577,6 @@ type pipelineRunNode struct {
 }
 
 func runPipeline(ctx context.Context, cfg Config) (Result, error) {
-	statePath := statePath(cfg.RunDir)
-	eventsPath := eventsPath(cfg.RunDir)
-	ew := events.NewWriter(eventsPath)
-
 	if err := persistRunRequest(cfg); err != nil {
 		return Result{}, fmt.Errorf("runner: persist run request: %w", err)
 	}
@@ -566,54 +591,60 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 		pipelineName = "pipeline"
 	}
 
-	if _, err := state.Init(statePath, cfg.Session, "pipeline", pipelineName); err != nil {
-		return Result{}, fmt.Errorf("runner: init state: %w", err)
+	// Create pipeline session in store.
+	reqJSON := marshalRunRequestJSON(cfg)
+	if err := cfg.Store.CreateSession(ctx, cfg.Session, "pipeline", pipelineName, reqJSON); err != nil {
+		return Result{}, fmt.Errorf("runner: create session: %w", err)
 	}
+	_ = cfg.Store.UpdateSession(ctx, cfg.Session, map[string]any{
+		"project_root":  cfg.RunTarget.ProjectRoot,
+		"repo_root":     cfg.RunTarget.RepoRoot,
+		"config_root":   cfg.RunTarget.ConfigRoot,
+		"project_key":   cfg.RunTarget.ProjectKey,
+		"target_source": cfg.RunTarget.Source,
+	})
 
-	stageStates := make([]state.StageState, len(nodes))
+	// Set initial pipeline stage info in store.
+	type stageInfo struct {
+		Name       string `json:"name"`
+		Index      int    `json:"index"`
+		Iterations int    `json:"iterations"`
+	}
+	stageInfos := make([]stageInfo, len(nodes))
 	for i, node := range nodes {
-		stageStates[i] = state.StageState{
+		stageInfos[i] = stageInfo{
 			Name:       node.StageName,
 			Index:      i,
 			Iterations: node.Iterations,
 		}
 	}
-	if _, err := state.Update(statePath, func(s *state.SessionState) error {
-		s.Pipeline = pipelineName
-		s.Stages = stageStates
-		s.CurrentStage = nodes[0].StageName
-		s.NodeID = nodes[0].ID
-		return nil
-	}); err != nil {
-		return Result{}, fmt.Errorf("runner: initialize pipeline state: %w", err)
-	}
+	stagesJSON, _ := json.Marshal(stageInfos)
+	_ = cfg.Store.UpdateSession(ctx, cfg.Session, map[string]any{
+		"stages_json":   string(stagesJSON),
+		"current_stage": nodes[0].StageName,
+		"node_id":       nodes[0].ID,
+	})
 
-	if err := ew.Append(events.NewEvent(events.TypeSessionStart, cfg.Session, nil, map[string]any{
+	emitEvent(ctx, cfg, store.TypeSessionStart, "{}", map[string]any{
 		"stage":      nodes[0].StageName,
 		"iterations": totalPlannedIterations(nodes),
 		"provider":   cfg.Provider.Name(),
+		"run_target": runTargetPayload(cfg.RunTarget),
 		"pipeline": map[string]any{
 			"name":  pipelineName,
 			"nodes": len(nodes),
 		},
-	})); err != nil {
-		return Result{}, fmt.Errorf("runner: emit session_start: %w", err)
-	}
+	})
 
 	completed := 0
 	spawnedChildren := 0
 	injectedContext := ""
 
 	for nodeIdx, node := range nodes {
-		if _, err := state.Update(statePath, func(s *state.SessionState) error {
-			s.CurrentStage = node.StageName
-			s.NodeID = node.ID
-			s.Iteration = 0
-			s.IterationCompleted = 0
-			return nil
-		}); err != nil {
-			return Result{}, fmt.Errorf("runner: set current node: %w", err)
-		}
+		_ = cfg.Store.UpdateSession(ctx, cfg.Session, map[string]any{
+			"current_stage": node.StageName,
+			"node_id":       node.ID,
+		})
 
 		nodeCfg := cfg
 		nodeCfg.StageName = node.StageName
@@ -621,51 +652,43 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 
 		stageConfig := buildPipelineStageConfig(node)
 		fixed := termination.NewFixed(termination.FixedConfig{Iterations: &node.Iterations})
-		var lastResult result.Result
+		var lastResult extract.Result
 
 		for i := 1; i <= fixed.Target(); i++ {
 			if err := ctx.Err(); err != nil {
-				_ = ew.Append(events.NewEvent(events.TypeError, cfg.Session, nil, map[string]any{
+				emitEvent(ctx, cfg, store.TypeError, "{}", map[string]any{
 					"error":      err.Error(),
 					"type":       "signal",
 					"iteration":  completed,
 					"terminated": true,
 					"stage":      node.StageName,
 					"node_id":    node.ID,
-				}))
-				markFailed(statePath, "signal_terminated", err.Error())
-				_ = ew.Append(events.NewEvent(events.TypeSessionComplete, cfg.Session, nil, map[string]any{
+				})
+				storeMarkFailed(ctx, cfg, "signal_terminated", err.Error())
+				emitEvent(ctx, cfg, store.TypeSessionComplete, "{}", map[string]any{
 					"iterations":       completed,
 					"total_iterations": completed,
 					"reason":           "signal: " + err.Error(),
 					"termination":      "signal",
-				}))
+				})
 				return Result{
 					Iterations: completed,
-					Status:     state.StateFailed,
+					Status:     store.StatusFailed,
 					Error:      err.Error(),
 				}, nil
 			}
 
-			if _, err := state.MarkIterationStarted(statePath, i); err != nil {
-				return Result{}, fmt.Errorf("runner: mark iteration %d started: %w", i, err)
-			}
+			nodeIterStartTime := time.Now()
+			_ = cfg.Store.StartIteration(ctx, store.IterationInput{
+				SessionName:  cfg.Session,
+				StageName:    node.StageName,
+				Iteration:    i,
+				ProviderName: cfg.Provider.Name(),
+			})
 
-			cursor := &events.Cursor{
-				NodePath:  node.ID,
-				NodeRun:   nodeIdx + 1,
-				Iteration: i,
-				Provider:  cfg.Provider.Name(),
-			}
-			if err := ew.Append(events.NewEvent(events.TypeIterationStart, cfg.Session, cursor, map[string]any{
-				"iteration": i,
-				"stage":     node.StageName,
-				"node_id":   node.ID,
-			})); err != nil {
-				return Result{}, fmt.Errorf("runner: emit iteration_start: %w", err)
-			}
+			cursorJSON := marshalCursorJSON(i, cfg.Provider.Name(), node.ID, nodeIdx+1)
 
-			ctxPath, err := apcontext.GenerateContext(cfg.Session, i, stageConfig, cfg.RunDir)
+			ctxPath, err := apcontext.GenerateContext(cfg.Session, i, stageConfig, cfg.RunDir, nil)
 			if err != nil {
 				return Result{}, fmt.Errorf("runner: generate context for iteration %d: %w", i, err)
 			}
@@ -674,123 +697,98 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 			injectedContext = ""
 
 			ctxVars, _ := resolve.VarsFromContext(ctxPath)
-			statusFilePath := ctxVars.STATUS
-			resultFilePath := ctxVars.RESULT
 
 			req := provider.Request{
-				Prompt:     prompt,
-				Model:      nodeCfg.Model,
-				WorkDir:    nodeCfg.WorkDir,
-				Env:        buildEnv(nodeCfg, i),
-				StatusPath: statusFilePath,
-				ResultPath: resultFilePath,
+				Prompt:  prompt,
+				Model:   nodeCfg.Model,
+				WorkDir: nodeCfg.WorkDir,
+				Env:     buildEnv(nodeCfg, i),
 			}
 
 			provResult, provErr := nodeCfg.Provider.Execute(ctx, req)
 			if provErr != nil {
-				_ = ew.Append(events.NewEvent(events.TypeIterationFailed, cfg.Session, cursor, map[string]any{
+				emitEvent(ctx, cfg, store.TypeIterationFailed, cursorJSON, map[string]any{
 					"iteration": i,
 					"stage":     node.StageName,
 					"node_id":   node.ID,
 					"error":     provErr.Error(),
 					"exit_code": provResult.ExitCode,
-				}))
-				markFailed(statePath, "provider_error", provErr.Error())
+				})
+				storeMarkFailed(ctx, cfg, "provider_error", provErr.Error())
 				return Result{
 					Iterations: completed,
-					Status:     state.StateFailed,
+					Status:     store.StatusFailed,
 					Error:      provErr.Error(),
 				}, nil
 			}
 
-			iterResult, _, loadErr := result.Load(resultFilePath, statusFilePath)
-			if loadErr != nil {
-				_ = ew.Append(events.NewEvent(events.TypeIterationFailed, cfg.Session, cursor, map[string]any{
-					"iteration": i,
-					"stage":     node.StageName,
-					"node_id":   node.ID,
-					"error":     fmt.Sprintf("result load: %v", loadErr),
-				}))
-				markFailed(statePath, "missing_status", loadErr.Error())
-				return Result{
-					Iterations: completed,
-					Status:     state.StateFailed,
-					Error:      loadErr.Error(),
-				}, nil
-			}
+			iterResult, _, _ := extract.Extract(provResult.Stdout, provResult.ExitCode)
 			lastResult = iterResult
 
 			if err := writeIterationOutput(ctxVars.OUTPUT, iterResult, provResult); err != nil {
 				return Result{}, fmt.Errorf("runner: write stage output for %s iteration %d: %w", node.ID, i, err)
 			}
 
-			outputVars := map[string]any{
-				"decision": iterResult.Decision,
-				"summary":  iterResult.Summary,
-				"node_id":  node.ID,
-			}
-			if _, err := state.UpdateIteration(statePath, i, outputVars, node.StageName); err != nil {
-				return Result{}, fmt.Errorf("runner: update iteration %d state: %w", i, err)
-			}
-			if _, err := state.MarkIterationCompleted(statePath, i); err != nil {
-				return Result{}, fmt.Errorf("runner: mark iteration %d completed: %w", i, err)
-			}
+			signalsJSON, _ := json.Marshal(iterResult.Signals)
+			_ = cfg.Store.CompleteIteration(ctx, store.IterationComplete{
+				SessionName:  cfg.Session,
+				StageName:    node.StageName,
+				Iteration:    i,
+				Decision:     iterResult.Decision,
+				Summary:      iterResult.Summary,
+				ExitCode:     provResult.ExitCode,
+				SignalsJSON:  string(signalsJSON),
+				Stdout:       provResult.Stdout,
+				Stderr:       provResult.Stderr,
+				ProviderName: cfg.Provider.Name(),
+				DurationMS:   time.Since(nodeIterStartTime).Milliseconds(),
+			})
 
-			if err := ew.Append(events.NewEvent(events.TypeIterationComplete, cfg.Session, cursor, map[string]any{
-				"iteration": i,
-				"stage":     node.StageName,
-				"node_id":   node.ID,
-				"decision":  iterResult.Decision,
-				"summary":   iterResult.Summary,
-				"duration":  provResult.Duration.String(),
-			})); err != nil {
-				return Result{}, fmt.Errorf("runner: emit iteration_complete: %w", err)
-			}
-
-			if iterResult.AgentSignals.Inject != "" {
-				injectedContext = iterResult.AgentSignals.Inject
-				_ = ew.Append(events.NewEvent(events.TypeSignalInject, cfg.Session, cursor, map[string]any{
+			if iterResult.Signals.Inject != "" {
+				injectedContext = iterResult.Signals.Inject
+				emitEvent(ctx, cfg, store.TypeSignalInject, cursorJSON, map[string]any{
 					"iteration": i,
 					"stage":     node.StageName,
 					"node_id":   node.ID,
 					"length":    len(injectedContext),
-				}))
+				})
 			}
 
-			spawnRes, spawnErr := processSpawnSignals(nodeCfg, ew, i, iterResult.AgentSignals.Spawn, spawnedChildren)
+			spawnRes, spawnErr := processSpawnSignals(nodeCfg, i, extractToSpawnSignals(iterResult.Signals.Spawn), spawnedChildren)
 			if spawnErr != nil {
 				return Result{}, fmt.Errorf("runner: process spawn signals: %w", spawnErr)
 			}
 			spawnedChildren = spawnRes.ChildCount
 
 			if len(spawnRes.ChildNames) > 0 {
-				if _, err := state.Update(statePath, func(s *state.SessionState) error {
-					for _, child := range spawnRes.ChildNames {
-						s.AddChildSession(child)
-					}
-					return nil
-				}); err != nil {
-					return Result{}, fmt.Errorf("runner: record child sessions: %w", err)
+				for _, child := range spawnRes.ChildNames {
+					_ = cfg.Store.AddChild(ctx, cfg.Session, child)
 				}
 			}
 
 			completed++
 
-			if iterResult.AgentSignals.Escalate != nil {
-				esc := iterResult.AgentSignals.Escalate
+			if iterResult.Signals.Escalate != nil {
+				esc := extractToEscalate(iterResult.Signals.Escalate)
 				sigID := SignalID(i, "escalate", 0)
 
-				if err := emitDispatching(ew, cfg.Session, cursor, sigID, "escalate", i); err != nil {
-					return Result{}, fmt.Errorf("runner: emit escalate dispatching: %w", err)
-				}
-				if _, err := state.MarkPaused(statePath, &state.EscalationInfo{
-					Type:    esc.Type,
-					Reason:  esc.Reason,
-					Options: esc.Options,
-				}); err != nil {
-					return Result{}, fmt.Errorf("runner: mark paused on escalation: %w", err)
-				}
-				if err := ew.Append(events.NewEvent(events.TypeSignalEscalate, cfg.Session, cursor, map[string]any{
+				emitEvent(ctx, cfg, store.TypeSignalDispatching, cursorJSON, map[string]any{
+					"signal_id":   sigID,
+					"signal_type": "escalate",
+					"iteration":   i,
+				})
+
+				escJSON, _ := json.Marshal(map[string]any{
+					"type":    esc.Type,
+					"reason":  esc.Reason,
+					"options": esc.Options,
+				})
+				_ = cfg.Store.UpdateSession(ctx, cfg.Session, map[string]any{
+					"status":          "paused",
+					"escalation_json": string(escJSON),
+				})
+
+				emitEvent(ctx, cfg, store.TypeSignalEscalate, cursorJSON, map[string]any{
 					"signal_id": sigID,
 					"iteration": i,
 					"stage":     node.StageName,
@@ -798,11 +796,9 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 					"type":      esc.Type,
 					"reason":    esc.Reason,
 					"options":   esc.Options,
-				})); err != nil {
-					return Result{}, fmt.Errorf("runner: emit signal.escalate: %w", err)
-				}
+				})
 				if err := dispatchSignalHandlers(dispatchSignalInput{
-					Writer:        ew,
+					Store:         cfg.Store,
 					Session:       cfg.Session,
 					Stage:         node.StageName,
 					Iteration:     i,
@@ -819,17 +815,17 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 				}
 				return Result{
 					Iterations: completed,
-					Status:     state.StatePaused,
+					Status:     store.StatusPaused,
 					Reason:     "escalation: " + esc.Reason,
 				}, nil
 			}
 
 			decision := strings.ToLower(strings.TrimSpace(lastResult.Decision))
 			if decision == "error" {
-				markFailed(statePath, "agent_error", fmt.Sprintf("agent requested error at stage %s iteration %d", node.StageName, i))
+				storeMarkFailed(ctx, cfg, "agent_error", fmt.Sprintf("agent requested error at stage %s iteration %d", node.StageName, i))
 				return Result{
 					Iterations: completed,
-					Status:     state.StateFailed,
+					Status:     store.StatusFailed,
 					Error:      "agent requested error",
 				}, nil
 			}
@@ -838,22 +834,15 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 			}
 		}
 
-		if _, err := state.Update(statePath, func(s *state.SessionState) error {
-			if nodeIdx < len(s.Stages) {
-				completedAt := time.Now().UTC().Format(time.RFC3339)
-				s.Stages[nodeIdx].CompletedAt = &completedAt
-			}
-			return nil
-		}); err != nil {
-			return Result{}, fmt.Errorf("runner: mark stage complete: %w", err)
-		}
+		// Mark stage completed in stages_json.
+		markStageCompleted(ctx, cfg, nodeIdx)
 	}
 
 	reason := fmt.Sprintf("Completed %d iterations across %d stages", completed, len(nodes))
-	finishSession(statePath, ew, cfg.Session, completed, reason)
+	finishSession(ctx, cfg, completed, reason)
 	return Result{
 		Iterations: completed,
-		Status:     state.StateCompleted,
+		Status:     store.StatusCompleted,
 		Reason:     reason,
 	}, nil
 }
@@ -900,6 +889,34 @@ func totalPlannedIterations(nodes []pipelineRunNode) int {
 		total += node.Iterations
 	}
 	return total
+}
+
+func normalizeRunTargetConfig(cfg Config) (Config, error) {
+	source := strings.TrimSpace(cfg.RunTarget.Source)
+	if source == "" {
+		if strings.TrimSpace(cfg.ParentSession) != "" {
+			source = runtarget.SourceSpawnInherit
+		} else {
+			source = runtarget.SourceCLI
+		}
+	}
+
+	var (
+		target runtarget.Target
+		err    error
+	)
+	if strings.TrimSpace(cfg.RunTarget.ProjectRoot) == "" {
+		target, err = runtarget.Resolve(cfg.WorkDir, source)
+	} else {
+		target, err = runtarget.NormalizeWithDefaults(cfg.RunTarget, source)
+	}
+	if err != nil {
+		return Config{}, err
+	}
+
+	cfg.RunTarget = target
+	cfg.WorkDir = target.ProjectRoot
+	return cfg, nil
 }
 
 // resolvePrompt substitutes template variables into the prompt.
@@ -950,7 +967,7 @@ func buildPipelineStageConfig(node pipelineRunNode) apcontext.StageConfig {
 	return cfg
 }
 
-func writeIterationOutput(path string, iterResult result.Result, provResult provider.Result) error {
+func writeIterationOutput(path string, iterResult extract.Result, provResult provider.Result) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil
@@ -982,28 +999,48 @@ func buildEnv(cfg Config, iteration int) map[string]string {
 }
 
 // finishSession marks the session completed and emits session_complete.
-func finishSession(statePath string, ew *events.Writer, session string, iterations int, reason string) {
-	_, _ = state.MarkCompleted(statePath)
-	_ = ew.Append(events.NewEvent(events.TypeSessionComplete, session, nil, map[string]any{
+func finishSession(ctx context.Context, cfg Config, iterations int, reason string) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_ = cfg.Store.UpdateSession(ctx, cfg.Session, map[string]any{
+		"status":       "completed",
+		"completed_at": now,
+	})
+	emitEvent(ctx, cfg, store.TypeSessionComplete, "{}", map[string]any{
 		"iterations":       iterations,
 		"total_iterations": iterations,
 		"reason":           reason,
-	}))
+	})
 }
 
-// markFailed marks the session as failed in state.json.
-func markFailed(statePath, errType, errMsg string) {
-	_, _ = state.MarkFailed(statePath, errType, errMsg)
+// storeMarkFailed marks the session as failed in the store.
+func storeMarkFailed(_ context.Context, cfg Config, errType, errMsg string) {
+	// Use background context so cleanup succeeds even if the original
+	// context was cancelled (e.g. SIGINT/SIGTERM).
+	_ = cfg.Store.UpdateSession(context.Background(), cfg.Session, map[string]any{
+		"status":     "failed",
+		"error":      errMsg,
+		"error_type": errType,
+	})
 }
 
-// statePath returns the state.json path for a run directory.
-func statePath(runDir string) string {
-	return runDir + "/state.json"
-}
-
-// eventsPath returns the events.jsonl path for a run directory.
-func eventsPath(runDir string) string {
-	return runDir + "/events.jsonl"
+// markStageCompleted updates the stages_json to mark a stage as completed.
+func markStageCompleted(ctx context.Context, cfg Config, nodeIdx int) {
+	row, err := cfg.Store.GetSession(ctx, cfg.Session)
+	if err != nil {
+		return
+	}
+	var stages []map[string]any
+	if json.Unmarshal([]byte(row.StagesJSON), &stages) != nil || nodeIdx >= len(stages) {
+		return
+	}
+	stages[nodeIdx]["completed_at"] = time.Now().UTC().Format(time.RFC3339)
+	updated, err := json.Marshal(stages)
+	if err != nil {
+		return
+	}
+	_ = cfg.Store.UpdateSession(ctx, cfg.Session, map[string]any{
+		"stages_json": string(updated),
+	})
 }
 
 const (
@@ -1028,9 +1065,6 @@ func retryBackoff(cfg Config) time.Duration {
 }
 
 // persistRunRequest writes run_request.json to the run directory.
-// This must include all fields needed by `ap resume` (ReadRunRequest validation),
-// specifically: session, stage, provider, model, iterations, work_dir, run_dir,
-// and prompt_template.
 func persistRunRequest(cfg Config) error {
 	if err := os.MkdirAll(cfg.RunDir, 0o755); err != nil {
 		return fmt.Errorf("create run dir: %w", err)
@@ -1044,6 +1078,12 @@ func persistRunRequest(cfg Config) error {
 		"work_dir":        cfg.WorkDir,
 		"run_dir":         cfg.RunDir,
 		"prompt_template": cfg.PromptTemplate,
+		"project_root":    cfg.RunTarget.ProjectRoot,
+		"repo_root":       cfg.RunTarget.RepoRoot,
+		"config_root":     cfg.RunTarget.ConfigRoot,
+		"project_key":     cfg.RunTarget.ProjectKey,
+		"target_source":   cfg.RunTarget.Source,
+		"run_target":      runTargetPayload(cfg.RunTarget),
 	}
 	if len(cfg.Env) > 0 {
 		payload["env"] = cfg.Env
@@ -1069,4 +1109,77 @@ func persistRunRequest(cfg Config) error {
 		return fmt.Errorf("marshal run request: %w", err)
 	}
 	return os.WriteFile(filepath.Join(cfg.RunDir, "run_request.json"), append(data, '\n'), 0o644)
+}
+
+// marshalRunRequestJSON returns a JSON string for the run request payload,
+// suitable for storing in the SQLite store.
+func marshalRunRequestJSON(cfg Config) string {
+	payload := map[string]any{
+		"session":         cfg.Session,
+		"stage":           cfg.StageName,
+		"provider":        cfg.Provider.Name(),
+		"model":           cfg.Model,
+		"iterations":      cfg.Iterations,
+		"work_dir":        cfg.WorkDir,
+		"run_dir":         cfg.RunDir,
+		"prompt_template": cfg.PromptTemplate,
+		"project_root":    cfg.RunTarget.ProjectRoot,
+		"repo_root":       cfg.RunTarget.RepoRoot,
+		"config_root":     cfg.RunTarget.ConfigRoot,
+		"project_key":     cfg.RunTarget.ProjectKey,
+		"target_source":   cfg.RunTarget.Source,
+		"run_target":      runTargetPayload(cfg.RunTarget),
+	}
+	if len(cfg.Env) > 0 {
+		payload["env"] = cfg.Env
+	}
+	if cfg.ParentSession != "" {
+		payload["parent_session"] = cfg.ParentSession
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
+}
+
+func runTargetPayload(target runtarget.Target) map[string]any {
+	return map[string]any{
+		"project_root": target.ProjectRoot,
+		"repo_root":    target.RepoRoot,
+		"config_root":  target.ConfigRoot,
+		"project_key":  target.ProjectKey,
+		"source":       target.Source,
+	}
+}
+
+// emitEvent is a best-effort helper that appends an event to the store.
+// Uses background context so events are recorded even if the caller's
+// context was cancelled (e.g. signal termination cleanup).
+func emitEvent(_ context.Context, cfg Config, eventType, cursorJSON string, data map[string]any) {
+	if cfg.Store == nil {
+		return
+	}
+	dataJSON, err := json.Marshal(data)
+	if err != nil {
+		return
+	}
+	_ = cfg.Store.AppendEvent(context.Background(), cfg.Session, eventType, cursorJSON, string(dataJSON))
+}
+
+// marshalCursorJSON builds a cursor JSON string for event metadata.
+func marshalCursorJSON(iteration int, providerName, nodePath string, nodeRun int) string {
+	cursor := map[string]any{
+		"iteration": iteration,
+		"provider":  providerName,
+	}
+	if nodePath != "" {
+		cursor["node_path"] = nodePath
+		cursor["node_run"] = nodeRun
+	}
+	data, err := json.Marshal(cursor)
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
 }

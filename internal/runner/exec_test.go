@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,8 +11,8 @@ import (
 	"time"
 
 	"github.com/hwells4/ap/internal/config"
-	"github.com/hwells4/ap/internal/events"
 	"github.com/hwells4/ap/internal/signals"
+	"github.com/hwells4/ap/internal/store"
 )
 
 func TestExpandExecHandlerArgv_AllVariables(t *testing.T) {
@@ -97,14 +98,14 @@ func TestExpandExecHandlerArgv_MultipleVarsInSingleArg(t *testing.T) {
 }
 
 func TestExecHandler_SuccessfulExecution(t *testing.T) {
-	tmpDir := t.TempDir()
-	eventsPath := filepath.Join(tmpDir, "events.jsonl")
-	ew := events.NewWriter(eventsPath)
+	s := mustOpenStore(t)
+	ctx := context.Background()
+	s.CreateSession(ctx, "exec-ok", "stage", "test", "{}")
 
-	outFile := filepath.Join(tmpDir, "output.txt")
+	outFile := filepath.Join(t.TempDir(), "output.txt")
 
 	err := dispatchSignalHandlers(dispatchSignalInput{
-		Writer:     ew,
+		Store:      s,
 		Session:    "exec-ok",
 		Stage:      "ralph",
 		Iteration:  1,
@@ -130,25 +131,22 @@ func TestExecHandler_SuccessfulExecution(t *testing.T) {
 	}
 
 	// No handler errors should be emitted on success.
-	// Events file may not exist if no errors were emitted — that's fine.
-	if _, err := os.Stat(eventsPath); err == nil {
-		evts := readEventsFromPath(t, eventsPath)
-		handlerErrors := filterByType(evts, events.TypeSignalHandlerError)
-		if len(handlerErrors) != 0 {
-			t.Fatalf("signal.handler.error count = %d, want 0", len(handlerErrors))
-		}
+	evts := readEvents(t, s, "exec-ok")
+	handlerErrors := filterByType(evts, store.TypeSignalHandlerError)
+	if len(handlerErrors) != 0 {
+		t.Fatalf("signal.handler.error count = %d, want 0", len(handlerErrors))
 	}
 }
 
 func TestExecHandler_VariableExpansionInDispatch(t *testing.T) {
-	tmpDir := t.TempDir()
-	eventsPath := filepath.Join(tmpDir, "events.jsonl")
-	ew := events.NewWriter(eventsPath)
+	s := mustOpenStore(t)
+	ctx := context.Background()
+	s.CreateSession(ctx, "var-test", "stage", "test", "{}")
 
-	outFile := filepath.Join(tmpDir, "vars.txt")
+	outFile := filepath.Join(t.TempDir(), "vars.txt")
 
 	err := dispatchSignalHandlers(dispatchSignalInput{
-		Writer:     ew,
+		Store:      s,
 		Session:    "var-test",
 		Stage:      "analyze",
 		Iteration:  7,
@@ -173,8 +171,6 @@ func TestExecHandler_VariableExpansionInDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read output: %v", err)
 	}
-	// sh -c receives the expanded string. Note: argv[0]="sh" is not expanded.
-	// argv[1]="-c" is expanded but has no vars. argv[2] has the vars.
 	got := strings.TrimSpace(string(data))
 	if got != "var-test analyze 7 escalate" {
 		t.Fatalf("output = %q, want 'var-test analyze 7 escalate'", got)
@@ -182,12 +178,12 @@ func TestExecHandler_VariableExpansionInDispatch(t *testing.T) {
 }
 
 func TestExecHandler_FailureEmitsHandlerError(t *testing.T) {
-	tmpDir := t.TempDir()
-	eventsPath := filepath.Join(tmpDir, "events.jsonl")
-	ew := events.NewWriter(eventsPath)
+	s := mustOpenStore(t)
+	ctx := context.Background()
+	s.CreateSession(ctx, "exec-fail", "stage", "test", "{}")
 
 	err := dispatchSignalHandlers(dispatchSignalInput{
-		Writer:     ew,
+		Store:      s,
 		Session:    "exec-fail",
 		Stage:      "ralph",
 		Iteration:  2,
@@ -204,27 +200,28 @@ func TestExecHandler_FailureEmitsHandlerError(t *testing.T) {
 		t.Fatalf("dispatchSignalHandlers() error: %v", err)
 	}
 
-	evts := readEventsFromPath(t, eventsPath)
-	handlerErrors := filterByType(evts, events.TypeSignalHandlerError)
+	evts := readEvents(t, s, "exec-fail")
+	handlerErrors := filterByType(evts, store.TypeSignalHandlerError)
 	if len(handlerErrors) != 1 {
 		t.Fatalf("signal.handler.error count = %d, want 1", len(handlerErrors))
 	}
-	if handlerErrors[0].Data["handler_type"] != "exec" {
-		t.Fatalf("handler_type = %v, want exec", handlerErrors[0].Data["handler_type"])
+	data := parseEventData(t, handlerErrors[0])
+	if data["handler_type"] != "exec" {
+		t.Fatalf("handler_type = %v, want exec", data["handler_type"])
 	}
-	errStr, _ := handlerErrors[0].Data["error"].(string)
+	errStr, _ := data["error"].(string)
 	if !strings.Contains(errStr, "exec failed") {
 		t.Fatalf("error = %q, want to contain 'exec failed'", errStr)
 	}
 }
 
 func TestExecHandler_EmptyArgvEmitsHandlerError(t *testing.T) {
-	tmpDir := t.TempDir()
-	eventsPath := filepath.Join(tmpDir, "events.jsonl")
-	ew := events.NewWriter(eventsPath)
+	s := mustOpenStore(t)
+	ctx := context.Background()
+	s.CreateSession(ctx, "exec-noargv", "stage", "test", "{}")
 
 	err := dispatchSignalHandlers(dispatchSignalInput{
-		Writer:     ew,
+		Store:      s,
 		Session:    "exec-noargv",
 		Stage:      "ralph",
 		Iteration:  1,
@@ -232,7 +229,7 @@ func TestExecHandler_EmptyArgvEmitsHandlerError(t *testing.T) {
 		SignalType: "escalate",
 		Handlers: []config.SignalHandler{{
 			Type: "exec",
-			Argv: []string{}, // empty argv
+			Argv: []string{},
 		}},
 		Timeout: 5 * time.Second,
 		Output:  io.Discard,
@@ -241,25 +238,26 @@ func TestExecHandler_EmptyArgvEmitsHandlerError(t *testing.T) {
 		t.Fatalf("dispatchSignalHandlers() error: %v", err)
 	}
 
-	evts := readEventsFromPath(t, eventsPath)
-	handlerErrors := filterByType(evts, events.TypeSignalHandlerError)
+	evts := readEvents(t, s, "exec-noargv")
+	handlerErrors := filterByType(evts, store.TypeSignalHandlerError)
 	if len(handlerErrors) != 1 {
 		t.Fatalf("signal.handler.error count = %d, want 1", len(handlerErrors))
 	}
-	errStr, _ := handlerErrors[0].Data["error"].(string)
+	data := parseEventData(t, handlerErrors[0])
+	errStr, _ := data["error"].(string)
 	if !strings.Contains(errStr, "argv is required") {
 		t.Fatalf("error = %q, want to contain 'argv is required'", errStr)
 	}
 }
 
 func TestExecHandler_TimeoutEmitsHandlerError(t *testing.T) {
-	tmpDir := t.TempDir()
-	eventsPath := filepath.Join(tmpDir, "events.jsonl")
-	ew := events.NewWriter(eventsPath)
+	s := mustOpenStore(t)
+	ctx := context.Background()
+	s.CreateSession(ctx, "exec-timeout", "stage", "test", "{}")
 
 	started := time.Now()
 	err := dispatchSignalHandlers(dispatchSignalInput{
-		Writer:     ew,
+		Store:      s,
 		Session:    "exec-timeout",
 		Stage:      "ralph",
 		Iteration:  1,
@@ -281,35 +279,34 @@ func TestExecHandler_TimeoutEmitsHandlerError(t *testing.T) {
 		t.Fatalf("timeout took too long: %v", elapsed)
 	}
 
-	evts := readEventsFromPath(t, eventsPath)
-	handlerErrors := filterByType(evts, events.TypeSignalHandlerError)
+	evts := readEvents(t, s, "exec-timeout")
+	handlerErrors := filterByType(evts, store.TypeSignalHandlerError)
 	if len(handlerErrors) != 1 {
 		t.Fatalf("signal.handler.error count = %d, want 1", len(handlerErrors))
 	}
-	if handlerErrors[0].Data["handler_type"] != "exec" {
-		t.Fatalf("handler_type = %v, want exec", handlerErrors[0].Data["handler_type"])
+	data := parseEventData(t, handlerErrors[0])
+	if data["handler_type"] != "exec" {
+		t.Fatalf("handler_type = %v, want exec", data["handler_type"])
 	}
 }
 
 func TestExecHandler_NoRetryOnFailure(t *testing.T) {
-	// Verify the handler falls through to the next handler in the chain
-	// (no automatic retry). We set up two exec handlers: first fails, second succeeds.
-	tmpDir := t.TempDir()
-	eventsPath := filepath.Join(tmpDir, "events.jsonl")
-	ew := events.NewWriter(eventsPath)
+	s := mustOpenStore(t)
+	ctx := context.Background()
+	s.CreateSession(ctx, "exec-no-retry", "stage", "test", "{}")
 
-	outFile := filepath.Join(tmpDir, "second.txt")
+	outFile := filepath.Join(t.TempDir(), "second.txt")
 
 	err := dispatchSignalHandlers(dispatchSignalInput{
-		Writer:     ew,
+		Store:      s,
 		Session:    "exec-no-retry",
 		Stage:      "ralph",
 		Iteration:  1,
 		SignalID:   "sig-1-escalate-0",
 		SignalType: "escalate",
 		Handlers: []config.SignalHandler{
-			{Type: "exec", Argv: []string{"sh", "-c", "exit 1"}},         // fails
-			{Type: "exec", Argv: []string{"sh", "-c", "echo ok > " + outFile}}, // should still run
+			{Type: "exec", Argv: []string{"sh", "-c", "exit 1"}},
+			{Type: "exec", Argv: []string{"sh", "-c", "echo ok > " + outFile}},
 		},
 		Timeout: 5 * time.Second,
 		Output:  io.Discard,
@@ -318,14 +315,12 @@ func TestExecHandler_NoRetryOnFailure(t *testing.T) {
 		t.Fatalf("dispatchSignalHandlers() error: %v", err)
 	}
 
-	// First handler failed → one handler error.
-	evts := readEventsFromPath(t, eventsPath)
-	handlerErrors := filterByType(evts, events.TypeSignalHandlerError)
+	evts := readEvents(t, s, "exec-no-retry")
+	handlerErrors := filterByType(evts, store.TypeSignalHandlerError)
 	if len(handlerErrors) != 1 {
 		t.Fatalf("signal.handler.error count = %d, want 1", len(handlerErrors))
 	}
 
-	// Second handler ran successfully.
 	data, err := os.ReadFile(outFile)
 	if err != nil {
 		t.Fatalf("second handler didn't run: %v", err)

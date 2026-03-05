@@ -21,12 +21,6 @@ type Request struct {
 
 	// Config contains provider-specific configuration.
 	Config map[string]any
-
-	// StatusPath is where the agent should write status.json.
-	StatusPath string
-
-	// ResultPath is where the agent should write result.json.
-	ResultPath string
 }
 
 // Result captures provider execution output and metadata.

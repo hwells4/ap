@@ -14,8 +14,6 @@ func TestResolveTemplateFromContext(t *testing.T) {
 	contextPath := filepath.Join(tempDir, "context.json")
 	progressPath := filepath.Join(tempDir, "progress.md")
 	outputPath := filepath.Join(tempDir, "output.md")
-	statusPath := filepath.Join(tempDir, "status.json")
-	resultPath := filepath.Join(tempDir, "result.json")
 
 	payload := map[string]any{
 		"session":   "alpha-session",
@@ -23,8 +21,6 @@ func TestResolveTemplateFromContext(t *testing.T) {
 		"paths": map[string]string{
 			"progress": progressPath,
 			"output":   outputPath,
-			"status":   statusPath,
-			"result":   resultPath,
 		},
 	}
 	data, err := json.Marshal(payload)
@@ -35,14 +31,14 @@ func TestResolveTemplateFromContext(t *testing.T) {
 		t.Fatalf("write context: %v", err)
 	}
 
-	template := "CTX:${CTX} STATUS:${STATUS} RESULT:${RESULT} PROGRESS:${PROGRESS} OUTPUT:${OUTPUT} " +
+	template := "CTX:${CTX} PROGRESS:${PROGRESS} OUTPUT:${OUTPUT} " +
 		"SESSION:${SESSION_NAME} ITER:${ITERATION} PROGRESS_FILE:${PROGRESS_FILE}"
 	resolved, err := ResolveTemplateFromContext(template, contextPath)
 	if err != nil {
 		t.Fatalf("ResolveTemplateFromContext: %v", err)
 	}
 
-	expected := "CTX:" + contextPath + " STATUS:" + statusPath + " RESULT:" + resultPath +
+	expected := "CTX:" + contextPath +
 		" PROGRESS:" + progressPath + " OUTPUT:" + outputPath +
 		" SESSION:alpha-session ITER:2 PROGRESS_FILE:" + progressPath
 	if resolved != expected {

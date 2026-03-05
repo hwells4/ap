@@ -2,7 +2,6 @@
 
 Read context from: ${CTX}
 Progress file: ${PROGRESS}
-Status output: ${STATUS}
 Session: ${SESSION_NAME}
 Iteration: ${ITERATION}
 
@@ -15,7 +14,7 @@ Iteration: ${ITERATION}
 ### 1. Command Timeout (60 seconds max)
 If ANY command runs longer than 60 seconds:
 - Kill it immediately (Ctrl+C or timeout wrapper)
-- Write status.json with `decision: error`, reason: "Command timeout after 60s"
+- Output an `ap-result` block with `decision: error`, reason: "Command timeout after 60s"
 - Exit immediately
 
 ### 2. Forbidden Commands (cause timeouts)
@@ -37,9 +36,9 @@ For any command you're unsure about:
 timeout 60 <command> || { echo "TIMEOUT"; exit 1; }
 ```
 
-### 5. Write Status EARLY
-If anything goes wrong, write status.json IMMEDIATELY and exit:
-```json
+### 5. Output Decision EARLY
+If anything goes wrong, output your decision IMMEDIATELY and exit:
+```ap-result
 {"decision": "error", "reason": "<what went wrong>", "summary": "Exiting early to prevent loop", "work": {}, "errors": ["<details>"]}
 ```
 
@@ -116,14 +115,13 @@ fi
    echo "Running: $TEST_CMD (60s timeout)"
    timeout 60 $TEST_CMD || {
      echo "ERROR: Tests timed out or failed"
-     # Write error status and exit - do NOT retry
-     cat > ${STATUS} << 'STATUSEOF'
-{"decision": "error", "reason": "Tests timed out after 60s", "summary": "Test command exceeded timeout", "work": {}, "errors": ["Test timeout"]}
-STATUSEOF
      exit 1
    }
    ```
-   **WARNING**: If tests timeout, do NOT retry with longer timeout. Write error status and exit.
+   **WARNING**: If tests timeout, do NOT retry with longer timeout. Output an error decision and stop:
+   ```ap-result
+   {"decision": "error", "reason": "Tests timed out after 60s", "summary": "Test command exceeded timeout", "work": {}, "errors": ["Test timeout"]}
+   ```
 
 8. **Commit your work**:
    ```bash
@@ -147,12 +145,12 @@ STATUSEOF
     ---
     ```
 
-## Status Output
+## Write Decision
 
-Write to `${STATUS}`:
+When you are done, output your decision in a fenced block:
 
 **If you completed work and more beads remain:**
-```json
+```ap-result
 {
   "decision": "continue",
   "reason": "Completed bead X, more work remains",
@@ -163,7 +161,7 @@ Write to `${STATUS}`:
 ```
 
 **If beads are blocked (waiting for dependencies):**
-```json
+```ap-result
 {
   "decision": "continue",
   "reason": "Beads blocked by dependencies, waiting for unblock",
@@ -174,7 +172,7 @@ Write to `${STATUS}`:
 ```
 
 **If ALL beads are closed (truly done):**
-```json
+```ap-result
 {
   "decision": "stop",
   "reason": "All beads closed",
@@ -185,7 +183,7 @@ Write to `${STATUS}`:
 ```
 
 **If tests fail and you can't fix them:**
-```json
+```ap-result
 {
   "decision": "error",
   "reason": "Tests failing, unable to resolve",
@@ -193,6 +191,9 @@ Write to `${STATUS}`:
   "work": {"items_completed": [], "files_touched": ["<files>"]},
   "errors": ["<error details>"]
 }
+```
+
+Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
 ```
 
 ## Guidelines

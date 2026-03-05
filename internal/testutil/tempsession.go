@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,8 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hwells4/ap/internal/events"
-	"github.com/hwells4/ap/internal/state"
+	"github.com/hwells4/ap/internal/store"
 )
 
 // TempSession creates a .ap/runs/{session}/ tree in t.TempDir()
@@ -21,11 +21,8 @@ type TempSession struct {
 	// RootDir is the project root (parent of .ap/).
 	RootDir string
 
-	// StatePath is the path to state.json.
-	StatePath string
-
-	// EventsPath is the path to events.jsonl.
-	EventsPath string
+	// Store is the in-memory store backing this session.
+	Store *store.Store
 
 	// Name is the session name.
 	Name string
@@ -36,18 +33,26 @@ type TempSession struct {
 // SessionOption configures a TempSession.
 type SessionOption func(*sessionConfig)
 
+// EventSpec describes an event to insert into the store.
+type EventSpec struct {
+	Type    string
+	Cursor  map[string]any
+	Data    map[string]any
+}
+
 type sessionConfig struct {
-	state      state.State
+	status     string
 	iterations int
-	evts       []events.Event
+	evts       []EventSpec
 	stageName  string
 	pipeline   string
 }
 
-// WithState sets the session state in state.json.
-func WithState(s state.State) SessionOption {
+// WithState sets the session status. Use store.Status* constants
+// (e.g. store.StatusRunning, store.StatusPaused).
+func WithState(s string) SessionOption {
 	return func(cfg *sessionConfig) {
-		cfg.state = s
+		cfg.status = s
 	}
 }
 
@@ -58,8 +63,8 @@ func WithIterations(n int) SessionOption {
 	}
 }
 
-// WithEvents writes the given events to events.jsonl.
-func WithEvents(evts []events.Event) SessionOption {
+// WithEvents appends the given events to the store.
+func WithEvents(evts []EventSpec) SessionOption {
 	return func(cfg *sessionConfig) {
 		cfg.evts = evts
 	}
@@ -79,13 +84,14 @@ func WithPipeline(name string) SessionOption {
 	}
 }
 
-// NewTempSession creates a session directory tree in t.TempDir().
+// NewTempSession creates a session directory tree in t.TempDir()
+// and an in-memory store with the session pre-populated.
 // The directory is automatically cleaned up when the test completes.
 func NewTempSession(t *testing.T, sessionName string, opts ...SessionOption) *TempSession {
 	t.Helper()
 
 	cfg := &sessionConfig{
-		state:     state.StateRunning,
+		status:    store.StatusRunning,
 		stageName: "default",
 		pipeline:  "test-pipeline",
 	}
@@ -105,25 +111,29 @@ func NewTempSession(t *testing.T, sessionName string, opts ...SessionOption) *Te
 		t.Fatalf("testutil: create locks dir: %v", err)
 	}
 
-	statePath := filepath.Join(sessionDir, "state.json")
-	eventsPath := filepath.Join(sessionDir, "events.jsonl")
-
-	// Write state.json.
-	startedAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	ss := &state.SessionState{
-		Session:            sessionName,
-		Type:               "loop",
-		Pipeline:           cfg.pipeline,
-		Status:             cfg.state,
-		Iteration:          cfg.iterations,
-		IterationCompleted: cfg.iterations,
-		StartedAt:          startedAt.Format(time.RFC3339),
-		CurrentStage:       cfg.stageName,
-		Stages:             []state.StageState{},
-		History:            []map[string]any{},
+	// Open in-memory store and create the session.
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("testutil: open store: %v", err)
 	}
-	if err := state.Write(statePath, ss); err != nil {
-		t.Fatalf("testutil: write state.json: %v", err)
+	t.Cleanup(func() { s.Close() })
+
+	ctx := context.Background()
+	if err := s.CreateSession(ctx, sessionName, "loop", cfg.pipeline, "{}"); err != nil {
+		t.Fatalf("testutil: create session in store: %v", err)
+	}
+
+	// Apply status and iteration updates.
+	updates := map[string]any{
+		"current_stage":       cfg.stageName,
+		"iteration":           cfg.iterations,
+		"iteration_completed": cfg.iterations,
+	}
+	if cfg.status != store.StatusRunning {
+		updates["status"] = cfg.status
+	}
+	if err := s.UpdateSession(ctx, sessionName, updates); err != nil {
+		t.Fatalf("testutil: update session in store: %v", err)
 	}
 
 	// Create stage directory and iteration subdirectories.
@@ -144,9 +154,9 @@ func NewTempSession(t *testing.T, sessionName string, opts ...SessionOption) *Te
 			"work":     map[string]any{"items_completed": []string{}, "files_touched": []string{}},
 			"errors":   []string{},
 		}
-		data, err := json.MarshalIndent(statusData, "", "  ")
-		if err != nil {
-			t.Fatalf("testutil: marshal iteration status: %v", err)
+		data, jsonErr := json.MarshalIndent(statusData, "", "  ")
+		if jsonErr != nil {
+			t.Fatalf("testutil: marshal iteration status: %v", jsonErr)
 		}
 		statusPath := filepath.Join(iterDir, "status.json")
 		if err := os.WriteFile(statusPath, append(data, '\n'), 0o644); err != nil {
@@ -154,28 +164,31 @@ func NewTempSession(t *testing.T, sessionName string, opts ...SessionOption) *Te
 		}
 	}
 
-	// Write events.jsonl.
-	if len(cfg.evts) > 0 {
-		w := events.NewWriter(eventsPath)
-		for _, evt := range cfg.evts {
-			if err := w.Append(evt); err != nil {
-				t.Fatalf("testutil: write event: %v", err)
+	// Append events to the store.
+	for _, evt := range cfg.evts {
+		cursorJSON := "{}"
+		if evt.Cursor != nil {
+			if b, err := json.Marshal(evt.Cursor); err == nil {
+				cursorJSON = string(b)
 			}
 		}
-	} else {
-		// Create empty events file.
-		if err := os.WriteFile(eventsPath, nil, 0o644); err != nil {
-			t.Fatalf("testutil: create events file: %v", err)
+		dataJSON := "{}"
+		if evt.Data != nil {
+			if b, err := json.Marshal(evt.Data); err == nil {
+				dataJSON = string(b)
+			}
+		}
+		if err := s.AppendEvent(ctx, sessionName, evt.Type, cursorJSON, dataJSON); err != nil {
+			t.Fatalf("testutil: append event: %v", err)
 		}
 	}
 
 	return &TempSession{
-		Dir:        sessionDir,
-		RootDir:    rootDir,
-		StatePath:  statePath,
-		EventsPath: eventsPath,
-		Name:       sessionName,
-		t:          t,
+		Dir:     sessionDir,
+		RootDir: rootDir,
+		Store:   s,
+		Name:    sessionName,
+		t:       t,
 	}
 }
 
@@ -184,17 +197,21 @@ func (s *TempSession) IterationDir(stage string, iteration int) string {
 	return filepath.Join(s.Dir, fmt.Sprintf("stage-00-%s", stage), "iterations", fmt.Sprintf("%03d", iteration))
 }
 
-// StatusPath returns the status.json path for a specific iteration.
+// StatusPathFor returns the status.json path for a specific iteration.
 func (s *TempSession) StatusPathFor(stage string, iteration int) string {
 	return filepath.Join(s.IterationDir(stage, iteration), "status.json")
 }
 
-// LoadState reads and returns the current state.json.
-func (s *TempSession) LoadState() *state.SessionState {
+// GetSession reads and returns the current session row from the store.
+func (s *TempSession) GetSession() *store.SessionRow {
 	s.t.Helper()
-	ss, err := state.Load(s.StatePath)
+	ctx := context.Background()
+	row, err := s.Store.GetSession(ctx, s.Name)
 	if err != nil {
-		s.t.Fatalf("testutil: load state: %v", err)
+		s.t.Fatalf("testutil: get session: %v", err)
 	}
-	return ss
+	return row
 }
+
+// StartedAt is the fixed time used for test sessions.
+var StartedAt = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)

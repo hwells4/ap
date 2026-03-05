@@ -1,13 +1,15 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/hwells4/ap/internal/output"
-	"github.com/hwells4/ap/internal/state"
+	"github.com/hwells4/ap/internal/store"
 )
 
 type cleanResult struct {
@@ -36,15 +38,14 @@ func runClean(args []string, deps cliDeps) int {
 	runsDir := filepath.Join(projectRoot, ".ap", "runs")
 	locksDir := filepath.Join(projectRoot, ".ap", "locks")
 
+	ctx := context.Background()
+
 	var cleaned []cleanResult
 	var skipped []skipResult
 
 	if all {
-		entries, err := os.ReadDir(runsDir)
+		sessions, err := deps.store.ListSessions(ctx, "")
 		if err != nil {
-			if os.IsNotExist(err) {
-				return renderCleanResult(deps, nil, nil)
-			}
 			return renderError(deps, output.ExitGeneralError, output.NewError(
 				"GENERAL_ERROR",
 				"failed to list sessions",
@@ -53,12 +54,8 @@ func runClean(args []string, deps cliDeps) int {
 				nil,
 			))
 		}
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			name := entry.Name()
-			c, s := cleanSession(runsDir, locksDir, name, force)
+		for _, row := range sessions {
+			c, s := cleanSessionStore(ctx, deps.store, runsDir, locksDir, row.Name, force)
 			if c != nil {
 				cleaned = append(cleaned, *c)
 			}
@@ -67,7 +64,7 @@ func runClean(args []string, deps cliDeps) int {
 			}
 		}
 	} else {
-		c, s := cleanSession(runsDir, locksDir, sessionName, force)
+		c, s := cleanSessionStore(ctx, deps.store, runsDir, locksDir, sessionName, force)
 		if c != nil {
 			cleaned = append(cleaned, *c)
 		}
@@ -79,32 +76,38 @@ func runClean(args []string, deps cliDeps) int {
 	return renderCleanResult(deps, cleaned, skipped)
 }
 
-func cleanSession(runsDir, locksDir, session string, force bool) (*cleanResult, *skipResult) {
-	sessionDir := filepath.Join(runsDir, session)
-	statePath := filepath.Join(sessionDir, "state.json")
-
-	// Session dir doesn't exist — nothing to do (idempotent).
-	if _, err := os.Stat(sessionDir); err != nil {
+func cleanSessionStore(ctx context.Context, s *store.Store, runsDir, locksDir, session string, force bool) (*cleanResult, *skipResult) {
+	// Check state in store to decide if cleaning is safe.
+	row, err := s.GetSession(ctx, session)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			// Not in store — try to clean run dir if it exists on disk.
+			sessionDir := filepath.Join(runsDir, session)
+			if _, statErr := os.Stat(sessionDir); statErr != nil {
+				return nil, nil // nothing to do
+			}
+			bytes := dirSize(sessionDir)
+			_ = os.RemoveAll(sessionDir)
+			lockPath := filepath.Join(locksDir, session+".lock")
+			_ = os.Remove(lockPath)
+			return &cleanResult{Session: session, Bytes: bytes}, nil
+		}
 		return nil, nil
 	}
 
-	// Check state to decide if cleaning is safe.
-	snapshot, err := state.Load(statePath)
-	if err == nil {
-		switch snapshot.Status {
-		case state.StateRunning, state.StatePending:
-			if !force {
-				return nil, &skipResult{Session: session, Reason: string(snapshot.Status)}
-			}
-		case state.StatePaused:
-			if !force {
-				return nil, &skipResult{Session: session, Reason: "paused"}
-			}
+	switch row.Status {
+	case "running", "pending":
+		if !force {
+			return nil, &skipResult{Session: session, Reason: row.Status}
+		}
+	case "paused":
+		if !force {
+			return nil, &skipResult{Session: session, Reason: "paused"}
 		}
 	}
-	// If state.json is missing or corrupt, allow cleanup.
 
-	// Calculate bytes.
+	// Calculate bytes from on-disk run dir.
+	sessionDir := filepath.Join(runsDir, session)
 	bytes := dirSize(sessionDir)
 
 	// Remove session directory.
@@ -113,6 +116,9 @@ func cleanSession(runsDir, locksDir, session string, force bool) (*cleanResult, 
 	// Remove lock file if exists.
 	lockPath := filepath.Join(locksDir, session+".lock")
 	_ = os.Remove(lockPath)
+
+	// Delete from store.
+	_ = s.DeleteSession(ctx, session)
 
 	return &cleanResult{Session: session, Bytes: bytes}, nil
 }

@@ -2,7 +2,6 @@
 
 Read context from: ${CTX}
 Progress file: ${PROGRESS}
-Status output: ${STATUS}
 Session: ${SESSION_NAME}
 Iteration: ${ITERATION}
 
@@ -40,10 +39,12 @@ bd ready --label=pipeline/${SESSION_NAME}
 
 Append a summary of polish changes to `${PROGRESS}`.
 
-### Write Status
+### Write Decision
+
+When you are done, output your decision in a fenced block.
 
 **If more polish needed:**
-```json
+```ap-result
 {
   "decision": "continue",
   "reason": "Found issues that need correction",
@@ -54,7 +55,7 @@ Append a summary of polish changes to `${PROGRESS}`.
 ```
 
 **If beads are ready:**
-```json
+```ap-result
 {
   "decision": "stop",
   "reason": "Beads are polished and ready for implementation",
@@ -62,4 +63,7 @@ Append a summary of polish changes to `${PROGRESS}`.
   "work": {"items_completed": ["bead-polish"], "files_touched": []},
   "errors": []
 }
+```
+
+Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
 ```

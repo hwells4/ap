@@ -1,12 +1,11 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"strings"
 
-	"github.com/hwells4/ap/internal/events"
+	"github.com/hwells4/ap/internal/store"
 )
 
 // SignalID generates a deterministic signal identifier.
@@ -49,50 +48,35 @@ func (ds *DispatchState) ShouldSkip(signalID string) bool {
 	return ds.completed[signalID]
 }
 
-// LoadDispatchState reads events.jsonl and builds a dispatch state that
-// identifies which signal dispatches are complete vs in-flight.
-func LoadDispatchState(eventsPath string) (*DispatchState, error) {
+// LoadDispatchStateFromStore queries the store for signal events and builds
+// a dispatch state.
+func LoadDispatchStateFromStore(ctx context.Context, st *store.Store, session string) (*DispatchState, error) {
 	ds := NewDispatchState()
 
-	data, err := os.ReadFile(eventsPath)
+	rows, err := st.GetEvents(ctx, session, "", 0)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return ds, nil
-		}
-		return nil, fmt.Errorf("dispatch: read events: %w", err)
+		return nil, fmt.Errorf("dispatch: get events from store: %w", err)
 	}
 
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		if line == "" {
+	for _, row := range rows {
+		var data map[string]any
+		if err := json.Unmarshal([]byte(row.DataJSON), &data); err != nil {
 			continue
 		}
-		var evt events.Event
-		if err := json.Unmarshal([]byte(line), &evt); err != nil {
-			continue // skip malformed lines
-		}
 
-		signalID, _ := evt.Data["signal_id"].(string)
+		signalID, _ := data["signal_id"].(string)
 		if signalID == "" {
 			continue
 		}
 
-		switch evt.Type {
-		case events.TypeSignalDispatching:
+		switch row.Type {
+		case store.TypeSignalDispatching:
 			ds.dispatched[signalID] = true
-		case events.TypeSignalSpawn, events.TypeSignalSpawnFailed,
-			events.TypeSignalEscalate:
+		case store.TypeSignalSpawn, store.TypeSignalSpawnFailed,
+			store.TypeSignalEscalate:
 			ds.completed[signalID] = true
 		}
 	}
 
 	return ds, nil
-}
-
-// emitDispatching writes a signal.dispatching event.
-func emitDispatching(ew *events.Writer, session string, cursor *events.Cursor, signalID, signalType string, iteration int) error {
-	return ew.Append(events.NewEvent(events.TypeSignalDispatching, session, cursor, map[string]any{
-		"signal_id":   signalID,
-		"signal_type": signalType,
-		"iteration":   iteration,
-	}))
 }

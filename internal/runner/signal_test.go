@@ -2,23 +2,18 @@ package runner
 
 import (
 	"context"
-	"encoding/json"
-	"os"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/hwells4/ap/internal/mock"
-	"github.com/hwells4/ap/internal/state"
+	"github.com/hwells4/ap/internal/store"
 )
 
 // TestIntegration_SignalCancelsIteration verifies that context cancellation
-// (simulating SIGINT/SIGTERM via WithSignalHandling) stops provider execution
-// and records graceful termination metadata in state and events.
+// stops provider execution and records graceful termination metadata.
 func TestIntegration_SignalCancelsIteration(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
-	// Provider that blocks long enough for us to cancel.
 	mp := mock.New(
 		mock.WithFallback(mock.Response{
 			Decision: "continue",
@@ -34,9 +29,9 @@ func TestIntegration_SignalCancelsIteration(t *testing.T) {
 		Provider:       mp,
 		Iterations:     100,
 		PromptTemplate: "iteration ${ITERATION}",
+		Store:          s,
 	}
 
-	// Cancel after a short delay to simulate signal arrival.
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
@@ -45,49 +40,31 @@ func TestIntegration_SignalCancelsIteration(t *testing.T) {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	// Session should be failed due to signal/context cancellation.
-	if res.Status != state.StateFailed {
-		t.Errorf("status = %q, want %q", res.Status, state.StateFailed)
+	if res.Status != store.StatusFailed {
+		t.Errorf("status = %q, want %q", res.Status, store.StatusFailed)
 	}
-
-	// Error should mention context.
 	if res.Error == "" {
 		t.Error("expected non-empty error")
 	}
 
-	// Verify state.json shows failed.
-	statePath := runDir + "/state.json"
-	st, err := state.Load(statePath)
+	// Verify store session shows failed.
+	row, err := s.GetSession(context.Background(), "test-signal")
 	if err != nil {
-		t.Fatalf("load state: %v", err)
+		t.Fatalf("get session: %v", err)
 	}
-	if st.Status != state.StateFailed {
-		t.Errorf("state status = %q, want %q", st.Status, state.StateFailed)
-	}
-
-	// Verify events.jsonl has error/termination events.
-	eventsData, err := os.ReadFile(runDir + "/events.jsonl")
-	if err != nil {
-		t.Fatalf("read events: %v", err)
+	if row.Status != store.StatusFailed {
+		t.Errorf("store status = %q, want %q", row.Status, store.StatusFailed)
 	}
 
-	events := strings.Split(strings.TrimSpace(string(eventsData)), "\n")
-	if len(events) == 0 {
-		t.Fatal("no events recorded")
-	}
-
-	// Should have at least session.started and a failure/error event.
+	// Verify events have at least session.started and a failure event.
+	evts := readEvents(t, s, "test-signal")
 	hasSessionStart := false
 	hasFailureEvent := false
-	for _, line := range events {
-		var evt map[string]any
-		if err := json.Unmarshal([]byte(line), &evt); err != nil {
-			continue
-		}
-		switch evt["type"] {
-		case "session.started":
+	for _, evt := range evts {
+		switch evt.Type {
+		case store.TypeSessionStart:
 			hasSessionStart = true
-		case "error", "iteration.failed":
+		case store.TypeError, store.TypeIterationFailed:
 			hasFailureEvent = true
 		}
 	}
@@ -100,12 +77,10 @@ func TestIntegration_SignalCancelsIteration(t *testing.T) {
 }
 
 // TestIntegration_SignalDuringSecondIteration verifies that a signal
-// arriving between iterations (after one completes) properly records
-// the completed iteration count.
+// arriving between iterations properly records the completed iteration count.
 func TestIntegration_SignalDuringSecondIteration(t *testing.T) {
-	runDir := tempSession(t)
+	runDir, s := tempSession(t)
 
-	// First iteration completes fast, second blocks.
 	mp := mock.New(
 		mock.WithResponses(
 			mock.Response{
@@ -127,9 +102,9 @@ func TestIntegration_SignalDuringSecondIteration(t *testing.T) {
 		Provider:       mp,
 		Iterations:     10,
 		PromptTemplate: "iteration ${ITERATION}",
+		Store:          s,
 	}
 
-	// Allow enough time for first iteration but cancel during second.
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
@@ -138,36 +113,31 @@ func TestIntegration_SignalDuringSecondIteration(t *testing.T) {
 		t.Fatalf("Run() error: %v", err)
 	}
 
-	if res.Status != state.StateFailed {
-		t.Errorf("status = %q, want %q", res.Status, state.StateFailed)
+	if res.Status != store.StatusFailed {
+		t.Errorf("status = %q, want %q", res.Status, store.StatusFailed)
 	}
 
-	// First iteration should have completed before signal.
-	// Provider should have been called at least once (first iteration)
-	// and possibly a second time (cancelled mid-execution).
 	calls := mp.CallCount()
 	if calls < 1 {
 		t.Errorf("provider calls = %d, want >= 1", calls)
 	}
 
-	// State should show at least iteration 1 completed.
-	st, err := state.Load(runDir + "/state.json")
+	row, err := s.GetSession(context.Background(), "test-signal-mid")
 	if err != nil {
-		t.Fatalf("load state: %v", err)
+		t.Fatalf("get session: %v", err)
 	}
-	if st.IterationCompleted < 1 {
-		t.Errorf("iteration_completed = %d, want >= 1", st.IterationCompleted)
+	if row.IterationCompleted < 1 {
+		t.Errorf("iteration_completed = %d, want >= 1", row.IterationCompleted)
 	}
 }
 
 // TestWithSignalHandling_ContextCancel verifies WithSignalHandling returns
-// a context that can be cancelled normally (without actual signals).
+// a context that can be cancelled normally.
 func TestWithSignalHandling_ContextCancel(t *testing.T) {
 	parent, parentCancel := context.WithCancel(context.Background())
 	ctx, cancel := WithSignalHandling(parent)
 	defer cancel()
 
-	// Cancel the parent — child should also be done.
 	parentCancel()
 
 	select {

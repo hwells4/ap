@@ -56,10 +56,11 @@ cat >> ${PROGRESS} << 'SUMMARY'
 SUMMARY
 ```
 
-## Status
+## Write Decision
 
-```bash
-cat > ${STATUS} << 'EOF'
+When you are done, output your decision in a fenced block:
+
+```ap-result
 {
   "decision": "continue",
   "reason": "Designing what I want",
@@ -70,5 +71,6 @@ cat > ${STATUS} << 'EOF'
   },
   "errors": []
 }
-EOF
 ```
+
+Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).

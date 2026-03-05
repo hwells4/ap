@@ -2,7 +2,6 @@
 
 Read context from: ${CTX}
 Progress file: ${PROGRESS}
-Status output: ${STATUS}
 Iteration: ${ITERATION}
 
 ${CONTEXT}
@@ -80,9 +79,11 @@ After implementing, append to `${PROGRESS}`:
 - [List of withdrawn/rejected recommendations]
 ```
 
-## Write Status
+## Write Decision
 
-```json
+When you are done, output your decision in a fenced block:
+
+```ap-result
 {
   "decision": "stop",
   "reason": "Implementation complete",
@@ -95,6 +96,6 @@ After implementing, append to `${PROGRESS}`:
 }
 ```
 
-Write to `${STATUS}`.
+Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
 
 Use ultrathink.

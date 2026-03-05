@@ -61,27 +61,24 @@ bd create --title="[Solution title]" --type=bug --priority=2 --label="pipeline/$
 
 Use priority 0-1 for critical, 2 for should-fix, 3 for nice-to-have.
 
-## Write Result
+## Write Decision
 
-After completing your analysis, write your result to `${RESULT}` (set `signals.plateau_suspected` true when further analysis would yield diminishing returns):
+When you are done, output your decision in a fenced block:
 
-```json
+```ap-result
 {
+  "decision": "continue",
   "summary": "Sharp observations—what patterns you found, what elegant consolidations emerged",
   "work": {
     "items_completed": [],
     "files_touched": []
   },
-  "artifacts": {
-    "outputs": [],
-    "paths": []
-  },
-  "signals": {
-    "plateau_suspected": false,
-    "risk": "low",
-    "notes": ""
-  }
+  "errors": []
 }
 ```
+
+Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
+
+Set `"decision": "stop"` when further analysis would yield diminishing returns.
 
 Use ultrathink.

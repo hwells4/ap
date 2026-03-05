@@ -2,7 +2,6 @@
 
 Context: ${CTX}
 Progress: ${PROGRESS}
-Status: ${STATUS}
 
 ${CONTEXT}
 
@@ -28,13 +27,13 @@ Before we proceed with this plan, do a **premortem**. Imagine we're 6 months in 
 
 4. **Revise the plan.** Propose specific, concrete changes to address the most likely failure modes. Don't just say "add error handling" — say exactly what, where, and how.
 
-5. **Write status** and stop:
-   ```bash
-   cat > ${STATUS} << 'EOF'
+5. **Output your decision** and stop:
+   ```ap-result
    {"decision": "continue", "summary": "Premortem analysis: identified N failure modes, proposed N mitigations"}
-   EOF
    ```
    Use `"decision": "stop"` if the premortem is comprehensive and no further iterations needed.
+
+   Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
 
 ## Update Progress
 

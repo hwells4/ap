@@ -2,7 +2,6 @@
 
 Context: ${CTX}
 Progress: ${PROGRESS}
-Status: ${STATUS}
 
 ${CONTEXT}
 
@@ -38,12 +37,12 @@ Generate your top 10 most brilliant ideas for making this system far more compel
    - How to implement it (sketch, not full spec)
    - Confidence it improves the project (0-100%)
 
-5. **Write status**:
-   ```bash
-   cat > ${STATUS} << 'EOF'
+5. **Output your decision**:
+   ```ap-result
    {"decision": "stop", "summary": "Generated 100 ideas, filtered to top 10"}
-   EOF
    ```
+
+   Valid decisions: "continue" (keep going), "stop" (done, no more iterations needed), "error" (something went wrong).
 
 ## Write Output
 
