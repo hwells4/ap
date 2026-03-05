@@ -1,6 +1,10 @@
 package session
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"strings"
+)
 
 var (
 	// ErrSessionExists is returned when starting a session that already exists.
@@ -49,4 +53,17 @@ type Launcher interface {
 
 	// Name returns the launcher backend name.
 	Name() string
+}
+
+// ResolveLauncher returns the Launcher implementation for the given backend name.
+// An empty name defaults to "tmux".
+func ResolveLauncher(name string) (Launcher, error) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "tmux", "":
+		return NewTmuxLauncher(), nil
+	case "process":
+		return NewProcessLauncher(), nil
+	default:
+		return nil, fmt.Errorf("unknown launcher %q; available: tmux, process", name)
+	}
 }

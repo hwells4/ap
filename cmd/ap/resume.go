@@ -233,10 +233,16 @@ func resumeSessionStore(deps cliDeps, sessionStore *store.Store, ctx context.Con
 	}
 	runnerCmd := []string{executable, "_run", "--session", session, "--request", requestPath, "--resume"}
 
-	// Resolve launcher.
+	// Resolve launcher: use injected launcher, then config/env/compiled default.
 	launcher := deps.launcher
 	if launcher == nil {
-		launcher = sessionpkg.NewTmuxLauncher()
+		cfg := loadConfigOrDefault(deps)
+		launcherName := resolveDefault("", "AP_LAUNCHER", cfg.Defaults.Launcher, "tmux")
+		var err error
+		launcher, err = sessionpkg.ResolveLauncher(launcherName)
+		if err != nil {
+			launcher = sessionpkg.NewTmuxLauncher()
+		}
 	}
 	if !launcher.Available() {
 		return renderError(deps, output.ExitGeneralError, output.NewError(

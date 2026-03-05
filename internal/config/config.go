@@ -23,9 +23,18 @@ const (
 
 // Config is the typed representation of config.yaml.
 type Config struct {
-	Signals SignalsConfig `yaml:"signals"`
-	Limits  LimitsConfig  `yaml:"limits"`
-	Hooks   HooksConfig   `yaml:"hooks"`
+	Defaults DefaultsConfig `yaml:"defaults"`
+	Signals  SignalsConfig  `yaml:"signals"`
+	Limits   LimitsConfig   `yaml:"limits"`
+	Hooks    HooksConfig    `yaml:"hooks"`
+}
+
+// DefaultsConfig sets default values for launcher, provider, and model.
+// Precedence: CLI flag > AP_* env var > config defaults > compiled default.
+type DefaultsConfig struct {
+	Launcher string `yaml:"launcher"`
+	Provider string `yaml:"provider"`
+	Model    string `yaml:"model"`
 }
 
 // SignalsConfig configures signal dispatch behavior.
@@ -61,6 +70,11 @@ type HooksConfig struct {
 // Default returns a config with all default values applied.
 func Default() Config {
 	return Config{
+		Defaults: DefaultsConfig{
+			Launcher: "tmux",
+			Provider: "claude",
+			Model:    "",
+		},
 		Signals: SignalsConfig{
 			CallbackHost:   defaultCallbackHost,
 			HandlerTimeout: defaultHandlerTimeout,
@@ -126,6 +140,14 @@ func (c *Config) Validate() error {
 		return errors.New("config is nil")
 	}
 
+	if launcher := strings.ToLower(strings.TrimSpace(c.Defaults.Launcher)); launcher != "" {
+		switch launcher {
+		case "tmux", "process":
+		default:
+			return fmt.Errorf("defaults.launcher %q is invalid (allowed: tmux, process)", c.Defaults.Launcher)
+		}
+	}
+
 	if c.Signals.HandlerTimeout < 0 {
 		return fmt.Errorf("signals.handler_timeout must be >= 0")
 	}
@@ -170,10 +192,29 @@ func (c Config) WatchHooks() HooksConfig {
 	return c.Hooks
 }
 
+// DefaultLauncher returns the configured default launcher backend name.
+func (c Config) DefaultLauncher() string { return c.Defaults.Launcher }
+
+// DefaultProvider returns the configured default provider name.
+func (c Config) DefaultProvider() string { return c.Defaults.Provider }
+
+// DefaultModel returns the configured default model name (may be empty).
+func (c Config) DefaultModel() string { return c.Defaults.Model }
+
 func (c *Config) normalize() {
 	if c == nil {
 		return
 	}
+
+	c.Defaults.Launcher = strings.ToLower(strings.TrimSpace(c.Defaults.Launcher))
+	if c.Defaults.Launcher == "" {
+		c.Defaults.Launcher = "tmux"
+	}
+	c.Defaults.Provider = strings.ToLower(strings.TrimSpace(c.Defaults.Provider))
+	if c.Defaults.Provider == "" {
+		c.Defaults.Provider = "claude"
+	}
+	c.Defaults.Model = strings.TrimSpace(c.Defaults.Model)
 
 	c.Signals.CallbackHost = strings.TrimSpace(c.Signals.CallbackHost)
 	if c.Signals.CallbackHost == "" {

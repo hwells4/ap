@@ -224,3 +224,91 @@ hooks:
 		t.Fatalf("WatchHooks().OnIdle = %q, want %q", hooks.OnIdle, "echo idle")
 	}
 }
+
+func TestLoad_DefaultsSection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "with-defaults.yaml")
+	if err := os.WriteFile(path, []byte(`
+defaults:
+  launcher: process
+  provider: codex
+  model: codex-mini-latest
+`), 0o644); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.DefaultLauncher() != "process" {
+		t.Fatalf("DefaultLauncher() = %q, want %q", cfg.DefaultLauncher(), "process")
+	}
+	if cfg.DefaultProvider() != "codex" {
+		t.Fatalf("DefaultProvider() = %q, want %q", cfg.DefaultProvider(), "codex")
+	}
+	if cfg.DefaultModel() != "codex-mini-latest" {
+		t.Fatalf("DefaultModel() = %q, want %q", cfg.DefaultModel(), "codex-mini-latest")
+	}
+}
+
+func TestLoad_DefaultsAppliedWhenAbsent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load(\"\") error = %v", err)
+	}
+
+	if cfg.DefaultLauncher() != "tmux" {
+		t.Fatalf("DefaultLauncher() = %q, want %q", cfg.DefaultLauncher(), "tmux")
+	}
+	if cfg.DefaultProvider() != "claude" {
+		t.Fatalf("DefaultProvider() = %q, want %q", cfg.DefaultProvider(), "claude")
+	}
+	if cfg.DefaultModel() != "" {
+		t.Fatalf("DefaultModel() = %q, want %q", cfg.DefaultModel(), "")
+	}
+}
+
+func TestValidate_InvalidLauncherName(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bad-launcher.yaml")
+	if err := os.WriteFile(path, []byte(`
+defaults:
+  launcher: kubernetes
+`), 0o644); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for invalid launcher")
+	}
+	if !strings.Contains(err.Error(), "defaults.launcher") {
+		t.Fatalf("expected defaults.launcher validation error, got %v", err)
+	}
+}
+
+func TestNormalize_LowercasesDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "upper-defaults.yaml")
+	if err := os.WriteFile(path, []byte(`
+defaults:
+  launcher: TMUX
+  provider: Claude
+`), 0o644); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.DefaultLauncher() != "tmux" {
+		t.Fatalf("DefaultLauncher() = %q, want %q", cfg.DefaultLauncher(), "tmux")
+	}
+	if cfg.DefaultProvider() != "claude" {
+		t.Fatalf("DefaultProvider() = %q, want %q", cfg.DefaultProvider(), "claude")
+	}
+}

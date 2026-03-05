@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hwells4/ap/internal/config"
 	"github.com/hwells4/ap/internal/fuzzy"
 	"github.com/hwells4/ap/internal/output"
 	"github.com/hwells4/ap/internal/runtarget"
@@ -32,6 +33,7 @@ type cliDeps struct {
 	corrections []output.Correction
 	launcher    session.Launcher
 	store       *store.Store
+	config      *config.Config // nil = load from default path
 }
 
 func main() {
@@ -191,6 +193,34 @@ type runRequest struct {
 	ExplainSpec bool
 }
 
+// loadConfigOrDefault returns the config from deps (test injection), or loads
+// from the default path, falling back to compiled defaults on any error.
+func loadConfigOrDefault(deps cliDeps) config.Config {
+	if deps.config != nil {
+		return *deps.config
+	}
+	cfg, err := config.Load("")
+	if err != nil {
+		return config.Default()
+	}
+	return cfg
+}
+
+// resolveDefault returns the first non-empty value in precedence order:
+// CLI flag > environment variable > config file value > compiled default.
+func resolveDefault(flagVal, envKey, configVal, compiled string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	if v := os.Getenv(envKey); v != "" {
+		return v
+	}
+	if configVal != "" {
+		return configVal
+	}
+	return compiled
+}
+
 func runRun(args []string, deps cliDeps) int {
 	req, parsedSpec, corrections, errResp := parseRunArgs(args, deps.getwd)
 	if errResp != nil {
@@ -198,7 +228,13 @@ func runRun(args []string, deps cliDeps) int {
 	}
 	deps.corrections = append(deps.corrections, corrections...)
 
-	// Validate and normalize provider name if explicitly set.
+	cfg := loadConfigOrDefault(deps)
+
+	// Apply config defaults for provider and model when not set by flags.
+	req.Provider = resolveDefault(req.Provider, "AP_PROVIDER", cfg.Defaults.Provider, "claude")
+	req.Model = resolveDefault(req.Model, "AP_MODEL", cfg.Defaults.Model, "")
+
+	// Validate and normalize provider name.
 	if req.Provider != "" {
 		if provErr := validateProviderName(req.Provider); provErr != nil {
 			return renderError(deps, output.ExitInvalidArgs, *provErr)
@@ -210,7 +246,7 @@ func runRun(args []string, deps cliDeps) int {
 	if req.Model != "" {
 		provName := req.Provider
 		if provName == "" {
-			provName = "claude" // default provider
+			provName = "claude"
 		}
 		if modelErr := validateModelForProvider(req.Model, provName); modelErr != nil {
 			return renderError(deps, output.ExitInvalidArgs, *modelErr)
@@ -279,10 +315,15 @@ func runRun(args []string, deps cliDeps) int {
 		))
 	}
 
-	// Resolve launcher: use injected launcher or default to tmux.
+	// Resolve launcher: use injected launcher, then config/env/compiled default.
 	launcher := deps.launcher
 	if launcher == nil {
-		launcher = session.NewTmuxLauncher()
+		launcherName := resolveDefault("", "AP_LAUNCHER", cfg.Defaults.Launcher, "tmux")
+		var err error
+		launcher, err = session.ResolveLauncher(launcherName)
+		if err != nil {
+			launcher = session.NewTmuxLauncher()
+		}
 	}
 
 	// Foreground mode: run directly in this process.

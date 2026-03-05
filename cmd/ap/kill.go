@@ -88,10 +88,16 @@ func runKill(args []string, deps cliDeps) int {
 	wasRunning := false
 	var childrenKilled []string
 
-	// Resolve launcher: use injected launcher or default to tmux.
+	// Resolve launcher: use injected launcher, then config/env/compiled default.
 	launcher := deps.launcher
 	if launcher == nil {
-		launcher = session.NewTmuxLauncher()
+		cfg := loadConfigOrDefault(deps)
+		launcherName := resolveDefault("", "AP_LAUNCHER", cfg.Defaults.Launcher, "tmux")
+		var err error
+		launcher, err = session.ResolveLauncher(launcherName)
+		if err != nil {
+			launcher = session.NewTmuxLauncher()
+		}
 	}
 
 	// Try to kill via launcher (primary backend). Kill is idempotent,
