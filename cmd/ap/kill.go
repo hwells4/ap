@@ -15,10 +15,13 @@ import (
 )
 
 func runKill(args []string, deps cliDeps) int {
-	sessionName, errResp := parseKillArgs(args)
+	const killSyntax = "ap kill <session> [--project-root DIR] [--json]"
+	parsed, errResp := parseKillArgs(args)
 	if errResp != nil {
 		return renderError(deps, output.ExitInvalidArgs, *errResp)
 	}
+	sessionName := parsed.SessionName
+	projectRootFlag := parsed.ProjectRoot
 
 	projectRoot := "."
 	if deps.getwd != nil {
@@ -26,6 +29,59 @@ func runKill(args []string, deps cliDeps) int {
 			projectRoot = cwd
 		}
 	}
+	if strings.TrimSpace(projectRootFlag) != "" {
+		resolved, rootErr := resolveRunProjectRoot(projectRootFlag, deps.getwd)
+		if rootErr != nil {
+			return renderError(deps, output.ExitInvalidArgs, output.NewError(
+				"INVALID_ARGUMENT",
+				rootErr.Error(),
+				"",
+				killSyntax,
+				[]string{"ap kill my-session --project-root /abs/path --json"},
+			))
+		}
+		projectRoot = resolved
+	}
+
+	ctx := context.Background()
+	selectedStore := deps.store
+	cleanup := func() {}
+	resolvedStore, resolvedCleanup, lookupErr := resolveSessionStore(ctx, deps, sessionName, projectRootFlag)
+	if lookupErr == nil {
+		selectedStore = resolvedStore
+		cleanup = resolvedCleanup
+		if resolvedRoot := strings.TrimSpace(selectedStore.ProjectRoot()); resolvedRoot != "" {
+			projectRoot = resolvedRoot
+		}
+	} else {
+		if !errors.Is(lookupErr, errSessionLookupNotFound) {
+			var ambiguous *sessionLookupAmbiguousError
+			if errors.As(lookupErr, &ambiguous) {
+				suggestions := []string{}
+				for _, match := range ambiguous.Matches {
+					suggestions = append(suggestions, fmt.Sprintf("ap kill %s --project-root %s --json", sessionName, match.ProjectRoot))
+					if len(suggestions) >= 3 {
+						break
+					}
+				}
+				return renderError(deps, output.ExitInvalidArgs, output.NewError(
+					"SESSION_AMBIGUOUS",
+					lookupErr.Error(),
+					"Use --project-root to select the project explicitly.",
+					killSyntax,
+					suggestions,
+				))
+			}
+			return renderError(deps, output.ExitGeneralError, output.NewError(
+				"STATE_READ_FAILED",
+				fmt.Sprintf("failed to resolve store for session %q", sessionName),
+				lookupErr.Error(),
+				killSyntax,
+				nil,
+			))
+		}
+	}
+	defer cleanup()
 
 	locksDir := filepath.Join(projectRoot, ".ap", "locks")
 
@@ -44,25 +100,27 @@ func runKill(args []string, deps cliDeps) int {
 		_ = launcher.Kill(sessionName)
 	}
 
-	ctx := context.Background()
-
 	// Update session state via store.
-	if deps.store != nil {
-		row, storeErr := deps.store.GetSession(ctx, sessionName)
+	if selectedStore != nil {
+		row, storeErr := selectedStore.GetSession(ctx, sessionName)
 		if storeErr == nil {
+			if root := strings.TrimSpace(row.ProjectRoot); root != "" {
+				projectRoot = root
+				locksDir = filepath.Join(projectRoot, ".ap", "locks")
+			}
 			switch row.Status {
 			case "completed", "failed", "aborted":
 				// Already terminal — nothing to do.
 			default:
 				wasRunning = true
-				_ = deps.store.UpdateSession(ctx, sessionName, map[string]any{
+				_ = selectedStore.UpdateSession(ctx, sessionName, map[string]any{
 					"status": "aborted",
 				})
 			}
 			// Cascade kill to child sessions.
-			children, _ := deps.store.GetChildren(ctx, sessionName)
+			children, _ := selectedStore.GetChildren(ctx, sessionName)
 			for _, child := range children {
-				if killChildSessionStore(ctx, deps.store, locksDir, child, launcher) {
+				if killChildSessionStore(ctx, selectedStore, locksDir, child, launcher) {
 					childrenKilled = append(childrenKilled, child)
 				}
 			}
@@ -149,48 +207,7 @@ func killChildSessionStore(ctx context.Context, s *store.Store, locksDir, child 
 	return true
 }
 
-func parseKillArgs(args []string) (string, *output.ErrorResponse) {
+func parseKillArgs(args []string) (parsedSessionArgs, *output.ErrorResponse) {
 	// Safety: NO fuzzy matching on kill — exact arguments only.
-	var sessionName string
-
-	for _, arg := range args {
-		switch {
-		case arg == "--json":
-			continue // handled globally
-		case strings.HasPrefix(arg, "-"):
-			errResp := output.NewError(
-				"INVALID_ARGUMENT",
-				fmt.Sprintf("unknown flag %q", arg),
-				"ap kill accepts no flags other than --json.",
-				"ap kill <session> [--json]",
-				[]string{"ap kill my-session", "ap kill my-session --json"},
-			)
-			return "", &errResp
-		default:
-			if sessionName != "" {
-				errResp := output.NewError(
-					"INVALID_ARGUMENT",
-					"ap kill takes exactly one session name",
-					fmt.Sprintf("Got %q and %q.", sessionName, arg),
-					"ap kill <session> [--json]",
-					[]string{"ap kill my-session"},
-				)
-				return "", &errResp
-			}
-			sessionName = strings.TrimSpace(arg)
-		}
-	}
-
-	if sessionName == "" {
-		errResp := output.NewError(
-			"INVALID_ARGUMENT",
-			"missing required argument: <session>",
-			"Provide the session name to kill.",
-			"ap kill <session> [--json]",
-			[]string{"ap kill my-session", "ap kill my-session --json"},
-		)
-		return "", &errResp
-	}
-
-	return sessionName, nil
+	return parseSessionArgs(args, "kill", "ap kill <session> [--project-root DIR] [--json]", nil)
 }

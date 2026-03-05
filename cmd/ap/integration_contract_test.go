@@ -12,6 +12,7 @@ import (
 
 	"github.com/hwells4/ap/internal/lock"
 	"github.com/hwells4/ap/internal/output"
+	"github.com/hwells4/ap/internal/session"
 	"github.com/hwells4/ap/internal/store"
 )
 
@@ -67,9 +68,11 @@ func TestIntegration_KillAndResumeLifecycle(t *testing.T) {
 		t.Fatalf("state after kill = %q, want %q", killRow.Status, "aborted")
 	}
 
-	// Set up a failed session for resume.
+	// Set up a failed session for resume with a valid run request.
 	resumeSession := "int-resume"
-	if err := s.CreateSession(ctx, resumeSession, "loop", "", "{}"); err != nil {
+	resumeRunDir := filepath.Join(root, ".ap", "runs", resumeSession)
+	resumeReqJSON := testRunRequestJSON(resumeSession, resumeRunDir, root)
+	if err := s.CreateSession(ctx, resumeSession, "loop", "", resumeReqJSON); err != nil {
 		t.Fatalf("create resume session: %v", err)
 	}
 	_ = s.UpdateSession(ctx, resumeSession, map[string]any{
@@ -80,13 +83,19 @@ func TestIntegration_KillAndResumeLifecycle(t *testing.T) {
 		"error_type":          "provider_error",
 	})
 
+	resumeLauncher := &testLauncher{
+		available: true,
+		handle:    session.SessionHandle{Session: resumeSession, PID: 55, Backend: "test"},
+	}
+
 	var resumeOut, resumeErr bytes.Buffer
 	resumeDeps := cliDeps{
-		mode:   output.ModeJSON,
-		stdout: &resumeOut,
-		stderr: &resumeErr,
-		getwd:  func() (string, error) { return root, nil },
-		store:  s,
+		mode:     output.ModeJSON,
+		stdout:   &resumeOut,
+		stderr:   &resumeErr,
+		getwd:    func() (string, error) { return root, nil },
+		store:    s,
+		launcher: resumeLauncher,
 	}
 
 	resumeCode := runResume([]string{resumeSession, "--context", "focus on tests", "--json"}, resumeDeps)

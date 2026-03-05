@@ -14,49 +14,26 @@ import (
 	"github.com/hwells4/ap/internal/store"
 )
 
+const logsSyntax = "ap logs <session> [-f] [--project-root DIR] [--json]"
+
 func runLogs(args []string, deps cliDeps) int {
-	sessionName, follow, projectRootFlag, errResp := parseLogsArgs(args)
+	follow := false
+	parsed, errResp := parseLogsArgs(args, &follow)
 	if errResp != nil {
 		return renderError(deps, output.ExitInvalidArgs, *errResp)
 	}
+	sessionName := parsed.SessionName
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	selectedStore, cleanup, lookupErr := resolveSessionStore(ctx, deps, sessionName, projectRootFlag)
-	if lookupErr != nil {
-		if errors.Is(lookupErr, errSessionLookupNotFound) {
-			return renderError(deps, output.ExitNotFound, output.NewError(
-				"SESSION_NOT_FOUND",
-				fmt.Sprintf("session %q not found", sessionName),
-				"No session found in local or machine-wide index.",
-				"ap logs <session> [-f] [--project-root DIR] [--json]",
-				[]string{"ap query sessions --status running --json", "ap logs my-session --project-root /abs/path --json"},
-			))
-		}
-		var ambiguous *sessionLookupAmbiguousError
-		if errors.As(lookupErr, &ambiguous) {
-			suggestions := []string{}
-			for _, match := range ambiguous.Matches {
-				suggestions = append(suggestions, fmt.Sprintf("ap logs %s --project-root %s --json", sessionName, match.ProjectRoot))
-				if len(suggestions) >= 3 {
-					break
-				}
-			}
-			return renderError(deps, output.ExitInvalidArgs, output.NewError(
-				"SESSION_AMBIGUOUS",
-				lookupErr.Error(),
-				"Use --project-root to select the project explicitly.",
-				"ap logs <session> [-f] [--project-root DIR] [--json]",
-				suggestions,
-			))
-		}
-		return renderError(deps, output.ExitGeneralError, output.NewError(
-			"EVENTS_READ_FAILED",
-			fmt.Sprintf("failed to resolve store for session %q", sessionName),
-			lookupErr.Error(),
-			"ap logs <session> [-f] [--project-root DIR] [--json]",
-			nil,
-		))
+
+	selectedStore, cleanup, exitCode := resolveSessionWithErrors(ctx, deps, sessionName, parsed.ProjectRoot, sessionResolutionOpts{
+		CommandName:  "logs",
+		Syntax:       logsSyntax,
+		FallbackCode: "EVENTS_READ_FAILED",
+	})
+	if exitCode != 0 {
+		return exitCode
 	}
 	defer cleanup()
 
@@ -68,7 +45,7 @@ func runLogs(args []string, deps cliDeps) int {
 				"SESSION_NOT_FOUND",
 				fmt.Sprintf("session %q not found", sessionName),
 				"No session with that name in the store.",
-				"ap logs <session> [-f] [--project-root DIR] [--json]",
+				logsSyntax,
 				[]string{"ap query sessions --status running --json", "ap logs my-session --project-root /abs/path --json"},
 			))
 		}
@@ -76,7 +53,7 @@ func runLogs(args []string, deps cliDeps) int {
 			"EVENTS_READ_FAILED",
 			"failed to check session",
 			err.Error(),
-			"ap logs <session> [-f] [--project-root DIR] [--json]",
+			logsSyntax,
 			nil,
 		))
 	}
@@ -215,66 +192,12 @@ func formatEventRowHuman(evt store.EventRow) string {
 	return b.String()
 }
 
-func parseLogsArgs(args []string) (string, bool, string, *output.ErrorResponse) {
-	var sessionName string
-	var follow bool
-	var projectRoot string
-
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case arg == "--json":
-			continue
-		case arg == "-f" || arg == "--follow":
-			follow = true
-		case arg == "--project-root" || strings.HasPrefix(arg, "--project-root=") || arg == "--workdir" || strings.HasPrefix(arg, "--workdir="):
-			value, next, err := readFlagValue(arg, args, i)
-			if err != nil {
-				errResp := output.NewError(
-					"INVALID_ARGUMENT",
-					err.Error(),
-					"",
-					"ap logs <session> [-f] [--project-root DIR] [--json]",
-					[]string{"ap logs my-session --project-root /abs/path --json"},
-				)
-				return "", false, "", &errResp
-			}
-			i = next
-			projectRoot = strings.TrimSpace(value)
-		case strings.HasPrefix(arg, "-"):
-			errResp := output.NewError(
-				"INVALID_ARGUMENT",
-				fmt.Sprintf("unknown flag %q", arg),
-				"ap logs accepts -f/--follow, --project-root/--workdir, and --json.",
-				"ap logs <session> [-f] [--project-root DIR] [--json]",
-				[]string{"ap logs my-session", "ap logs my-session -f --project-root /abs/path --json"},
-			)
-			return "", false, "", &errResp
-		default:
-			if sessionName != "" {
-				errResp := output.NewError(
-					"INVALID_ARGUMENT",
-					"ap logs takes exactly one session name",
-					fmt.Sprintf("Got %q and %q.", sessionName, arg),
-					"ap logs <session> [-f] [--project-root DIR] [--json]",
-					[]string{"ap logs my-session"},
-				)
-				return "", false, "", &errResp
-			}
-			sessionName = strings.TrimSpace(arg)
+func parseLogsArgs(args []string, follow *bool) (parsedSessionArgs, *output.ErrorResponse) {
+	return parseSessionArgs(args, "logs", logsSyntax, func(flag string, flagArgs []string, i int) (int, bool, *output.ErrorResponse) {
+		if flag == "-f" || flag == "--follow" {
+			*follow = true
+			return i, true, nil
 		}
-	}
-
-	if sessionName == "" {
-		errResp := output.NewError(
-			"INVALID_ARGUMENT",
-			"missing required argument: <session>",
-			"Provide the session name to view logs.",
-			"ap logs <session> [-f] [--project-root DIR] [--json]",
-			[]string{"ap logs my-session", "ap logs my-session -f"},
-		)
-		return "", false, "", &errResp
-	}
-
-	return sessionName, follow, projectRoot, nil
+		return i, false, nil
+	})
 }

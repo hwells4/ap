@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
+	"github.com/hwells4/ap/internal/controlplane"
 	"github.com/hwells4/ap/internal/output"
 	"github.com/hwells4/ap/internal/store"
 )
@@ -58,6 +60,8 @@ func runQuery(args []string, deps cliDeps) int {
 
 func querySessionsCmd(args []string, deps cliDeps) int {
 	var statusFilter string
+	scope := "instance"
+	projectRootFlag := ""
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -73,39 +77,138 @@ func querySessionsCmd(args []string, deps cliDeps) int {
 			}
 			i = next
 			statusFilter = strings.TrimSpace(value)
+		case arg == "--scope" || strings.HasPrefix(arg, "--scope="):
+			value, next, err := readFlagValue(arg, args, i)
+			if err != nil {
+				return renderError(deps, output.ExitInvalidArgs, output.NewError(
+					"INVALID_ARGUMENT", err.Error(), "",
+					"ap query sessions [--status STATUS] [--scope project|instance] [--project-root DIR] [--json]", nil,
+				))
+			}
+			i = next
+			scope = strings.ToLower(strings.TrimSpace(value))
+			if scope != "project" && scope != "instance" {
+				return renderError(deps, output.ExitInvalidArgs, output.NewError(
+					"INVALID_ARGUMENT",
+					fmt.Sprintf("invalid --scope value %q", value),
+					"Allowed values: project, instance.",
+					"ap query sessions [--status STATUS] [--scope project|instance] [--project-root DIR] [--json]",
+					[]string{"ap query sessions --scope instance --json"},
+				))
+			}
+		case arg == "--project-root" || strings.HasPrefix(arg, "--project-root=") || arg == "--workdir" || strings.HasPrefix(arg, "--workdir="):
+			value, next, err := readFlagValue(arg, args, i)
+			if err != nil {
+				return renderError(deps, output.ExitInvalidArgs, output.NewError(
+					"INVALID_ARGUMENT", err.Error(), "",
+					"ap query sessions [--status STATUS] [--scope project|instance] [--project-root DIR] [--json]", nil,
+				))
+			}
+			i = next
+			projectRootFlag = strings.TrimSpace(value)
 		case strings.HasPrefix(arg, "-"):
 			return renderError(deps, output.ExitInvalidArgs, output.NewError(
 				"INVALID_ARGUMENT",
 				fmt.Sprintf("unknown flag %q", arg),
-				"ap query sessions accepts --status and --json.",
-				"ap query sessions [--status STATUS] [--json]",
-				[]string{"ap query sessions --json", "ap query sessions --status running --json"},
+				"ap query sessions accepts --status, --scope, --project-root, and --json.",
+				"ap query sessions [--status STATUS] [--scope project|instance] [--project-root DIR] [--json]",
+				[]string{"ap query sessions --json", "ap query sessions --status running --scope instance --json"},
 			))
 		default:
 			return renderError(deps, output.ExitInvalidArgs, output.NewError(
 				"INVALID_ARGUMENT",
 				fmt.Sprintf("unexpected argument %q", arg),
 				"",
-				"ap query sessions [--status STATUS] [--json]",
+				"ap query sessions [--status STATUS] [--scope project|instance] [--project-root DIR] [--json]",
 				nil,
 			))
 		}
 	}
 
-	ctx := context.Background()
-	rows, err := deps.store.ListSessions(ctx, statusFilter)
+	if scope == "project" {
+		ctx := context.Background()
+		selectedStore := deps.store
+		cleanup := func() {}
+		if projectRootFlag != "" {
+			projectRoot, rootErr := resolveRunProjectRoot(projectRootFlag, deps.getwd)
+			if rootErr != nil {
+				return renderError(deps, output.ExitInvalidArgs, output.NewError(
+					"INVALID_ARGUMENT",
+					rootErr.Error(),
+					"",
+					"ap query sessions [--scope project] [--project-root DIR] [--json]",
+					[]string{"ap query sessions --scope project --project-root /abs/path --json"},
+				))
+			}
+			s, err := store.Open(filepath.Join(projectRoot, ".ap", "ap.db"))
+			if err != nil {
+				return renderError(deps, output.ExitGeneralError, output.NewError(
+					"QUERY_FAILED", "failed to open project store", err.Error(),
+					"ap query sessions [--scope project] [--project-root DIR] [--json]", nil,
+				))
+			}
+			selectedStore = s
+			cleanup = func() { _ = s.Close() }
+		} else if selectedStore == nil {
+			projectRoot, rootErr := resolveRunProjectRoot("", deps.getwd)
+			if rootErr != nil {
+				return renderError(deps, output.ExitGeneralError, output.NewError(
+					"QUERY_FAILED", "failed to resolve project root", rootErr.Error(),
+					"ap query sessions [--scope project] [--json]", nil,
+				))
+			}
+			s, err := store.Open(filepath.Join(projectRoot, ".ap", "ap.db"))
+			if err != nil {
+				return renderError(deps, output.ExitGeneralError, output.NewError(
+					"QUERY_FAILED", "failed to open project store", err.Error(),
+					"ap query sessions [--scope project] [--json]", nil,
+				))
+			}
+			selectedStore = s
+			cleanup = func() { _ = s.Close() }
+		}
+		defer cleanup()
+
+		rows, err := selectedStore.ListSessions(ctx, statusFilter)
+		if err != nil {
+			return renderError(deps, output.ExitGeneralError, output.NewError(
+				"QUERY_FAILED", "failed to query sessions", err.Error(),
+				"ap query sessions [--scope project] [--json]", nil,
+			))
+		}
+
+		sessions := make([]map[string]any, 0, len(rows))
+		for _, r := range rows {
+			sessions = append(sessions, sessionRowToSummary(&r))
+		}
+		return renderQuerySessionsResult(deps, sessions)
+	}
+
+	cp, err := controlplane.Open("")
 	if err != nil {
 		return renderError(deps, output.ExitGeneralError, output.NewError(
-			"QUERY_FAILED", "failed to query sessions", err.Error(),
-			"ap query sessions [--json]", nil,
+			"QUERY_FAILED", "failed to open global session index", err.Error(),
+			"ap query sessions [--scope instance] [--json]", nil,
+		))
+	}
+	defer cp.Close()
+
+	recs, err := cp.ListSessions(statusFilter)
+	if err != nil {
+		return renderError(deps, output.ExitGeneralError, output.NewError(
+			"QUERY_FAILED", "failed to query global sessions", err.Error(),
+			"ap query sessions [--scope instance] [--json]", nil,
 		))
 	}
 
-	sessions := make([]map[string]any, 0, len(rows))
-	for _, r := range rows {
-		sessions = append(sessions, sessionRowToSummary(&r))
+	sessions := make([]map[string]any, 0, len(recs))
+	for _, rec := range recs {
+		sessions = append(sessions, sessionRecordToSummary(rec))
 	}
+	return renderQuerySessionsResult(deps, sessions)
+}
 
+func renderQuerySessionsResult(deps cliDeps, sessions []map[string]any) int {
 	if deps.mode == output.ModeJSON {
 		payload := output.NewSuccess(map[string]any{"sessions": sessions, "count": len(sessions)}, deps.corrections)
 		serialized, _ := output.MarshalSuccess(payload)
@@ -118,6 +221,12 @@ func querySessionsCmd(args []string, deps cliDeps) int {
 		return output.ExitSuccess
 	}
 	for _, s := range sessions {
+		projectRoot, _ := s["project_root"].(string)
+		if projectRoot != "" {
+			_, _ = fmt.Fprintf(deps.stdout, "%-20s  %-10s  iter=%d/%d  %s\n",
+				s["name"], s["status"], s["iteration_completed"], s["iteration"], projectRoot)
+			continue
+		}
 		_, _ = fmt.Fprintf(deps.stdout, "%-20s  %-10s  iter=%d/%d\n",
 			s["name"], s["status"], s["iteration_completed"], s["iteration"])
 	}
@@ -125,7 +234,7 @@ func querySessionsCmd(args []string, deps cliDeps) int {
 }
 
 func queryIterationsCmd(args []string, deps cliDeps) int {
-	var sessionName, stageFilter string
+	var sessionName, stageFilter, projectRootFlag string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -151,12 +260,22 @@ func queryIterationsCmd(args []string, deps cliDeps) int {
 			}
 			i = next
 			stageFilter = strings.TrimSpace(value)
+		case arg == "--project-root" || strings.HasPrefix(arg, "--project-root=") || arg == "--workdir" || strings.HasPrefix(arg, "--workdir="):
+			value, next, err := readFlagValue(arg, args, i)
+			if err != nil {
+				return renderError(deps, output.ExitInvalidArgs, output.NewError(
+					"INVALID_ARGUMENT", err.Error(), "",
+					"ap query iterations --session NAME [--stage NAME] [--project-root DIR] [--json]", nil,
+				))
+			}
+			i = next
+			projectRootFlag = strings.TrimSpace(value)
 		case strings.HasPrefix(arg, "-"):
 			return renderError(deps, output.ExitInvalidArgs, output.NewError(
 				"INVALID_ARGUMENT",
 				fmt.Sprintf("unknown flag %q", arg),
 				"",
-				"ap query iterations --session NAME [--stage NAME] [--json]",
+				"ap query iterations --session NAME [--stage NAME] [--project-root DIR] [--json]",
 				[]string{"ap query iterations --session my-session --json"},
 			))
 		default:
@@ -164,7 +283,7 @@ func queryIterationsCmd(args []string, deps cliDeps) int {
 				"INVALID_ARGUMENT",
 				fmt.Sprintf("unexpected argument %q", arg),
 				"",
-				"ap query iterations --session NAME [--stage NAME] [--json]",
+				"ap query iterations --session NAME [--stage NAME] [--project-root DIR] [--json]",
 				nil,
 			))
 		}
@@ -175,13 +294,23 @@ func queryIterationsCmd(args []string, deps cliDeps) int {
 			"INVALID_ARGUMENT",
 			"missing required flag --session",
 			"",
-			"ap query iterations --session NAME [--stage NAME] [--json]",
+			"ap query iterations --session NAME [--stage NAME] [--project-root DIR] [--json]",
 			[]string{"ap query iterations --session my-session --json"},
 		))
 	}
 
 	ctx := context.Background()
-	rows, err := deps.store.GetIterations(ctx, sessionName, stageFilter)
+	selectedStore, cleanup, exitCode := resolveSessionWithErrors(ctx, deps, sessionName, projectRootFlag, sessionResolutionOpts{
+		CommandName:  "query iterations --session",
+		Syntax:       "ap query iterations --session NAME [--project-root DIR] [--json]",
+		FallbackCode: "QUERY_FAILED",
+	})
+	if exitCode != 0 {
+		return exitCode
+	}
+	defer cleanup()
+
+	rows, err := selectedStore.GetIterations(ctx, sessionName, stageFilter)
 	if err != nil {
 		return renderError(deps, output.ExitGeneralError, output.NewError(
 			"QUERY_FAILED", "failed to query iterations", err.Error(),
@@ -217,7 +346,7 @@ func queryIterationsCmd(args []string, deps cliDeps) int {
 }
 
 func queryEventsCmd(args []string, deps cliDeps) int {
-	var sessionName, typeFilter string
+	var sessionName, typeFilter, projectRootFlag string
 	var afterSeq int
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -244,6 +373,16 @@ func queryEventsCmd(args []string, deps cliDeps) int {
 			}
 			i = next
 			typeFilter = strings.TrimSpace(value)
+		case arg == "--project-root" || strings.HasPrefix(arg, "--project-root=") || arg == "--workdir" || strings.HasPrefix(arg, "--workdir="):
+			value, next, err := readFlagValue(arg, args, i)
+			if err != nil {
+				return renderError(deps, output.ExitInvalidArgs, output.NewError(
+					"INVALID_ARGUMENT", err.Error(), "",
+					"ap query events --session NAME [--type TYPE] [--after SEQ] [--project-root DIR] [--json]", nil,
+				))
+			}
+			i = next
+			projectRootFlag = strings.TrimSpace(value)
 		case arg == "--after" || strings.HasPrefix(arg, "--after="):
 			value, next, err := readFlagValue(arg, args, i)
 			if err != nil {
@@ -269,7 +408,7 @@ func queryEventsCmd(args []string, deps cliDeps) int {
 				"INVALID_ARGUMENT",
 				fmt.Sprintf("unknown flag %q", arg),
 				"",
-				"ap query events --session NAME [--type TYPE] [--after SEQ] [--json]",
+				"ap query events --session NAME [--type TYPE] [--after SEQ] [--project-root DIR] [--json]",
 				[]string{"ap query events --session my-session --json"},
 			))
 		default:
@@ -277,7 +416,7 @@ func queryEventsCmd(args []string, deps cliDeps) int {
 				"INVALID_ARGUMENT",
 				fmt.Sprintf("unexpected argument %q", arg),
 				"",
-				"ap query events --session NAME [--type TYPE] [--after SEQ] [--json]",
+				"ap query events --session NAME [--type TYPE] [--after SEQ] [--project-root DIR] [--json]",
 				nil,
 			))
 		}
@@ -288,13 +427,23 @@ func queryEventsCmd(args []string, deps cliDeps) int {
 			"INVALID_ARGUMENT",
 			"missing required flag --session",
 			"",
-			"ap query events --session NAME [--type TYPE] [--after SEQ] [--json]",
+			"ap query events --session NAME [--type TYPE] [--after SEQ] [--project-root DIR] [--json]",
 			[]string{"ap query events --session my-session --json"},
 		))
 	}
 
 	ctx := context.Background()
-	rows, err := deps.store.GetEvents(ctx, sessionName, typeFilter, afterSeq)
+	selectedStore, cleanup, exitCode := resolveSessionWithErrors(ctx, deps, sessionName, projectRootFlag, sessionResolutionOpts{
+		CommandName:  "query events --session",
+		Syntax:       "ap query events --session NAME [--project-root DIR] [--json]",
+		FallbackCode: "QUERY_FAILED",
+	})
+	if exitCode != 0 {
+		return exitCode
+	}
+	defer cleanup()
+
+	rows, err := selectedStore.GetEvents(ctx, sessionName, typeFilter, afterSeq)
 	if err != nil {
 		return renderError(deps, output.ExitGeneralError, output.NewError(
 			"QUERY_FAILED", "failed to query events", err.Error(),
@@ -334,6 +483,24 @@ func sessionRowToSummary(r *store.SessionRow) map[string]any {
 		"name":                r.Name,
 		"type":                r.Type,
 		"pipeline":            r.Pipeline,
+		"status":              r.Status,
+		"iteration":           r.Iteration,
+		"iteration_completed": r.IterationCompleted,
+		"current_stage":       r.CurrentStage,
+		"started_at":          r.StartedAt,
+		"project_root":        r.ProjectRoot,
+		"repo_root":           r.RepoRoot,
+		"config_root":         r.ConfigRoot,
+		"project_key":         r.ProjectKey,
+		"target_source":       r.TargetSource,
+	}
+}
+
+func sessionRecordToSummary(r controlplane.SessionRecord) map[string]any {
+	return map[string]any{
+		"name":                r.SessionName,
+		"type":                "",
+		"pipeline":            "",
 		"status":              r.Status,
 		"iteration":           r.Iteration,
 		"iteration_completed": r.IterationCompleted,

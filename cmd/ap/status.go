@@ -11,40 +11,43 @@ import (
 	"github.com/hwells4/ap/internal/store"
 )
 
+const statusSyntax = "ap status <session> [--project-root DIR] [--json]"
+
 func runStatus(args []string, deps cliDeps) int {
-	sessionName, errResp := parseStatusArgs(args)
+	parsed, errResp := parseStatusArgs(args)
 	if errResp != nil {
 		return renderError(deps, output.ExitInvalidArgs, *errResp)
 	}
+	sessionName := parsed.SessionName
 
 	ctx := context.Background()
 
-	if deps.store == nil {
-		return renderError(deps, output.ExitGeneralError, output.NewError(
-			"STORE_NOT_AVAILABLE",
-			"session store is not available",
-			"The session database could not be opened.",
-			"ap status <session> [--json]",
-			nil,
-		))
+	selectedStore, cleanup, exitCode := resolveSessionWithErrors(ctx, deps, sessionName, parsed.ProjectRoot, sessionResolutionOpts{
+		CommandName:  "status",
+		Syntax:       statusSyntax,
+		FallbackCode: "STATE_READ_FAILED",
+	})
+	if exitCode != 0 {
+		return exitCode
 	}
+	defer cleanup()
 
-	row, err := deps.store.GetSession(ctx, sessionName)
+	row, err := selectedStore.GetSession(ctx, sessionName)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return renderError(deps, output.ExitNotFound, output.NewError(
 				"SESSION_NOT_FOUND",
 				fmt.Sprintf("session %q not found", sessionName),
 				"No session found in store.",
-				"ap status <session> [--json]",
-				[]string{"ap list", "ap status my-session --json"},
+				statusSyntax,
+				[]string{"ap query sessions --status running --json", "ap status my-session --project-root /abs/path --json"},
 			))
 		}
 		return renderError(deps, output.ExitGeneralError, output.NewError(
 			"STATE_READ_FAILED",
 			fmt.Sprintf("failed to read state for session %q", sessionName),
 			err.Error(),
-			"ap status <session> [--json]",
+			statusSyntax,
 			nil,
 		))
 	}
@@ -188,47 +191,6 @@ func pipelineStageProgressFromRow(r *store.SessionRow) (int, int, bool) {
 	return 0, 0, false
 }
 
-func parseStatusArgs(args []string) (string, *output.ErrorResponse) {
-	var sessionName string
-
-	for _, arg := range args {
-		switch {
-		case arg == "--json":
-			continue
-		case strings.HasPrefix(arg, "-"):
-			errResp := output.NewError(
-				"INVALID_ARGUMENT",
-				fmt.Sprintf("unknown flag %q", arg),
-				"ap status accepts no flags other than --json.",
-				"ap status <session> [--json]",
-				[]string{"ap status my-session", "ap status my-session --json"},
-			)
-			return "", &errResp
-		default:
-			if sessionName != "" {
-				errResp := output.NewError(
-					"INVALID_ARGUMENT",
-					"ap status takes exactly one session name",
-					fmt.Sprintf("Got %q and %q.", sessionName, arg),
-					"ap status <session> [--json]",
-					[]string{"ap status my-session"},
-				)
-				return "", &errResp
-			}
-			sessionName = strings.TrimSpace(arg)
-		}
-	}
-
-	if sessionName == "" {
-		errResp := output.NewError(
-			"INVALID_ARGUMENT",
-			"missing required argument: <session>",
-			"Provide the session name to check status.",
-			"ap status <session> [--json]",
-			[]string{"ap status my-session", "ap status my-session --json"},
-		)
-		return "", &errResp
-	}
-
-	return sessionName, nil
+func parseStatusArgs(args []string) (parsedSessionArgs, *output.ErrorResponse) {
+	return parseSessionArgs(args, "status", statusSyntax, nil)
 }

@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/hwells4/ap/internal/output"
+	sessionpkg "github.com/hwells4/ap/internal/session"
 	"github.com/hwells4/ap/internal/store"
 )
 
@@ -162,10 +166,112 @@ func resumeSessionStore(deps cliDeps, sessionStore *store.Store, ctx context.Con
 		payload["context_override"] = contextOverride
 	}
 
-	// TODO: Actually re-launch via launcher with --resume flag.
-	// For M0b, return the structured response indicating the session
-	// would be resumed. The full launcher wiring is deferred to when
-	// foreground execution lands.
+	// Re-launch the session process via launcher.
+	var req RunRequestFile
+	if row.RunRequestJSON != "" && row.RunRequestJSON != "{}" {
+		if parseErr := json.Unmarshal([]byte(row.RunRequestJSON), &req); parseErr != nil {
+			return renderError(deps, output.ExitGeneralError, output.NewError(
+				"RUN_REQUEST_PARSE_ERROR",
+				fmt.Sprintf("failed to parse run request for session %q", session),
+				parseErr.Error(),
+				"ap resume <session> [--context TEXT] [--json]",
+				nil,
+			))
+		}
+	} else {
+		return renderError(deps, output.ExitGeneralError, output.NewError(
+			"MISSING_RUN_REQUEST",
+			fmt.Sprintf("session %q has no stored run request", session),
+			"The session cannot be resumed without a run request.",
+			"ap resume <session> [--context TEXT] [--json]",
+			[]string{"ap run <spec> <new-session>"},
+		))
+	}
+
+	// Determine the run directory and write run_request.json to disk.
+	runDir := req.RunDir
+	if runDir == "" {
+		projectRoot := strings.TrimSpace(sessionStore.ProjectRoot())
+		if projectRoot == "" {
+			projectRoot = strings.TrimSpace(req.ProjectRoot)
+		}
+		if projectRoot == "" {
+			projectRoot = "."
+		}
+		runDir = filepath.Join(projectRoot, ".ap", "runs", session)
+	}
+	requestPath := filepath.Join(runDir, "run_request.json")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		return renderError(deps, output.ExitGeneralError, output.NewError(
+			"RUN_DIR_ERROR",
+			fmt.Sprintf("failed to create run directory for session %q", session),
+			err.Error(),
+			"ap resume <session> [--context TEXT] [--json]",
+			nil,
+		))
+	}
+	if err := WriteRunRequest(requestPath, req); err != nil {
+		return renderError(deps, output.ExitGeneralError, output.NewError(
+			"RUN_REQUEST_WRITE_ERROR",
+			fmt.Sprintf("failed to write run request for session %q", session),
+			err.Error(),
+			"ap resume <session> [--context TEXT] [--json]",
+			nil,
+		))
+	}
+
+	// Build the runner command: ap _run --session NAME --request PATH --resume
+	executable, execErr := os.Executable()
+	if execErr != nil {
+		return renderError(deps, output.ExitGeneralError, output.NewError(
+			"EXECUTABLE_RESOLVE_ERROR",
+			"failed to resolve ap executable path",
+			execErr.Error(),
+			"ap resume <session> [--context TEXT] [--json]",
+			nil,
+		))
+	}
+	runnerCmd := []string{executable, "_run", "--session", session, "--request", requestPath, "--resume"}
+
+	// Resolve launcher.
+	launcher := deps.launcher
+	if launcher == nil {
+		launcher = sessionpkg.NewTmuxLauncher()
+	}
+	if !launcher.Available() {
+		return renderError(deps, output.ExitGeneralError, output.NewError(
+			"LAUNCHER_UNAVAILABLE",
+			fmt.Sprintf("launcher %q is not available to re-launch session %q", launcher.Name(), session),
+			"Ensure tmux is installed and running.",
+			"ap resume <session> [--context TEXT] [--json]",
+			nil,
+		))
+	}
+
+	// Kill any existing tmux session for this name before re-launching.
+	_ = launcher.Kill(session)
+
+	workDir := strings.TrimSpace(req.WorkDir)
+	if workDir == "" {
+		workDir = strings.TrimSpace(req.ProjectRoot)
+	}
+	handle, launchErr := launcher.Start(session, runnerCmd, sessionpkg.StartOptions{
+		WorkDir: workDir,
+		Env:     req.Env,
+	})
+	if launchErr != nil {
+		return renderError(deps, output.ExitGeneralError, output.NewError(
+			"LAUNCH_FAILED",
+			fmt.Sprintf("failed to re-launch session %q", session),
+			launchErr.Error(),
+			"ap resume <session> [--context TEXT] [--json]",
+			[]string{"ap status " + session + " --json", "ap kill " + session},
+		))
+	}
+
+	payload["launched"] = true
+	payload["launcher"] = launcher.Name()
+	payload["pid"] = handle.PID
 
 	return renderResumeSuccess(deps, payload)
 }
