@@ -521,6 +521,110 @@ func TestConcurrentAppendEvent(t *testing.T) {
 	}
 }
 
+func TestCleanOrphanedIterationsNone(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	s.CreateSession(ctx, "sess1", "stage", "p", "{}")
+
+	// Complete an iteration normally — no orphans.
+	s.StartIteration(ctx, IterationInput{SessionName: "sess1", StageName: "s1", Iteration: 1})
+	s.CompleteIteration(ctx, IterationComplete{
+		SessionName: "sess1", StageName: "s1", Iteration: 1,
+		Decision: "continue", Summary: "ok", SignalsJSON: "{}",
+		Stdout: "", Stderr: "", ContextJSON: "{}",
+	})
+
+	cleaned, err := s.CleanOrphanedIterations(ctx, "sess1")
+	if err != nil {
+		t.Fatalf("CleanOrphanedIterations: %v", err)
+	}
+	if cleaned != 0 {
+		t.Errorf("cleaned = %d, want 0", cleaned)
+	}
+
+	// Verify the completed iteration is untouched.
+	iters, _ := s.GetIterations(ctx, "sess1", "")
+	if len(iters) != 1 || iters[0].Status != "completed" {
+		t.Errorf("expected 1 completed iteration, got %+v", iters)
+	}
+}
+
+func TestCleanOrphanedIterationsOne(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	s.CreateSession(ctx, "sess1", "stage", "p", "{}")
+
+	// Start iteration but never complete it — simulates a crash.
+	s.StartIteration(ctx, IterationInput{SessionName: "sess1", StageName: "s1", Iteration: 1})
+
+	cleaned, err := s.CleanOrphanedIterations(ctx, "sess1")
+	if err != nil {
+		t.Fatalf("CleanOrphanedIterations: %v", err)
+	}
+	if cleaned != 1 {
+		t.Errorf("cleaned = %d, want 1", cleaned)
+	}
+
+	// Verify iteration is now failed.
+	iters, _ := s.GetIterations(ctx, "sess1", "")
+	if len(iters) != 1 {
+		t.Fatalf("expected 1 iteration, got %d", len(iters))
+	}
+	if iters[0].Status != "failed" {
+		t.Errorf("status = %q, want failed", iters[0].Status)
+	}
+	if iters[0].CompletedAt == nil {
+		t.Error("expected CompletedAt to be set")
+	}
+
+	// Verify output row was created.
+	var outputCount int
+	err = s.DB().QueryRow("SELECT COUNT(*) FROM outputs WHERE iteration_id = ?", iters[0].ID).Scan(&outputCount)
+	if err != nil {
+		t.Fatalf("query output: %v", err)
+	}
+	if outputCount != 1 {
+		t.Errorf("output count = %d, want 1", outputCount)
+	}
+}
+
+func TestCleanOrphanedIterationsCompletedNotAffected(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	s.CreateSession(ctx, "sess1", "stage", "p", "{}")
+
+	// One completed iteration and one orphaned.
+	s.StartIteration(ctx, IterationInput{SessionName: "sess1", StageName: "s1", Iteration: 1})
+	s.CompleteIteration(ctx, IterationComplete{
+		SessionName: "sess1", StageName: "s1", Iteration: 1,
+		Decision: "continue", Summary: "ok", SignalsJSON: "{}",
+		Stdout: "out", Stderr: "", ContextJSON: "{}",
+	})
+	s.StartIteration(ctx, IterationInput{SessionName: "sess1", StageName: "s1", Iteration: 2})
+
+	cleaned, err := s.CleanOrphanedIterations(ctx, "sess1")
+	if err != nil {
+		t.Fatalf("CleanOrphanedIterations: %v", err)
+	}
+	if cleaned != 1 {
+		t.Errorf("cleaned = %d, want 1", cleaned)
+	}
+
+	iters, _ := s.GetIterations(ctx, "sess1", "")
+	if len(iters) != 2 {
+		t.Fatalf("expected 2 iterations, got %d", len(iters))
+	}
+	if iters[0].Status != "completed" {
+		t.Errorf("iter 1 status = %q, want completed", iters[0].Status)
+	}
+	if iters[1].Status != "failed" {
+		t.Errorf("iter 2 status = %q, want failed", iters[1].Status)
+	}
+}
+
 func TestSchemaMigrationIdempotent(t *testing.T) {
 	s := mustOpen(t)
 	// Run migrate again — should be a no-op

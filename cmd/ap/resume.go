@@ -11,22 +11,59 @@ import (
 )
 
 func runResume(args []string, deps cliDeps) int {
-	sessionName, contextOverride, errResp := parseResumeArgs(args)
+	sessionName, contextOverride, projectRootFlag, errResp := parseResumeArgs(args)
 	if errResp != nil {
 		return renderError(deps, output.ExitInvalidArgs, *errResp)
 	}
 
 	ctx := context.Background()
+	selectedStore, cleanup, lookupErr := resolveSessionStore(ctx, deps, sessionName, projectRootFlag)
+	if lookupErr != nil {
+		if errors.Is(lookupErr, errSessionLookupNotFound) {
+			return renderError(deps, output.ExitNotFound, output.NewError(
+				"SESSION_NOT_FOUND",
+				fmt.Sprintf("session %q not found", sessionName),
+				"No session with that name in local or machine-wide index.",
+				"ap resume <session> [--project-root DIR] [--context TEXT] [--json]",
+				[]string{"ap query sessions --status paused --json", "ap resume my-session --project-root /abs/path --json"},
+			))
+		}
+		var ambiguous *sessionLookupAmbiguousError
+		if errors.As(lookupErr, &ambiguous) {
+			suggestions := []string{}
+			for _, match := range ambiguous.Matches {
+				suggestions = append(suggestions, fmt.Sprintf("ap resume %s --project-root %s --json", sessionName, match.ProjectRoot))
+				if len(suggestions) >= 3 {
+					break
+				}
+			}
+			return renderError(deps, output.ExitInvalidArgs, output.NewError(
+				"SESSION_AMBIGUOUS",
+				lookupErr.Error(),
+				"Use --project-root to select the project explicitly.",
+				"ap resume <session> [--project-root DIR] [--context TEXT] [--json]",
+				suggestions,
+			))
+		}
+		return renderError(deps, output.ExitGeneralError, output.NewError(
+			"STATE_READ_FAILED",
+			fmt.Sprintf("failed to resolve store for session %q", sessionName),
+			lookupErr.Error(),
+			"ap resume <session> [--project-root DIR] [--context TEXT] [--json]",
+			nil,
+		))
+	}
+	defer cleanup()
 
 	// Load session from store.
-	row, err := deps.store.GetSession(ctx, sessionName)
+	row, err := selectedStore.GetSession(ctx, sessionName)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return renderError(deps, output.ExitNotFound, output.NewError(
 				"SESSION_NOT_FOUND",
 				fmt.Sprintf("session %q not found", sessionName),
 				"No session with that name in the store.",
-				"ap resume <session> [--context TEXT] [--json]",
+				"ap resume <session> [--project-root DIR] [--context TEXT] [--json]",
 				[]string{"ap list", "ap status " + sessionName + " --json"},
 			))
 		}
@@ -34,7 +71,7 @@ func runResume(args []string, deps cliDeps) int {
 			"STATE_READ_FAILED",
 			fmt.Sprintf("failed to read state for session %q", sessionName),
 			err.Error(),
-			"ap resume <session> [--json]",
+			"ap resume <session> [--project-root DIR] [--json]",
 			nil,
 		))
 	}
@@ -44,7 +81,7 @@ func runResume(args []string, deps cliDeps) int {
 	case "running":
 		return resumeAlreadyRunningStore(deps, sessionName, row)
 	case "paused", "failed":
-		return resumeSessionStore(deps, ctx, sessionName, row, contextOverride)
+		return resumeSessionStore(deps, selectedStore, ctx, sessionName, row, contextOverride)
 	case "completed":
 		return renderError(deps, output.ExitInvalidArgs, output.NewError(
 			"SESSION_COMPLETED",
@@ -84,10 +121,22 @@ func resumeAlreadyRunningStore(deps cliDeps, session string, row *store.SessionR
 	return renderResumeSuccess(deps, payload)
 }
 
-func resumeSessionStore(deps cliDeps, ctx context.Context, session string, row *store.SessionRow, contextOverride string) int {
+func resumeSessionStore(deps cliDeps, sessionStore *store.Store, ctx context.Context, session string, row *store.SessionRow, contextOverride string) int {
+	// Clean up any iterations orphaned by a crash before resuming.
+	orphaned, err := sessionStore.CleanOrphanedIterations(ctx, session)
+	if err != nil {
+		return renderError(deps, output.ExitGeneralError, output.NewError(
+			"ORPHAN_CLEANUP_ERROR",
+			fmt.Sprintf("failed to clean orphaned iterations for session %q", session),
+			err.Error(),
+			"ap resume <session> [--context TEXT] [--json]",
+			nil,
+		))
+	}
+
 	resumeFrom := row.IterationCompleted + 1
 
-	err := deps.store.UpdateSession(ctx, session, map[string]any{
+	err = sessionStore.UpdateSession(ctx, session, map[string]any{
 		"status": "running",
 	})
 	if err != nil {
@@ -105,6 +154,9 @@ func resumeSessionStore(deps cliDeps, ctx context.Context, session string, row *
 		"action":      "resumed",
 		"status":      "running",
 		"resume_from": resumeFrom,
+	}
+	if orphaned > 0 {
+		payload["orphaned_cleaned"] = orphaned
 	}
 	if contextOverride != "" {
 		payload["context_override"] = contextOverride
@@ -147,14 +199,28 @@ func renderResumeSuccess(deps cliDeps, payload map[string]any) int {
 	return output.ExitSuccess
 }
 
-func parseResumeArgs(args []string) (string, string, *output.ErrorResponse) {
-	var sessionName, contextOverride string
+func parseResumeArgs(args []string) (string, string, string, *output.ErrorResponse) {
+	var sessionName, contextOverride, projectRoot string
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
 		case arg == "--json":
 			continue
+		case arg == "--project-root" || strings.HasPrefix(arg, "--project-root=") || arg == "--workdir" || strings.HasPrefix(arg, "--workdir="):
+			value, next, err := readFlagValue(arg, args, i)
+			if err != nil {
+				errResp := output.NewError(
+					"INVALID_ARGUMENT",
+					err.Error(),
+					"",
+					"ap resume <session> [--project-root DIR] [--context TEXT] [--json]",
+					[]string{"ap resume my-session --project-root /abs/path --json"},
+				)
+				return "", "", "", &errResp
+			}
+			i = next
+			projectRoot = strings.TrimSpace(value)
 		case arg == "--context" || arg == "-c" || strings.HasPrefix(arg, "--context=") || strings.HasPrefix(arg, "-c="):
 			value, next, err := readFlagValue(arg, args, i)
 			if err != nil {
@@ -162,10 +228,10 @@ func parseResumeArgs(args []string) (string, string, *output.ErrorResponse) {
 					"INVALID_ARGUMENT",
 					err.Error(),
 					"",
-					"ap resume <session> [--context TEXT] [--json]",
+					"ap resume <session> [--project-root DIR] [--context TEXT] [--json]",
 					[]string{"ap resume my-session --context \"focus on tests\""},
 				)
-				return "", "", &errResp
+				return "", "", "", &errResp
 			}
 			i = next
 			contextOverride = value
@@ -173,21 +239,21 @@ func parseResumeArgs(args []string) (string, string, *output.ErrorResponse) {
 			errResp := output.NewError(
 				"INVALID_ARGUMENT",
 				fmt.Sprintf("unknown flag %q", arg),
-				"ap resume accepts --context/-c and --json.",
-				"ap resume <session> [--context TEXT] [--json]",
-				[]string{"ap resume my-session", "ap resume my-session --context \"new focus\" --json"},
+				"ap resume accepts --project-root/--workdir, --context/-c, and --json.",
+				"ap resume <session> [--project-root DIR] [--context TEXT] [--json]",
+				[]string{"ap resume my-session", "ap resume my-session --project-root /abs/path --context \"new focus\" --json"},
 			)
-			return "", "", &errResp
+			return "", "", "", &errResp
 		default:
 			if sessionName != "" {
 				errResp := output.NewError(
 					"INVALID_ARGUMENT",
 					"ap resume takes exactly one session name",
 					fmt.Sprintf("Got %q and %q.", sessionName, arg),
-					"ap resume <session> [--context TEXT] [--json]",
+					"ap resume <session> [--project-root DIR] [--context TEXT] [--json]",
 					[]string{"ap resume my-session"},
 				)
-				return "", "", &errResp
+				return "", "", "", &errResp
 			}
 			sessionName = strings.TrimSpace(arg)
 		}
@@ -198,11 +264,11 @@ func parseResumeArgs(args []string) (string, string, *output.ErrorResponse) {
 			"INVALID_ARGUMENT",
 			"missing required argument: <session>",
 			"Provide the session name to resume.",
-			"ap resume <session> [--context TEXT] [--json]",
+			"ap resume <session> [--project-root DIR] [--context TEXT] [--json]",
 			[]string{"ap resume my-session", "ap resume my-session --json"},
 		)
-		return "", "", &errResp
+		return "", "", "", &errResp
 	}
 
-	return sessionName, contextOverride, nil
+	return sessionName, contextOverride, projectRoot, nil
 }

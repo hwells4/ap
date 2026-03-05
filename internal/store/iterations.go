@@ -160,6 +160,72 @@ func (s *Store) CompleteIteration(ctx context.Context, input IterationComplete) 
 	return tx.Commit()
 }
 
+// CleanOrphanedIterations finds iterations stuck in "started" status for the
+// given session (caused by a crash between StartIteration and CompleteIteration),
+// marks them as "failed", and inserts a placeholder output row for any that
+// lack one (to maintain the 1:1 iteration/output pairing). Returns the count
+// of cleaned iterations.
+func (s *Store) CleanOrphanedIterations(ctx context.Context, sessionName string) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("store: clean orphaned begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Find orphaned iteration IDs.
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id FROM iterations WHERE session_name = ? AND status = 'started'`,
+		sessionName,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("store: query orphaned iterations: %w", err)
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("store: scan orphaned iteration id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("store: rows err orphaned iterations: %w", err)
+	}
+
+	if len(ids) == 0 {
+		return 0, tx.Commit()
+	}
+
+	// Mark each orphaned iteration as failed and ensure an output row exists.
+	for _, id := range ids {
+		_, err = tx.ExecContext(ctx,
+			`UPDATE iterations SET status = 'failed', completed_at = ? WHERE id = ?`,
+			now, id,
+		)
+		if err != nil {
+			return 0, fmt.Errorf("store: update orphaned iteration %d: %w", id, err)
+		}
+
+		// Insert output row only if one doesn't already exist.
+		_, err = tx.ExecContext(ctx,
+			`INSERT OR IGNORE INTO outputs (iteration_id, stdout, stderr, context_json) VALUES (?, '', '', '{}')`,
+			id,
+		)
+		if err != nil {
+			return 0, fmt.Errorf("store: insert orphaned output %d: %w", id, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("store: clean orphaned commit: %w", err)
+	}
+	return len(ids), nil
+}
+
 // GetIterations returns iterations for a session, optionally filtered by stage.
 func (s *Store) GetIterations(ctx context.Context, sessionName string, stageFilter string) ([]IterationRow, error) {
 	var query string
