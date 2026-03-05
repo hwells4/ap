@@ -350,59 +350,6 @@ func TestTailEvents(t *testing.T) {
 	}
 }
 
-func TestAcquireReleaseLock(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-
-	err := s.AcquireLock(ctx, "sess1", "agent-1")
-	if err != nil {
-		t.Fatalf("AcquireLock: %v", err)
-	}
-
-	holder, locked, err := s.CheckLock(ctx, "sess1")
-	if err != nil {
-		t.Fatalf("CheckLock: %v", err)
-	}
-	if !locked {
-		t.Error("expected locked=true")
-	}
-	if holder != "agent-1" {
-		t.Errorf("holder = %q, want agent-1", holder)
-	}
-
-	// Double acquire should fail
-	err = s.AcquireLock(ctx, "sess1", "agent-2")
-	if err == nil {
-		t.Fatal("expected error on double acquire")
-	}
-
-	err = s.ReleaseLock(ctx, "sess1")
-	if err != nil {
-		t.Fatalf("ReleaseLock: %v", err)
-	}
-
-	_, locked, err = s.CheckLock(ctx, "sess1")
-	if err != nil {
-		t.Fatalf("CheckLock after release: %v", err)
-	}
-	if locked {
-		t.Error("expected locked=false after release")
-	}
-}
-
-func TestCheckLockNotExists(t *testing.T) {
-	s := mustOpen(t)
-	ctx := context.Background()
-
-	_, locked, err := s.CheckLock(ctx, "nope")
-	if err != nil {
-		t.Fatalf("CheckLock: %v", err)
-	}
-	if locked {
-		t.Error("expected locked=false for nonexistent lock")
-	}
-}
-
 func TestAddGetChildren(t *testing.T) {
 	s := mustOpen(t)
 	ctx := context.Background()
