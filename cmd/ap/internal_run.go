@@ -134,9 +134,11 @@ func runInternalRun(args []string, deps cliDeps) int {
 	defer s.Close()
 	deps.store = s
 
+	ctx := context.Background()
+
 	// Try reading run_request from the store first, fall back to file.
 	var req RunRequestFile
-	row, getErr := s.GetSession(context.Background(), session)
+	row, getErr := s.GetSession(ctx, session)
 	if getErr == nil && row.RunRequestJSON != "" && row.RunRequestJSON != "{}" {
 		if parseErr := json.Unmarshal([]byte(row.RunRequestJSON), &req); parseErr != nil {
 			return internalRunError(deps, fmt.Sprintf("parse store run request: %v", parseErr))
@@ -207,7 +209,12 @@ func runInternalRun(args []string, deps cliDeps) int {
 		promptTemplate = string(promptData)
 	}
 
-	_ = resume // TODO: resume support reads existing state
+	// On resume, clean up any iterations orphaned by a prior crash.
+	if resume {
+		if _, err := s.CleanOrphanedIterations(ctx, session); err != nil {
+			return internalRunError(deps, fmt.Sprintf("clean orphaned iterations: %v", err))
+		}
+	}
 
 	loadedConfig, cfgErr := config.Load("")
 	if cfgErr != nil {
@@ -246,7 +253,6 @@ func runInternalRun(args []string, deps cliDeps) int {
 	}
 
 	// Execute runner.
-	ctx := context.Background()
 	result, runErr := runner.Run(ctx, cfg)
 	if runErr != nil {
 		return internalRunError(deps, fmt.Sprintf("runner: %v", runErr))
