@@ -742,7 +742,7 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 		}
 
 		_ = cfg.Store.UpdateSession(ctx, cfg.Session, map[string]any{
-			"current_stage": node.StageName,
+			"current_stage": node.ID,
 			"node_id":       node.ID,
 		})
 
@@ -802,12 +802,20 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 			}
 
 			nodeIterStartTime := time.Now()
-			_ = cfg.Store.StartIteration(ctx, store.IterationInput{
+			if err := cfg.Store.StartIteration(ctx, store.IterationInput{
 				SessionName:  cfg.Session,
-				StageName:    node.StageName,
+				StageName:    node.ID,
 				Iteration:    i,
 				ProviderName: cfg.Provider.Name(),
-			})
+			}); err != nil {
+				emitEvent(ctx, cfg, store.TypeError, "{}", map[string]any{
+					"error":     err.Error(),
+					"type":      "store_tracking",
+					"operation": "start_iteration",
+					"iteration": i,
+					"stage":     node.ID,
+				})
+			}
 
 			cursorJSON := marshalCursorJSON(i, cfg.Provider.Name(), node.ID, nodeIdx+1)
 
@@ -865,9 +873,9 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 			}
 
 			signalsJSON, _ := json.Marshal(iterResult.Signals)
-			_ = cfg.Store.CompleteIteration(ctx, store.IterationComplete{
+			if err := cfg.Store.CompleteIteration(ctx, store.IterationComplete{
 				SessionName:  cfg.Session,
-				StageName:    node.StageName,
+				StageName:    node.ID,
 				Iteration:    i,
 				Decision:     iterResult.Decision,
 				Summary:      iterResult.Summary,
@@ -878,7 +886,15 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 				ContextJSON:  string(nodeManifestJSON),
 				ProviderName: cfg.Provider.Name(),
 				DurationMS:   time.Since(nodeIterStartTime).Milliseconds(),
-			})
+			}); err != nil {
+				emitEvent(ctx, cfg, store.TypeError, cursorJSON, map[string]any{
+					"error":     err.Error(),
+					"type":      "store_tracking",
+					"operation": "complete_iteration",
+					"iteration": i,
+					"stage":     node.ID,
+				})
+			}
 
 			if iterResult.Signals.Inject != "" {
 				injectedContext = iterResult.Signals.Inject
@@ -1234,10 +1250,16 @@ func buildEnv(cfg Config, iteration int) map[string]string {
 // finishSession marks the session completed and emits session_complete.
 func finishSession(ctx context.Context, cfg Config, iterations int, reason string) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_ = cfg.Store.UpdateSession(ctx, cfg.Session, map[string]any{
+	if err := cfg.Store.UpdateSession(ctx, cfg.Session, map[string]any{
 		"status":       "completed",
 		"completed_at": now,
-	})
+	}); err != nil {
+		emitEvent(ctx, cfg, store.TypeError, "{}", map[string]any{
+			"error":     err.Error(),
+			"type":      "store_tracking",
+			"operation": "finish_session",
+		})
+	}
 	emitEvent(ctx, cfg, store.TypeSessionComplete, "{}", map[string]any{
 		"iterations":       iterations,
 		"total_iterations": iterations,

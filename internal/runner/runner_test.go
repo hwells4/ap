@@ -182,8 +182,8 @@ func TestRun_Pipeline_SequentialStages(t *testing.T) {
 	if row.Type != "pipeline" {
 		t.Fatalf("state type = %q, want pipeline", row.Type)
 	}
-	if row.CurrentStage != "refine-tasks" {
-		t.Fatalf("current_stage = %q, want refine-tasks", row.CurrentStage)
+	if row.CurrentStage != "refine" {
+		t.Fatalf("current_stage = %q, want refine", row.CurrentStage)
 	}
 	if row.NodeID != "refine" {
 		t.Fatalf("node_id = %q, want refine", row.NodeID)
@@ -1289,5 +1289,81 @@ func TestRun_EscalateSignal_EventEmitted(t *testing.T) {
 	}
 	if !found {
 		t.Error("signal.escalate event not found in store events")
+	}
+}
+
+func TestRun_Pipeline_RepeatedStageNames(t *testing.T) {
+	runDir, s := tempSession(t)
+
+	// 5 iterations total: stage-a:2 -> stage-b:1 -> stage-a:2
+	// The second "stage-a" node gets ID "stage-a-2" via uniqueNodeID.
+	mp := mock.New(
+		mock.WithResponses(
+			mock.ContinueResponse("a iter 1"),
+			mock.ContinueResponse("a iter 2"),
+			mock.ContinueResponse("b iter 1"),
+			mock.ContinueResponse("a2 iter 1"),
+			mock.ContinueResponse("a2 iter 2"),
+		),
+	)
+
+	pipeline := &compile.Pipeline{
+		Name: "repeat-test",
+		Nodes: []compile.Node{
+			{ID: "stage-a", Stage: "improve-plan", Runs: 2},
+			{ID: "stage-b", Stage: "refine-tasks", Runs: 1},
+			{ID: "stage-a-2", Stage: "improve-plan", Runs: 2},
+		},
+	}
+
+	res, err := Run(context.Background(), Config{
+		Session:        "repeat-session",
+		RunDir:         runDir,
+		Provider:       mp,
+		Pipeline:       pipeline,
+		PromptTemplate: "iteration ${ITERATION}",
+		WorkDir:        filepath.Dir(filepath.Dir(runDir)),
+		Store:          s,
+	})
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	if res.Status != store.StatusCompleted {
+		t.Fatalf("status = %q, want %q", res.Status, store.StatusCompleted)
+	}
+	if res.Iterations != 5 {
+		t.Fatalf("iterations = %d, want 5", res.Iterations)
+	}
+	if mp.CallCount() != 5 {
+		t.Fatalf("provider calls = %d, want 5", mp.CallCount())
+	}
+
+	// All 5 iterations must be tracked in the DB.
+	iters, err := s.GetIterations(context.Background(), "repeat-session", "")
+	if err != nil {
+		t.Fatalf("GetIterations: %v", err)
+	}
+	if len(iters) != 5 {
+		t.Fatalf("DB iterations = %d, want 5", len(iters))
+	}
+
+	// Verify stage names in DB use node IDs, not raw stage names.
+	wantStages := []string{"stage-a", "stage-a", "stage-b", "stage-a-2", "stage-a-2"}
+	for i, iter := range iters {
+		if iter.StageName != wantStages[i] {
+			t.Errorf("iteration[%d].StageName = %q, want %q", i, iter.StageName, wantStages[i])
+		}
+	}
+
+	// Verify no error events from store tracking failures.
+	evts := readEvents(t, s, "repeat-session")
+	for _, evt := range evts {
+		if evt.Type == store.TypeError {
+			data := parseEventData(t, evt)
+			if data["type"] == "store_tracking" {
+				t.Errorf("unexpected store_tracking error event: %v", data)
+			}
+		}
 	}
 }

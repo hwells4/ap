@@ -625,6 +625,65 @@ func TestCleanOrphanedIterationsCompletedNotAffected(t *testing.T) {
 	}
 }
 
+func TestIterationsWithRepeatedNodeIDs(t *testing.T) {
+	s := mustOpen(t)
+	ctx := context.Background()
+
+	s.CreateSession(ctx, "sess1", "pipeline", "p", "{}")
+
+	// Simulate a chain: stage-a:2 -> stage-b:1 -> stage-a-2:2
+	// stage_name in DB should be the unique node ID.
+	inputs := []IterationInput{
+		{SessionName: "sess1", StageName: "stage-a", Iteration: 1},
+		{SessionName: "sess1", StageName: "stage-a", Iteration: 2},
+		{SessionName: "sess1", StageName: "stage-b", Iteration: 1},
+		{SessionName: "sess1", StageName: "stage-a-2", Iteration: 1},
+		{SessionName: "sess1", StageName: "stage-a-2", Iteration: 2},
+	}
+	for _, inp := range inputs {
+		if err := s.StartIteration(ctx, inp); err != nil {
+			t.Fatalf("StartIteration(%q, %d): %v", inp.StageName, inp.Iteration, err)
+		}
+		if err := s.CompleteIteration(ctx, IterationComplete{
+			SessionName: inp.SessionName,
+			StageName:   inp.StageName,
+			Iteration:   inp.Iteration,
+			Decision:    "continue",
+			Summary:     "ok",
+			SignalsJSON: "{}",
+		}); err != nil {
+			t.Fatalf("CompleteIteration(%q, %d): %v", inp.StageName, inp.Iteration, err)
+		}
+	}
+
+	// All 5 should be retrievable.
+	iters, err := s.GetIterations(ctx, "sess1", "")
+	if err != nil {
+		t.Fatalf("GetIterations: %v", err)
+	}
+	if len(iters) != 5 {
+		t.Fatalf("got %d iterations, want 5", len(iters))
+	}
+
+	// Filter by node ID "stage-a" should return 2.
+	filtered, err := s.GetIterations(ctx, "sess1", "stage-a")
+	if err != nil {
+		t.Fatalf("GetIterations(stage-a): %v", err)
+	}
+	if len(filtered) != 2 {
+		t.Fatalf("stage-a iterations = %d, want 2", len(filtered))
+	}
+
+	// Filter by node ID "stage-a-2" should return 2.
+	filtered2, err := s.GetIterations(ctx, "sess1", "stage-a-2")
+	if err != nil {
+		t.Fatalf("GetIterations(stage-a-2): %v", err)
+	}
+	if len(filtered2) != 2 {
+		t.Fatalf("stage-a-2 iterations = %d, want 2", len(filtered2))
+	}
+}
+
 func TestSchemaMigrationIdempotent(t *testing.T) {
 	s := mustOpen(t)
 	// Run migrate again — should be a no-op
