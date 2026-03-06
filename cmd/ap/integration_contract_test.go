@@ -17,6 +17,7 @@ import (
 )
 
 func TestIntegration_KillAndResumeLifecycle(t *testing.T) {
+	t.Setenv("AP_CONTROL_DB", filepath.Join(t.TempDir(), "control.db"))
 	root := t.TempDir()
 	ctx := context.Background()
 
@@ -128,6 +129,7 @@ func TestIntegration_KillAndResumeLifecycle(t *testing.T) {
 }
 
 func TestIntegration_StatusAndLogsJSONContracts(t *testing.T) {
+	t.Setenv("AP_CONTROL_DB", filepath.Join(t.TempDir(), "control.db"))
 	root := t.TempDir()
 	ctx := context.Background()
 

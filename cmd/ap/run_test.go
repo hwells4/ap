@@ -836,6 +836,7 @@ func TestRun_LauncherUnavailable_FallsToForeground(t *testing.T) {
 }
 
 func TestRun_Foreground_PollsStore(t *testing.T) {
+	t.Setenv("AP_CONTROL_DB", filepath.Join(t.TempDir(), "control.db"))
 	dir := setupStageDir(t)
 	s, err := store.Open(filepath.Join(dir, ".ap", "ap.db"))
 	if err != nil {
@@ -910,6 +911,7 @@ func TestRun_Foreground_PollsStore(t *testing.T) {
 }
 
 func TestRun_Foreground_FailedStatus(t *testing.T) {
+	t.Setenv("AP_CONTROL_DB", filepath.Join(t.TempDir(), "control.db"))
 	dir := setupStageDir(t)
 	s, err := store.Open(filepath.Join(dir, ".ap", "ap.db"))
 	if err != nil {

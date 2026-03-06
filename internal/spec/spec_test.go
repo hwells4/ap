@@ -85,6 +85,27 @@ func TestParseStageWithCount(t *testing.T) {
 	}
 }
 
+func TestParseStageWithSpaceSeparatedCount(t *testing.T) {
+	t.Parallel()
+	spec, err := Parse("ralph 25")
+	if err != nil {
+		t.Fatalf("Parse(ralph 25) error = %v", err)
+	}
+	stage, ok := spec.(StageSpec)
+	if !ok {
+		t.Fatalf("Parse(ralph 25) = %T, want StageSpec", spec)
+	}
+	if stage.Name != "ralph" {
+		t.Errorf("Name = %q, want ralph", stage.Name)
+	}
+	if stage.Iterations != 25 {
+		t.Errorf("Iterations = %d, want 25", stage.Iterations)
+	}
+	if stage.Raw() != "ralph:25" {
+		t.Errorf("Raw() = %q, want ralph:25", stage.Raw())
+	}
+}
+
 func TestParseStageWithCountOne(t *testing.T) {
 	t.Parallel()
 	spec, err := Parse("ralph:1")

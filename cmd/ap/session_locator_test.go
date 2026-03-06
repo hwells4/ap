@@ -11,6 +11,7 @@ import (
 )
 
 func TestResolveSessionStore_ProjectRootFlag(t *testing.T) {
+	t.Setenv("AP_CONTROL_DB", filepath.Join(t.TempDir(), "control.db"))
 	// When --project-root is provided, resolveSessionStore should open a
 	// store at that exact path, ignoring deps.store and controlplane.
 	projectRoot := t.TempDir()

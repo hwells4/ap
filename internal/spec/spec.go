@@ -178,6 +178,18 @@ func ParseWithOptions(input string, opts ParseOptions) (Spec, error) {
 		return resolved, nil
 	}
 
+	// 4b. Recover space-separated iteration shorthand: "ralph 25" → "ralph:25"
+	if spaceIdx := strings.LastIndex(input, " "); spaceIdx > 0 {
+		namePart := strings.TrimSpace(input[:spaceIdx])
+		countPart := strings.TrimSpace(input[spaceIdx+1:])
+		if namePart != "" && countPart != "" {
+			if count, err := strconv.Atoi(countPart); err == nil && count > 0 {
+				recovered := fmt.Sprintf("%s:%d", namePart, count)
+				return parseStageSpecAndResolve(input, recovered, namePart, count, opts)
+			}
+		}
+	}
+
 	// 5. Bare stage name
 	stageSpec, err := resolveStageSpec(StageSpec{raw: input, Name: input}, opts)
 	if err != nil {
@@ -240,6 +252,11 @@ func parseStageSpec(input string) (StageSpec, error) {
 		Name:       name,
 		Iterations: count,
 	}, nil
+}
+
+func parseStageSpecAndResolve(rawInput, recovered, name string, count int, opts ParseOptions) (StageSpec, error) {
+	ss := StageSpec{raw: recovered, Name: name, Iterations: count}
+	return resolveStageSpec(ss, opts)
 }
 
 func resolveStageSpec(stageSpec StageSpec, opts ParseOptions) (StageSpec, error) {

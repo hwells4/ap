@@ -36,6 +36,7 @@ func setupCleanStore(t *testing.T, dir, session, status string) *store.Store {
 }
 
 func TestCleanCompletedSession(t *testing.T) {
+	t.Setenv("AP_CONTROL_DB", filepath.Join(t.TempDir(), "control.db"))
 	dir := t.TempDir()
 	s := setupCleanStore(t, dir, "done-sess", "completed")
 	defer s.Close()
@@ -76,6 +77,7 @@ func TestCleanCompletedSession(t *testing.T) {
 }
 
 func TestCleanFailedSession(t *testing.T) {
+	t.Setenv("AP_CONTROL_DB", filepath.Join(t.TempDir(), "control.db"))
 	dir := t.TempDir()
 	s := setupCleanStore(t, dir, "fail-sess", "failed")
 	defer s.Close()
@@ -103,6 +105,7 @@ func TestCleanFailedSession(t *testing.T) {
 }
 
 func TestCleanRunningSessionBlocked(t *testing.T) {
+	t.Setenv("AP_CONTROL_DB", filepath.Join(t.TempDir(), "control.db"))
 	dir := t.TempDir()
 	s := setupCleanStore(t, dir, "running-sess", "running")
 	defer s.Close()
@@ -144,6 +147,7 @@ func TestCleanRunningSessionBlocked(t *testing.T) {
 }
 
 func TestCleanRunningSessionForce(t *testing.T) {
+	t.Setenv("AP_CONTROL_DB", filepath.Join(t.TempDir(), "control.db"))
 	dir := t.TempDir()
 	s := setupCleanStore(t, dir, "force-sess", "running")
 	defer s.Close()
@@ -177,6 +181,7 @@ func TestCleanRunningSessionForce(t *testing.T) {
 }
 
 func TestCleanNonexistentSession(t *testing.T) {
+	t.Setenv("AP_CONTROL_DB", filepath.Join(t.TempDir(), "control.db"))
 	dir := t.TempDir()
 	s, err := store.Open(filepath.Join(dir, ".ap", "ap.db"))
 	if err != nil {
@@ -207,6 +212,7 @@ func TestCleanNonexistentSession(t *testing.T) {
 }
 
 func TestCleanAllSessions(t *testing.T) {
+	t.Setenv("AP_CONTROL_DB", filepath.Join(t.TempDir(), "control.db"))
 	dir := t.TempDir()
 	s, err := store.Open(filepath.Join(dir, ".ap", "ap.db"))
 	if err != nil {
@@ -272,6 +278,7 @@ func TestCleanMissingArg(t *testing.T) {
 }
 
 func TestCleanHuman(t *testing.T) {
+	t.Setenv("AP_CONTROL_DB", filepath.Join(t.TempDir(), "control.db"))
 	dir := t.TempDir()
 	s := setupCleanStore(t, dir, "human-clean", "completed")
 	defer s.Close()
