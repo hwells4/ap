@@ -29,6 +29,7 @@ type StageConfig struct {
 	Loop              string                   `json:"loop"`
 	MaxIterations     *int                     `json:"max_iterations"`
 	MaxRuntimeSeconds *int                     `json:"max_runtime_seconds"`
+	OutputPath        string                   `json:"output_path,omitempty"`
 	Guardrails        *GuardrailsConfig        `json:"guardrails"`
 	Inputs            *InputsConfig            `json:"inputs"`
 	Commands          map[string]any           `json:"commands"`
@@ -83,7 +84,9 @@ type ContextPaths struct {
 	SessionDir string `json:"session_dir"`
 	StageDir   string `json:"stage_dir"`
 	Progress   string `json:"progress"`
+	History    string `json:"history"`
 	Output     string `json:"output"`
+	OutputPath string `json:"output_path,omitempty"`
 	Messages   string `json:"messages"`
 }
 
@@ -123,13 +126,8 @@ func GenerateContext(session string, iteration int, stageConfig StageConfig, run
 		return "", fmt.Errorf("create iteration dir: %w", err)
 	}
 
-	progressFile := filepath.Join(stageDir, "progress.md")
-	if !fsutil.FileExists(progressFile) {
-		sessionProgress := filepath.Join(runDir, fmt.Sprintf("progress-%s.md", session))
-		if fsutil.FileExists(sessionProgress) {
-			progressFile = sessionProgress
-		}
-	}
+	progressFile := filepath.Join(runDir, "progress.md")
+	historyFile := filepath.Join(runDir, "history.md")
 
 	outputFile := filepath.Join(iterDir, "output.md")
 	messagesFile := filepath.Join(runDir, "messages.jsonl")
@@ -166,6 +164,13 @@ func GenerateContext(session string, iteration int, stageConfig StageConfig, run
 		commands = map[string]any{}
 	}
 
+	// Resolve template variables in OutputPath (e.g. ${SESSION}, ${ITERATION}).
+	resolvedOutputPath := stageConfig.OutputPath
+	if resolvedOutputPath != "" {
+		resolvedOutputPath = strings.ReplaceAll(resolvedOutputPath, "${SESSION}", session)
+		resolvedOutputPath = strings.ReplaceAll(resolvedOutputPath, "${ITERATION}", fmt.Sprintf("%d", iteration))
+	}
+
 	manifest := ContextManifest{
 		Session:   session,
 		Pipeline:  pipeline,
@@ -175,7 +180,9 @@ func GenerateContext(session string, iteration int, stageConfig StageConfig, run
 			SessionDir: runDir,
 			StageDir:   stageDir,
 			Progress:   progressFile,
+			History:    historyFile,
 			Output:     outputFile,
+			OutputPath: resolvedOutputPath,
 			Messages:   messagesFile,
 		},
 		Inputs: inputs,

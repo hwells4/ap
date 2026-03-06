@@ -14,6 +14,7 @@ import (
 type Vars struct {
 	CTX           string
 	PROGRESS      string
+	HISTORY       string
 	OUTPUT        string
 	SESSION       string
 	ITERATION     string
@@ -35,6 +36,7 @@ func ResolveTemplate(template string, vars Vars) string {
 	}{
 		{"CTX", vars.CTX},
 		{"PROGRESS", vars.PROGRESS},
+		{"HISTORY", vars.HISTORY},
 		{"OUTPUT", vars.OUTPUT},
 		{"SESSION", vars.SESSION},
 		{"SESSION_NAME", vars.SESSION},
@@ -87,9 +89,11 @@ func VarsFromContext(path string) (Vars, error) {
 		Session   string `json:"session"`
 		Iteration *int   `json:"iteration"`
 		Paths     struct {
-			Progress string `json:"progress"`
-			Output   string `json:"output"`
-			Messages string `json:"messages"`
+			Progress   string `json:"progress"`
+			History    string `json:"history"`
+			Output     string `json:"output"`
+			OutputPath string `json:"output_path"`
+			Messages   string `json:"messages"`
 		} `json:"paths"`
 	}
 	if err := json.Unmarshal(data, &payload); err != nil {
@@ -104,7 +108,9 @@ func VarsFromContext(path string) (Vars, error) {
 	vars := Vars{
 		CTX:           path,
 		PROGRESS:      payload.Paths.Progress,
+		HISTORY:       payload.Paths.History,
 		OUTPUT:        payload.Paths.Output,
+		OUTPUT_PATH:   payload.Paths.OutputPath,
 		SESSION:       payload.Session,
 		ITERATION:     iteration,
 		PROGRESS_FILE: payload.Paths.Progress,

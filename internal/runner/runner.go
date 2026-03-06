@@ -34,6 +34,7 @@ import (
 	"github.com/hwells4/ap/internal/runtarget"
 	"github.com/hwells4/ap/internal/session"
 	"github.com/hwells4/ap/internal/signals"
+	"github.com/hwells4/ap/internal/stage"
 	"github.com/hwells4/ap/internal/store"
 	"github.com/hwells4/ap/internal/termination"
 	"github.com/hwells4/ap/pkg/provider"
@@ -93,6 +94,11 @@ type Config struct {
 
 	// PromptTemplate is the prompt text with ${VAR} placeholders.
 	PromptTemplate string
+
+	// OutputPath is the user-specified output file path from stage.yaml.
+	// May contain ${SESSION} and ${ITERATION} placeholders.
+	// Empty means no explicit output location (iteration-scoped output.md is used).
+	OutputPath string
 
 	// Model overrides the provider's default model. Empty uses the default.
 	Model string
@@ -199,6 +205,40 @@ type Result struct {
 
 	// Error is set when the run fails.
 	Error string
+}
+
+// workManifest captures what an iteration actually produced.
+type workManifest struct {
+	Git *gitManifest `json:"git,omitempty"`
+}
+
+// gitManifest records git state changes across an iteration.
+type gitManifest struct {
+	PreHead      string   `json:"pre_head"`
+	PostHead     string   `json:"post_head"`
+	DiffStat     string   `json:"diff_stat"`
+	FilesChanged []string `json:"files_changed"`
+}
+
+// buildWorkManifest captures git changes that occurred during an iteration.
+// Returns an empty manifest (no git section) when there is no git repo or
+// no changes were made.
+func buildWorkManifest(workDir, preHead string) workManifest {
+	if preHead == "" {
+		return workManifest{}
+	}
+	postHead := gitHead(workDir)
+	if postHead == "" || postHead == preHead {
+		return workManifest{}
+	}
+	return workManifest{
+		Git: &gitManifest{
+			PreHead:      preHead,
+			PostHead:     postHead,
+			DiffStat:     gitDiffStat(workDir, preHead, postHead),
+			FilesChanged: gitChangedFiles(workDir, preHead, postHead),
+		},
+	}
 }
 
 // Run executes the iteration loop for a single stage in foreground mode.
@@ -314,6 +354,16 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 			ProviderName: cfg.Provider.Name(),
 		})
 
+		// Capture git HEAD before provider execution.
+		preHead := ""
+		if isGitRepo(cfg.WorkDir) {
+			preHead = gitHead(cfg.WorkDir)
+		}
+
+		// Write session history for this iteration.
+		historyPath := filepath.Join(cfg.RunDir, "history.md")
+		writeHistory(ctx, cfg.Store, cfg.Session, historyPath)
+
 		// Generate context.json.
 		ctxPath, err := apcontext.GenerateContext(cfg.Session, i, stageConfig, cfg.RunDir, nil)
 		if err != nil {
@@ -417,7 +467,15 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 
 		lastResult = iterResult
 
-		if err := writeIterationOutput(ctxVars.OUTPUT, iterResult, provResult); err != nil {
+		// Build work manifest from git changes during this iteration.
+		manifest := buildWorkManifest(cfg.WorkDir, preHead)
+		manifestJSON, _ := json.Marshal(manifest)
+		diffStat := ""
+		if manifest.Git != nil {
+			diffStat = manifest.Git.DiffStat
+		}
+
+		if err := writeIterationOutput(ctxVars.OUTPUT, iterResult, provResult, diffStat); err != nil {
 			return Result{}, fmt.Errorf("runner: write iteration %d output: %w", i, err)
 		}
 
@@ -433,6 +491,7 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 			SignalsJSON:  string(signalsJSON),
 			Stdout:       provResult.Stdout,
 			Stderr:       provResult.Stderr,
+			ContextJSON:  string(manifestJSON),
 			ProviderName: cfg.Provider.Name(),
 			DurationMS:   time.Since(iterStartTime).Milliseconds(),
 		})
@@ -650,9 +709,26 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 		nodeCfg.StageName = node.StageName
 		nodeCfg.Iterations = node.Iterations
 
+		// Resolve per-stage prompt template.
+		def, stageErr := stage.ResolveStage(node.StageName, stage.ResolveOptions{
+			ProjectRoot: cfg.WorkDir,
+		})
+		if stageErr != nil {
+			storeMarkFailed(ctx, cfg, "stage_resolve_error", stageErr.Error())
+			return Result{Status: store.StatusFailed, Iterations: completed, Error: stageErr.Error()}, nil
+		}
+		promptBytes, promptErr := def.ReadPrompt()
+		if promptErr != nil {
+			storeMarkFailed(ctx, cfg, "prompt_read_error", promptErr.Error())
+			return Result{Status: store.StatusFailed, Iterations: completed, Error: promptErr.Error()}, nil
+		}
+		nodeCfg.PromptTemplate = string(promptBytes)
+
 		stageConfig := buildPipelineStageConfig(node)
+		stageConfig.OutputPath = def.ReadOutputPath()
 		fixed := termination.NewFixed(termination.FixedConfig{Iterations: &node.Iterations})
 		var lastResult extract.Result
+		stageCompleted := 0
 
 		for i := 1; i <= fixed.Target(); i++ {
 			if err := ctx.Err(); err != nil {
@@ -678,6 +754,12 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 				}, nil
 			}
 
+			// Capture git HEAD before provider execution.
+			nodePreHead := ""
+			if isGitRepo(cfg.WorkDir) {
+				nodePreHead = gitHead(cfg.WorkDir)
+			}
+
 			nodeIterStartTime := time.Now()
 			_ = cfg.Store.StartIteration(ctx, store.IterationInput{
 				SessionName:  cfg.Session,
@@ -687,6 +769,10 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 			})
 
 			cursorJSON := marshalCursorJSON(i, cfg.Provider.Name(), node.ID, nodeIdx+1)
+
+			// Write session history for this iteration.
+			historyPath := filepath.Join(cfg.RunDir, "history.md")
+			writeHistory(ctx, cfg.Store, cfg.Session, historyPath)
 
 			ctxPath, err := apcontext.GenerateContext(cfg.Session, i, stageConfig, cfg.RunDir, nil)
 			if err != nil {
@@ -725,7 +811,15 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 			iterResult, _, _ := extract.Extract(provResult.Stdout, provResult.ExitCode)
 			lastResult = iterResult
 
-			if err := writeIterationOutput(ctxVars.OUTPUT, iterResult, provResult); err != nil {
+			// Build work manifest from git changes during this iteration.
+			nodeManifest := buildWorkManifest(cfg.WorkDir, nodePreHead)
+			nodeManifestJSON, _ := json.Marshal(nodeManifest)
+			nodeDiffStat := ""
+			if nodeManifest.Git != nil {
+				nodeDiffStat = nodeManifest.Git.DiffStat
+			}
+
+			if err := writeIterationOutput(ctxVars.OUTPUT, iterResult, provResult, nodeDiffStat); err != nil {
 				return Result{}, fmt.Errorf("runner: write stage output for %s iteration %d: %w", node.ID, i, err)
 			}
 
@@ -740,6 +834,7 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 				SignalsJSON:  string(signalsJSON),
 				Stdout:       provResult.Stdout,
 				Stderr:       provResult.Stderr,
+				ContextJSON:  string(nodeManifestJSON),
 				ProviderName: cfg.Provider.Name(),
 				DurationMS:   time.Since(nodeIterStartTime).Milliseconds(),
 			})
@@ -767,6 +862,7 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 			}
 
 			completed++
+			stageCompleted++
 
 			if iterResult.Signals.Escalate != nil {
 				esc := extractToEscalate(iterResult.Signals.Escalate)
@@ -833,6 +929,9 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 				break
 			}
 		}
+
+		// Append stage boundary marker to session-scoped progress.
+		appendStageBoundary(cfg.RunDir, node.StageName, stageCompleted)
 
 		// Mark stage completed in stages_json.
 		markStageCompleted(ctx, cfg, nodeIdx)
@@ -944,6 +1043,7 @@ func buildStageConfig(cfg Config) apcontext.StageConfig {
 		Name:          cfg.StageName,
 		Index:         &idx,
 		MaxIterations: &cfg.Iterations,
+		OutputPath:    cfg.OutputPath,
 	}
 }
 
@@ -967,7 +1067,7 @@ func buildPipelineStageConfig(node pipelineRunNode) apcontext.StageConfig {
 	return cfg
 }
 
-func writeIterationOutput(path string, iterResult extract.Result, provResult provider.Result) error {
+func writeIterationOutput(path string, iterResult extract.Result, provResult provider.Result, diffStat string) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil
@@ -978,6 +1078,9 @@ func writeIterationOutput(path string, iterResult extract.Result, provResult pro
 	}
 	if content == "" {
 		content = strings.TrimSpace(provResult.Output)
+	}
+	if diffStat != "" {
+		content += "\n\n## Files Changed\n\n```\n" + diffStat + "\n```"
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create output dir: %w", err)
