@@ -533,6 +533,12 @@ func iterationRowToMap(r store.IterationRow) map[string]any {
 	if json.Unmarshal([]byte(r.SignalsJSON), &signals) == nil {
 		m["signals"] = signals
 	}
+	if r.WorkManifest != "" && r.WorkManifest != "{}" {
+		var manifest any
+		if json.Unmarshal([]byte(r.WorkManifest), &manifest) == nil {
+			m["work_manifest"] = manifest
+		}
+	}
 	return m
 }
 

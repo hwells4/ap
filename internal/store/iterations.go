@@ -33,17 +33,18 @@ type IterationComplete struct {
 
 // IterationRow represents a row from the iterations table.
 type IterationRow struct {
-	ID          int64
-	SessionName string
-	StageName   string
-	Iteration   int
-	Status      string
-	Decision    string
-	Summary     string
-	ExitCode    int
-	SignalsJSON string
-	StartedAt   string
-	CompletedAt *string
+	ID           int64
+	SessionName  string
+	StageName    string
+	Iteration    int
+	Status       string
+	Decision     string
+	Summary      string
+	ExitCode     int
+	SignalsJSON  string
+	StartedAt    string
+	CompletedAt  *string
+	WorkManifest string
 }
 
 // StartIteration inserts a new iteration, appends a started event, and
@@ -231,14 +232,22 @@ func (s *Store) GetIterations(ctx context.Context, sessionName string, stageFilt
 	var query string
 	var args []any
 	if stageFilter != "" {
-		query = `SELECT id, session_name, stage_name, iteration, status, decision, summary,
-		                exit_code, signals_json, started_at, completed_at
-		         FROM iterations WHERE session_name = ? AND stage_name = ? ORDER BY id`
+		query = `SELECT i.id, i.session_name, i.stage_name, i.iteration, i.status,
+		                i.decision, i.summary, i.exit_code, i.signals_json,
+		                i.started_at, i.completed_at,
+		                COALESCE(o.context_json, '{}') AS work_manifest
+		         FROM iterations i
+		         LEFT JOIN outputs o ON o.iteration_id = i.id
+		         WHERE i.session_name = ? AND i.stage_name = ? ORDER BY i.id`
 		args = []any{sessionName, stageFilter}
 	} else {
-		query = `SELECT id, session_name, stage_name, iteration, status, decision, summary,
-		                exit_code, signals_json, started_at, completed_at
-		         FROM iterations WHERE session_name = ? ORDER BY id`
+		query = `SELECT i.id, i.session_name, i.stage_name, i.iteration, i.status,
+		                i.decision, i.summary, i.exit_code, i.signals_json,
+		                i.started_at, i.completed_at,
+		                COALESCE(o.context_json, '{}') AS work_manifest
+		         FROM iterations i
+		         LEFT JOIN outputs o ON o.iteration_id = i.id
+		         WHERE i.session_name = ? ORDER BY i.id`
 		args = []any{sessionName}
 	}
 
@@ -254,7 +263,7 @@ func (s *Store) GetIterations(ctx context.Context, sessionName string, stageFilt
 		if err := rows.Scan(
 			&r.ID, &r.SessionName, &r.StageName, &r.Iteration, &r.Status,
 			&r.Decision, &r.Summary, &r.ExitCode, &r.SignalsJSON,
-			&r.StartedAt, &r.CompletedAt,
+			&r.StartedAt, &r.CompletedAt, &r.WorkManifest,
 		); err != nil {
 			return nil, fmt.Errorf("store: get iterations scan: %w", err)
 		}
