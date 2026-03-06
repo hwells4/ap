@@ -1036,6 +1036,100 @@ func TestRun_InjectSignal_OverwrittenByLaterInject(t *testing.T) {
 	}
 }
 
+func TestRun_Pipeline_PerStagePromptResolution(t *testing.T) {
+	runDir, s := tempSession(t)
+
+	mp := mock.New(
+		mock.WithResponses(
+			mock.StopResponse("plan done", "ok"),
+			mock.StopResponse("refine done", "ok"),
+		),
+	)
+
+	pipeline := &compile.Pipeline{
+		Name: "prompt-resolve-test",
+		Nodes: []compile.Node{
+			{ID: "plan", Stage: "improve-plan", Runs: 1},
+			{ID: "refine", Stage: "refine-tasks", Runs: 1},
+		},
+	}
+
+	res, err := Run(context.Background(), Config{
+		Session:  "pipeline-prompt-resolve",
+		RunDir:   runDir,
+		Provider: mp,
+		Pipeline: pipeline,
+		// PromptTemplate is intentionally empty — runner should resolve per-stage.
+		PromptTemplate: "",
+		WorkDir:        filepath.Dir(filepath.Dir(runDir)),
+		Store:          s,
+	})
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if res.Status != store.StatusCompleted {
+		t.Fatalf("status = %q, want %q", res.Status, store.StatusCompleted)
+	}
+	if res.Iterations != 2 {
+		t.Fatalf("iterations = %d, want 2", res.Iterations)
+	}
+
+	calls := mp.Calls()
+	if len(calls) != 2 {
+		t.Fatalf("provider calls = %d, want 2", len(calls))
+	}
+
+	// Each stage should have a non-empty prompt (resolved from its stage definition).
+	for i, call := range calls {
+		if call.Request.Prompt == "" {
+			t.Errorf("call[%d] prompt is empty — per-stage prompt resolution failed", i)
+		}
+	}
+
+	// The two prompts should differ (they come from different stage definitions).
+	if calls[0].Request.Prompt == calls[1].Request.Prompt {
+		t.Error("both stages got identical prompts — expected different per-stage prompts")
+	}
+}
+
+func TestRun_Pipeline_StageResolutionFailure(t *testing.T) {
+	runDir, s := tempSession(t)
+
+	mp := mock.New(
+		mock.WithResponses(
+			mock.ContinueResponse("should not reach"),
+		),
+	)
+
+	pipeline := &compile.Pipeline{
+		Name: "bad-stage-test",
+		Nodes: []compile.Node{
+			{ID: "bad", Stage: "nonexistent-stage-xyz", Runs: 1},
+		},
+	}
+
+	res, err := Run(context.Background(), Config{
+		Session:  "pipeline-bad-stage",
+		RunDir:   runDir,
+		Provider: mp,
+		Pipeline: pipeline,
+		WorkDir:  filepath.Dir(filepath.Dir(runDir)),
+		Store:    s,
+	})
+	if err != nil {
+		t.Fatalf("Run() should not return error, got: %v", err)
+	}
+	if res.Status != store.StatusFailed {
+		t.Fatalf("status = %q, want %q", res.Status, store.StatusFailed)
+	}
+	if res.Error == "" {
+		t.Fatal("expected non-empty error message for bad stage")
+	}
+	if mp.CallCount() != 0 {
+		t.Fatalf("provider should not be called for unresolvable stage, got %d calls", mp.CallCount())
+	}
+}
+
 func TestRun_EscalateSignal_PausesSession(t *testing.T) {
 	runDir, s := tempSession(t)
 
