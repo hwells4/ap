@@ -34,6 +34,211 @@ Binary: `ap`. Module: `github.com/hwells4/ap`.
   - `failed` → `running`, `aborted`
   - `completed` and `aborted` are **terminal** (no further transitions).
 
+## Context File Contract
+
+Each iteration receives a `context.json` at `${CTX}`. This is the primary interface between runner and agent.
+
+```json
+{
+  "session": "my-session",
+  "pipeline": "pipeline-name",
+  "stage": {
+    "id": "improve-plan",
+    "index": 0,
+    "template": "improve-plan"
+  },
+  "iteration": 3,
+  "paths": {
+    "session_dir": ".ap/runs/my-session",
+    "stage_dir": "stage-00-improve-plan",
+    "progress": ".ap/runs/my-session/progress.md",
+    "history": ".ap/runs/my-session/stage-00-improve-plan/iterations/003/history.md",
+    "output": ".ap/runs/my-session/stage-00-improve-plan/iterations/003/output.md",
+    "output_path": "resolved/custom/path.md",
+    "messages": ".ap/runs/my-session/messages.jsonl"
+  },
+  "inputs": {
+    "from_stage": {"plan-stage": ["/path/to/output.md"]},
+    "from_previous_iterations": ["/path/iteration-001/output.md"],
+    "from_initial": ["/path/input1.md"],
+    "from_parallel": [{"stage": "...", "block": "..."}]
+  },
+  "limits": {
+    "max_iterations": 25,
+    "remaining_seconds": 3600
+  },
+  "commands": {}
+}
+```
+
+## Template Variables
+
+All `${VAR}` placeholders resolved in prompts and `output_path`:
+
+| Variable | Description |
+|----------|-------------|
+| `${CTX}` | Full path to `context.json` |
+| `${SESSION}` | Session name |
+| `${SESSION_NAME}` | Alias for `${SESSION}` |
+| `${ITERATION}` | Current iteration number (1-based) |
+| `${INDEX}` | Zero-based iteration index (`ITERATION - 1`) |
+| `${PROGRESS}` | Path to `progress.md` |
+| `${PROGRESS_FILE}` | Alias for `${PROGRESS}` |
+| `${HISTORY}` | Path to `history.md` |
+| `${OUTPUT}` | Path to iteration `output.md` |
+| `${OUTPUT_PATH}` | Resolved `output_path` from stage config |
+| `${CONTEXT}` | Injected context (from `signal.inject` or `--context`) |
+| `${MESSAGES}` | Path to `messages.jsonl` |
+| `${PERSPECTIVE}` | Optional perspective field (parallel blocks) |
+
+## Iteration Lifecycle
+
+Each iteration: generate context → resolve prompt → execute provider → extract result → check termination → update store → emit events.
+
+### Result Extraction
+
+Agents emit decisions via an `ap-result` fenced block in stdout:
+
+````
+```ap-result
+{
+  "decision": "continue",
+  "summary": "Implemented feature X",
+  "signals": {
+    "inject": "context for next iteration",
+    "escalate": {"type": "human", "reason": "need approval"},
+    "spawn": [{"run": "review:3", "session": "child-review"}]
+  }
+}
+```
+````
+
+**Extraction strategy** (first match wins):
+1. Parse last `` ```ap-result `` fenced block as JSON
+2. Non-zero exit code → `"error"`
+3. Default → `"continue"` with last 200 chars as summary
+
+**Valid decisions**: `continue`, `stop`, `error`
+
+## Agent Signals
+
+Signals are directives inside `ap-result` that trigger runner-side actions.
+
+| Signal | Effect |
+|--------|--------|
+| `inject` | String injected as `${CONTEXT}` in the next iteration |
+| `escalate` | Dispatches to escalation handler chain; pauses session |
+| `spawn` | Launches child sessions (subject to `max_child_sessions` / `max_spawn_depth`) |
+| `warnings` | Array of strings logged as warnings (informational only) |
+
+**Escalate payload**:
+```json
+{"type": "human", "reason": "Need design review", "options": ["approve", "reject"]}
+```
+
+**Spawn payload**:
+```json
+[{"run": "stage:5", "session": "child-name", "project_root": "...", "n": 10}]
+```
+
+## Termination Strategies
+
+| Type | Config | Description |
+|------|--------|-------------|
+| `fixed` | `iterations: N` | Stop after N iterations. Default: 1. Immediate stop on `"stop"` or `"error"` decision. |
+| `judgment` | `consensus: 2, min_iterations: 3` | Judge model evaluates after each iteration. Needs N consecutive `"stop"` verdicts. Falls back to fixed after 3 judge failures. |
+| `race` | `agents: 2, accept: first` | N concurrent providers run in parallel. First successful result wins. |
+
+## Retry
+
+Per-iteration retry on provider failure:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `max_attempts` | `1` (no retry) | Total attempts per iteration |
+| `backoff` | `5s` | Initial backoff; doubles per attempt |
+| `on_exhausted` | `"abort"` | `"abort"` fails the session, `"pause"` pauses for investigation |
+
+## Signal Handlers
+
+Handler chain for `escalate` and `spawn` events. Configured in `~/.config/ap/config.yaml`:
+
+| Type | Required Fields | Description |
+|------|----------------|-------------|
+| `stdout` | — | Print JSON payload to stdout (default fallback) |
+| `webhook` | `url`, optional `headers` | HTTP POST with JSON payload. Includes `callback_url`/`callback_token` when callback listener is active. |
+| `exec` | `argv` | Execute subprocess. `argv[0]` is not expanded; args support `${SESSION}`, `${STAGE}`, `${ITERATION}`, `${REASON}`, `${CHILD_SESSION}`, `${TYPE}`. |
+
+**Callback listener**: When configured, an ephemeral HTTP server listens for `POST /resume` responses. The `callback_url` and `callback_token` are included in webhook payloads for human-in-the-loop responses. Non-localhost binds auto-generate bearer tokens.
+
+## Session History & Progress
+
+| File | Location | Written By | Purpose |
+|------|----------|-----------|---------|
+| `progress.md` | `.ap/runs/{session}/progress.md` | Agent | Session-scoped working notes. Survives stage transitions. Stage boundary markers appended at transitions. |
+| `history.md` | `.ap/runs/{session}/stage-XX-{id}/iterations/NNN/history.md` | Runner | Deterministic iteration summary rebuilt from SQLite before each iteration. Read-only for agents. |
+
+**History format**:
+```markdown
+# Session History
+## Stage: stage-name
+- **Iteration 1** [continue]: Summary of iteration 1
+- **Iteration 2** [stop]: Summary of iteration 2
+```
+
+## Work Manifest
+
+Each iteration captures a git diff telemetry snapshot stored in iteration outputs:
+
+```json
+{
+  "git": {
+    "pre_head": "abc123",
+    "post_head": "def456",
+    "diff_stat": "3 files changed, 42 insertions(+), 7 deletions(-)",
+    "files_changed": ["path/to/file1.go", "path/to/file2.go"]
+  }
+}
+```
+
+## Event Types
+
+| Event | Description |
+|-------|-------------|
+| `session.started` | Session started |
+| `session.completed` | Session completed |
+| `node.started` | Pipeline node started |
+| `node.completed` | Pipeline node completed |
+| `iteration.started` | Iteration started |
+| `iteration.completed` | Iteration completed |
+| `iteration.failed` | Iteration failed |
+| `iteration.retried` | Iteration retry attempt |
+| `judge.verdict` | Judgment termination evaluation result |
+| `judge.fallback` | Judge fell back to fixed termination |
+| `signal.dispatching` | Signal dispatch started |
+| `signal.inject` | Inject signal processed |
+| `signal.escalate` | Escalation signal dispatched |
+| `signal.spawn` | Child session spawned |
+| `signal.spawn.failed` | Child spawn failed |
+| `signal.handler.error` | Handler error (non-fatal) |
+| `error` | General error |
+
+## Run Artifact Layout
+
+```
+.ap/runs/{session}/
+  run_request.json        # persisted launch config (crash recovery)
+  state.json              # session state snapshot
+  progress.md             # session-scoped agent notes
+  messages.jsonl          # live message bus
+  stage-00-{id}/
+    iterations/
+      001/
+        context.json      # iteration context
+        output.md         # agent output
+        history.md        # runner-generated summary
+```
+
 ## Output Contract
 - JSON mode is enabled by `--json`, non-TTY stdout, or `AP_OUTPUT=json`.
 - Success returns exit `0` with payload plus `corrections[]`.
@@ -48,7 +253,17 @@ Binary: `ap`. Module: `github.com/hwells4/ap`.
 - Flag alias normalization: e.g. `--iterations→-n`, `--provider anthropic→--provider claude`.
 - Argument order recovery: can recover misplaced `<spec> <session>`.
 - Spec recovery: can recover `stage 25` to `stage:25`.
+- Chain arrow recovery: ` > ` and `,` normalized to ` -> ` (e.g. `"a:5 > b:5"` → `"a:5 -> b:5"`).
 - Safety rule: `kill` and `clean` do **not** use typo-based fuzzy matching (exact synonyms only).
+
+## Spec Types
+- Stage spec: `ralph`
+- Stage with count: `ralph:25`
+- Chain spec: `"improve-plan:5 -> refine-tasks:5"`
+- YAML pipeline file: `./pipeline.yaml`
+- Prompt file: `./prompt.md`
+- Chain arrow recovery: ` > ` and `,` are normalized to ` -> `.
+- Stage iteration recovery: `ralph 25` → `ralph:25`.
 
 ## Common Agent Patterns
 1. Validate request and spec:
@@ -69,13 +284,6 @@ Binary: `ap`. Module: `github.com/hwells4/ap`.
 7. Cleanup/termination:
    - `ap kill <session> --json` (idempotent)
    - `ap clean <session>|--all --json`
-
-## Spec Types
-- Stage spec: `ralph`
-- Stage with count: `ralph:25`
-- Chain spec: `"improve-plan:5 -> refine-tasks:5"`
-- YAML pipeline file: `./pipeline.yaml`
-- Prompt file: `./prompt.md`
 
 ## Cross-Project Session Resolution
 - Commands that take `<session>` support `--project-root DIR` to target a specific project.
