@@ -30,6 +30,7 @@ import (
 	apcontext "github.com/hwells4/ap/internal/context"
 	"github.com/hwells4/ap/internal/extract"
 	"github.com/hwells4/ap/internal/judge"
+	"github.com/hwells4/ap/internal/swarm"
 	"github.com/hwells4/ap/internal/resolve"
 	"github.com/hwells4/ap/internal/runtarget"
 	"github.com/hwells4/ap/internal/session"
@@ -633,6 +634,7 @@ type pipelineRunNode struct {
 	Iterations int
 	Index      int
 	Inputs     compile.Inputs
+	Swarm      *compile.SwarmBlock // non-nil for swarm nodes
 }
 
 func runPipeline(ctx context.Context, cfg Config) (Result, error) {
@@ -668,19 +670,32 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 		Name       string `json:"name"`
 		Index      int    `json:"index"`
 		Iterations int    `json:"iterations"`
+		Type       string `json:"type,omitempty"`
 	}
 	stageInfos := make([]stageInfo, len(nodes))
 	for i, node := range nodes {
-		stageInfos[i] = stageInfo{
-			Name:       node.StageName,
-			Index:      i,
-			Iterations: node.Iterations,
+		if node.Swarm != nil {
+			stageInfos[i] = stageInfo{
+				Name:  node.ID,
+				Index: i,
+				Type:  "swarm",
+			}
+		} else {
+			stageInfos[i] = stageInfo{
+				Name:       node.StageName,
+				Index:      i,
+				Iterations: node.Iterations,
+			}
 		}
 	}
 	stagesJSON, _ := json.Marshal(stageInfos)
+	firstStageName := nodes[0].StageName
+	if nodes[0].Swarm != nil {
+		firstStageName = nodes[0].ID
+	}
 	_ = cfg.Store.UpdateSession(ctx, cfg.Session, map[string]any{
 		"stages_json":   string(stagesJSON),
-		"current_stage": nodes[0].StageName,
+		"current_stage": firstStageName,
 		"node_id":       nodes[0].ID,
 	})
 
@@ -700,6 +715,32 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 	injectedContext := ""
 
 	for nodeIdx, node := range nodes {
+		// Handle swarm nodes.
+		if node.Swarm != nil {
+			_ = cfg.Store.UpdateSession(ctx, cfg.Session, map[string]any{
+				"current_stage": node.ID,
+				"node_id":       node.ID,
+			})
+
+			swarmResult, swarmErr := executeSwarmNode(ctx, cfg, node, nodeIdx, injectedContext)
+			if swarmErr != nil {
+				storeMarkFailed(ctx, cfg, "swarm_error", swarmErr.Error())
+				return Result{
+					Iterations: completed,
+					Status:     store.StatusFailed,
+					Error:      swarmErr.Error(),
+				}, nil
+			}
+
+			completed += swarmResult.Iterations
+			injectedContext = "" // consumed by swarm block
+
+			// Append stage boundary marker.
+			appendStageBoundary(cfg.RunDir, node.ID, swarmResult.Iterations)
+			markStageCompleted(ctx, cfg, nodeIdx)
+			continue
+		}
+
 		_ = cfg.Store.UpdateSession(ctx, cfg.Session, map[string]any{
 			"current_stage": node.StageName,
 			"node_id":       node.ID,
@@ -956,14 +997,24 @@ func pipelineNodes(pipeline *compile.Pipeline) ([]pipelineRunNode, error) {
 
 	nodes := make([]pipelineRunNode, 0, len(pipeline.Nodes))
 	for idx, node := range pipeline.Nodes {
-		if node.Parallel != nil {
-			return nil, fmt.Errorf("runner: node %q parallel blocks are not supported in sequential runner", strings.TrimSpace(node.ID))
+		nodeID := strings.TrimSpace(node.ID)
+		if node.Swarm != nil {
+			// Swarm node: stage name is the node ID (no single stage).
+			if nodeID == "" {
+				nodeID = fmt.Sprintf("swarm-%d", idx)
+			}
+			nodes = append(nodes, pipelineRunNode{
+				ID:       nodeID,
+				Index:    idx,
+				Inputs:   node.Inputs,
+				Swarm:    node.Swarm,
+			})
+			continue
 		}
 		stageName := strings.TrimSpace(node.Stage)
 		if stageName == "" {
 			return nil, fmt.Errorf("runner: node[%d] stage is required", idx)
 		}
-		nodeID := strings.TrimSpace(node.ID)
 		if nodeID == "" {
 			nodeID = stageName
 		}
@@ -985,9 +1036,88 @@ func pipelineNodes(pipeline *compile.Pipeline) ([]pipelineRunNode, error) {
 func totalPlannedIterations(nodes []pipelineRunNode) int {
 	total := 0
 	for _, node := range nodes {
-		total += node.Iterations
+		if node.Swarm != nil {
+			// Estimate: sum of (providers * stage runs) for swarm blocks.
+			for _, s := range node.Swarm.Stages {
+				runs := s.Runs
+				if runs <= 0 {
+					runs = 1
+				}
+				total += len(node.Swarm.Providers) * runs
+			}
+		} else {
+			total += node.Iterations
+		}
 	}
 	return total
+}
+
+// swarmNodeResult captures the outcome of a swarm block execution.
+type swarmNodeResult struct {
+	Iterations int
+}
+
+// executeSwarmNode runs a swarm block within a pipeline.
+func executeSwarmNode(ctx context.Context, cfg Config, node pipelineRunNode, nodeIdx int, injectedContext string) (swarmNodeResult, error) {
+	if node.Swarm == nil {
+		return swarmNodeResult{}, fmt.Errorf("runner: node %q is not a swarm node", node.ID)
+	}
+
+	// Create the swarm executor.
+	executor := &swarmExecutor{
+		cfg:     cfg,
+		blockID: node.ID,
+	}
+
+	// Emit swarm.started event.
+	emitEvent(ctx, cfg, store.TypeSwarmStart, "{}", map[string]any{
+		"block_id":   node.ID,
+		"node_index": nodeIdx,
+		"providers":  len(node.Swarm.Providers),
+		"stages":     len(node.Swarm.Stages),
+	})
+
+	// Build swarm config.
+	swarmCfg := swarm.Config{
+		RunDir:     cfg.RunDir,
+		BlockID:    node.ID,
+		BlockIndex: nodeIdx,
+		Providers:  node.Swarm.Providers,
+		Stages:     node.Swarm.Stages,
+		Executor:   executor,
+	}
+
+	// Run the swarm block.
+	result, err := swarm.Run(ctx, swarmCfg)
+
+	// Count total iterations across all providers.
+	totalIterations := 0
+	for _, prov := range result.Providers {
+		for _, stageRes := range prov.Stages {
+			totalIterations += stageRes.Iterations
+		}
+	}
+
+	if err != nil {
+		emitEvent(ctx, cfg, store.TypeSwarmComplete, "{}", map[string]any{
+			"block_id":   node.ID,
+			"node_index": nodeIdx,
+			"status":     "failed",
+			"iterations": totalIterations,
+			"error":      err.Error(),
+		})
+		return swarmNodeResult{Iterations: totalIterations}, err
+	}
+
+	emitEvent(ctx, cfg, store.TypeSwarmComplete, "{}", map[string]any{
+		"block_id":      node.ID,
+		"node_index":    nodeIdx,
+		"status":        "completed",
+		"iterations":    totalIterations,
+		"manifest_path": result.ManifestPath,
+	})
+
+	return swarmNodeResult{Iterations: totalIterations}, nil
 }
 
 func normalizeRunTargetConfig(cfg Config) (Config, error) {

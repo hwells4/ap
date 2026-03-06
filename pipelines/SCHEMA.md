@@ -97,7 +97,7 @@ jq -r '.inputs.from_stage.plan[]' ${CTX} | xargs cat
 jq -r '.inputs.from_previous_iterations[]' ${CTX} | xargs cat
 ```
 
-## Parallel Blocks
+## Swarm Blocks
 
 Run multiple providers concurrently with isolated contexts:
 
@@ -110,7 +110,7 @@ nodes:
       iterations: 1
 
   - id: dual-review
-    parallel:
+    swarm:
       providers: [claude, codex]
       stages:
         - id: analyze
@@ -128,10 +128,10 @@ nodes:
   - id: synthesize
     stage: elegance
     inputs:
-      from_parallel: refine  # Read outputs from all providers
+      from_swarm: refine  # Read outputs from all providers
 ```
 
-### Parallel Block Behavior
+### Swarm Block Behavior
 
 - Each provider has isolated progress and state (no cross-provider visibility)
 - Stages within a block run sequentially per provider
@@ -144,13 +144,13 @@ nodes:
 ```yaml
 # Short form - gets all providers' outputs
 inputs:
-  from_parallel: refine
+  from_swarm: refine
 
 # Full form with options
 inputs:
-  from_parallel:
+  from_swarm:
     stage: refine
-    block: dual-review         # Optional if only one parallel block
+    block: dual-review         # Optional if only one swarm block
     providers: [claude]        # Filter to subset (default: all)
     select: history            # "latest" (default) or "history" (all iterations)
 ```
@@ -251,7 +251,7 @@ description: Compare Claude and Codex refinements
 
 nodes:
   - id: compare
-    parallel:
+    swarm:
       providers: [claude, codex]
       stages:
         - id: refine
@@ -264,7 +264,7 @@ nodes:
   - id: merge
     stage: elegance
     inputs:
-      from_parallel: refine
+      from_swarm: refine
 ```
 
 ## Output Structure
@@ -282,7 +282,7 @@ After running a pipeline, outputs are in:
 │       │   ├── status.json
 │       │   └── output.md
 │       └── ...
-├── parallel-01-{name}/           # Parallel block
+├── swarm-01-{name}/           # Parallel block
 │   ├── manifest.json             # Aggregated outputs
 │   ├── resume.json               # Crash recovery hints
 │   └── providers/

@@ -15,7 +15,7 @@ nodes:
 
   # Block 1: Both analyze the plan and write recommendations
   - id: recommend
-    parallel:
+    swarm:
       providers:
         - name: claude
           model: opus
@@ -30,18 +30,18 @@ nodes:
 
   # Block 2: Cross-critique (each evaluates the OTHER's recommendations)
   - id: critique
-    parallel:
+    swarm:
       providers:
         - name: claude
           model: opus
           inputs:
-            from_parallel:
+            from_swarm:
               stage: recs
               providers: [codex]
         - name: codex
           model: gpt-5.2-codex:xhigh
           inputs:
-            from_parallel:
+            from_swarm:
               stage: recs
               providers: [claude]
       stages:
@@ -53,12 +53,12 @@ nodes:
 
   # Block 3: Respond to critique
   - id: respond
-    parallel:
+    swarm:
       providers:
         - name: claude
           model: opus
           inputs:
-            from_parallel:
+            from_swarm:
               - stage: recs
                 providers: [claude]
               - stage: crit
@@ -66,7 +66,7 @@ nodes:
         - name: codex
           model: gpt-5.2-codex:xhigh
           inputs:
-            from_parallel:
+            from_swarm:
               - stage: recs
                 providers: [codex]
               - stage: crit
@@ -82,7 +82,7 @@ nodes:
   - id: implement
     stage: implement-changes
     inputs:
-      from_parallel:
+      from_swarm:
         stage: resp
     termination:
       type: fixed

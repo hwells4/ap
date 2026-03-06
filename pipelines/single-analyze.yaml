@@ -3,7 +3,7 @@ description: Single provider test
 
 nodes:
   - id: analyze
-    parallel:
+    swarm:
       providers: [claude]
       stages:
         - name: improve

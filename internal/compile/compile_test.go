@@ -158,14 +158,14 @@ nodes:
 	}
 }
 
-func TestCompileParsesParallelBlocks(t *testing.T) {
+func TestCompileParsesSwarmBlocks(t *testing.T) {
 	t.Parallel()
 
 	path := writePipelineFile(t, `
-name: parallel
+name: swarm-test
 nodes:
   - id: recommend
-    parallel:
+    swarm:
       providers: [claude, codex]
       stages:
         - id: recs
@@ -186,18 +186,18 @@ nodes:
 	if len(pipeline.Nodes) != 2 {
 		t.Fatalf("len(Nodes) = %d, want 2", len(pipeline.Nodes))
 	}
-	parallel := pipeline.Nodes[0].Parallel
-	if parallel == nil {
-		t.Fatal("expected parallel block")
+	swarmBlock := pipeline.Nodes[0].Swarm
+	if swarmBlock == nil {
+		t.Fatal("expected swarm block")
 	}
-	if len(parallel.Providers) != 2 {
-		t.Fatalf("len(parallel.providers) = %d, want 2", len(parallel.Providers))
+	if len(swarmBlock.Providers) != 2 {
+		t.Fatalf("len(swarm.providers) = %d, want 2", len(swarmBlock.Providers))
 	}
-	if parallel.Providers[0].Name != "claude" || parallel.Providers[1].Name != "codex" {
-		t.Fatalf("unexpected provider names: %#v", parallel.Providers)
+	if swarmBlock.Providers[0].Name != "claude" || swarmBlock.Providers[1].Name != "codex" {
+		t.Fatalf("unexpected provider names: %#v", swarmBlock.Providers)
 	}
-	if len(parallel.Stages) != 1 || parallel.Stages[0].Stage != "recommend-improvements" {
-		t.Fatalf("unexpected parallel stages: %#v", parallel.Stages)
+	if len(swarmBlock.Stages) != 1 || swarmBlock.Stages[0].Stage != "recommend-improvements" {
+		t.Fatalf("unexpected swarm stages: %#v", swarmBlock.Stages)
 	}
 }
 

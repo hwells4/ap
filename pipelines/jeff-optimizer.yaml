@@ -16,7 +16,7 @@ description: Multi-model optimization analysis with parallel Claude+Codex, synth
 nodes:
   # Stage 1-2: Parallel analysis with Claude and Codex
   - id: parallel-analysis
-    parallel:
+    swarm:
       providers: [claude, codex]
       stages:
         - id: analyze
@@ -35,7 +35,7 @@ nodes:
     stage: synthesize-plans
     runs: 1
     inputs:
-      from_parallel:
+      from_swarm:
         stage: review
         block: parallel-analysis
 

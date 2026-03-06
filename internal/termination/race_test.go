@@ -522,7 +522,6 @@ func TestRaceRunner_MockProviders_MixedResultsTiming(t *testing.T) {
 				return nil, ctx.Err()
 			}
 		}
-		return nil, fmt.Errorf("unreachable")
 	})
 	if err != nil {
 		t.Fatalf("Run() error: %v", err)

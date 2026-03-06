@@ -1,5 +1,5 @@
-// Package parallel runs provider-isolated parallel blocks.
-package parallel
+// Package swarm runs provider-isolated swarm blocks.
+package swarm
 
 import (
 	"context"
@@ -31,13 +31,13 @@ const (
 	statusFailed    providerStatus = "failed"
 )
 
-// Config controls one parallel block execution.
+// Config controls one swarm block execution.
 type Config struct {
 	RunDir     string
 	BlockID    string
 	BlockIndex int
 	Providers  []compile.ProviderConfig
-	Stages     []compile.ParallelStage
+	Stages     []compile.SwarmStage
 	Resume     bool
 	Executor   Executor
 }
@@ -59,7 +59,7 @@ func (f ExecutorFunc) Execute(ctx context.Context, req ExecuteRequest) (StageRes
 type ExecuteRequest struct {
 	BlockDir      string
 	Provider      compile.ProviderConfig
-	Stage         compile.ParallelStage
+	Stage         compile.SwarmStage
 	StageIndex    int
 	ProviderDir   string
 	StageDir      string
@@ -88,7 +88,7 @@ type ProviderResult struct {
 	Stages       map[string]StageResult
 }
 
-// Result captures one parallel block execution.
+// Result captures one swarm block execution.
 type Result struct {
 	BlockDir      string
 	ProvidersRoot string
@@ -134,7 +134,7 @@ type resumeProviderHint struct {
 }
 
 // Manifest is the exported type for reading manifest.json files.
-// Downstream stages use this to resolve from_parallel inputs.
+// Downstream stages use this to resolve from_swarm inputs.
 type Manifest struct {
 	Block struct {
 		Name string `json:"name"`
@@ -169,11 +169,11 @@ type ProviderHint struct {
 func ReadManifest(path string) (*Manifest, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("parallel: read manifest: %w", err)
+		return nil, fmt.Errorf("swarm: read manifest: %w", err)
 	}
 	var m Manifest
 	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, fmt.Errorf("parallel: parse manifest: %w", err)
+		return nil, fmt.Errorf("swarm: parse manifest: %w", err)
 	}
 	if m.Providers == nil {
 		m.Providers = map[string]map[string]StageResult{}
@@ -188,11 +188,11 @@ func ReadManifest(path string) (*Manifest, error) {
 func ReadResumeHints(path string) (*ResumeHints, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("parallel: read resume: %w", err)
+		return nil, fmt.Errorf("swarm: read resume: %w", err)
 	}
 	var h ResumeHints
 	if err := json.Unmarshal(data, &h); err != nil {
-		return nil, fmt.Errorf("parallel: parse resume: %w", err)
+		return nil, fmt.Errorf("swarm: parse resume: %w", err)
 	}
 	if h.Providers == nil {
 		h.Providers = map[string]ProviderHint{}
@@ -208,26 +208,26 @@ type providerWork struct {
 	statePath    string
 }
 
-// Run executes a parallel block.
+// Run executes a swarm block.
 func Run(ctx context.Context, cfg Config) (Result, error) {
 	if strings.TrimSpace(cfg.RunDir) == "" {
-		return Result{}, fmt.Errorf("parallel: run dir is required")
+		return Result{}, fmt.Errorf("swarm: run dir is required")
 	}
 	if cfg.Executor == nil {
-		return Result{}, fmt.Errorf("parallel: executor is required")
+		return Result{}, fmt.Errorf("swarm: executor is required")
 	}
 	if len(cfg.Providers) == 0 {
-		return Result{}, fmt.Errorf("parallel: at least one provider is required")
+		return Result{}, fmt.Errorf("swarm: at least one provider is required")
 	}
 	if len(cfg.Stages) == 0 {
-		return Result{}, fmt.Errorf("parallel: at least one stage is required")
+		return Result{}, fmt.Errorf("swarm: at least one stage is required")
 	}
 
 	blockDirName := formatBlockDirName(cfg.BlockIndex, cfg.BlockID)
 	blockDir := filepath.Join(cfg.RunDir, blockDirName)
 	providersRoot := filepath.Join(blockDir, "providers")
 	if err := os.MkdirAll(providersRoot, 0o755); err != nil {
-		return Result{}, fmt.Errorf("parallel: create providers root: %w", err)
+		return Result{}, fmt.Errorf("swarm: create providers root: %w", err)
 	}
 
 	out := Result{
@@ -246,25 +246,28 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		}
 	}
 
-	workItems := make([]providerWork, 0, len(cfg.Providers))
-	for _, providerSpec := range cfg.Providers {
-		name := normalizedProviderName(providerSpec.Name)
+	// Auto-suffix duplicate provider names so each instance gets a unique directory.
+	suffixedProviders := suffixDuplicateProviders(cfg.Providers)
+
+	workItems := make([]providerWork, 0, len(suffixedProviders))
+	for _, sp := range suffixedProviders {
+		name := sp.instanceName
 		if name == "" {
-			return Result{}, fmt.Errorf("parallel: provider name is required")
+			return Result{}, fmt.Errorf("swarm: provider name is required")
 		}
 
 		providerDir := filepath.Join(providersRoot, name)
 		progressPath := filepath.Join(providerDir, providerProgFile)
 		statePath := filepath.Join(providerDir, providerStateFile)
 		if err := os.MkdirAll(providerDir, 0o755); err != nil {
-			return Result{}, fmt.Errorf("parallel: create provider dir: %w", err)
+			return Result{}, fmt.Errorf("swarm: create provider dir: %w", err)
 		}
 		if err := ensureProgressFile(progressPath); err != nil {
 			return Result{}, err
 		}
 
 		work := providerWork{
-			spec:         providerSpec,
+			spec:         sp.spec,
 			name:         name,
 			dir:          providerDir,
 			progressPath: progressPath,
@@ -334,7 +337,7 @@ func runProvider(
 	executor Executor,
 	blockDir string,
 	work providerWork,
-	stages []compile.ParallelStage,
+	stages []compile.SwarmStage,
 ) (ProviderResult, error) {
 	result := ProviderResult{
 		Name:         work.name,
@@ -368,11 +371,15 @@ func runProvider(
 
 		stageDir := filepath.Join(work.dir, stageDirectoryName(idx, stage))
 		if err := os.MkdirAll(stageDir, 0o755); err != nil {
-			return result, fmt.Errorf("parallel: create stage dir: %w", err)
+			return result, fmt.Errorf("swarm: create stage dir: %w", err)
 		}
+		// Use the instance name (e.g. "claude-2") in the request so the
+		// executor can distinguish between duplicate provider instances.
+		instanceSpec := work.spec
+		instanceSpec.Name = work.name
 		stageRes, err := executor.Execute(ctx, ExecuteRequest{
 			BlockDir:      blockDir,
-			Provider:      work.spec,
+			Provider:      instanceSpec,
 			Stage:         stage,
 			StageIndex:    idx,
 			ProviderDir:   work.dir,
@@ -395,7 +402,7 @@ func runProvider(
 				Status:     string(statusFailed),
 				Iterations: effectiveStageRuns(stage),
 			}
-			return result, fmt.Errorf("parallel: provider %s stage %s: %w", work.name, stageKey, err)
+			return result, fmt.Errorf("swarm: provider %s stage %s: %w", work.name, stageKey, err)
 		}
 		if strings.TrimSpace(stageRes.Status) == "" {
 			stageRes.Status = string(statusCompleted)
@@ -425,7 +432,7 @@ func writeManifest(path, blockID string, providers map[string]ProviderResult) er
 		Outputs:   make(map[string][]string, len(providers)),
 	}
 	if strings.TrimSpace(blockID) == "" {
-		manifest.Block.Name = "parallel"
+		manifest.Block.Name = "swarm"
 	} else {
 		manifest.Block.Name = strings.TrimSpace(blockID)
 	}
@@ -454,10 +461,10 @@ func writeManifest(path, blockID string, providers map[string]ProviderResult) er
 
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
-		return fmt.Errorf("parallel: marshal manifest: %w", err)
+		return fmt.Errorf("swarm: marshal manifest: %w", err)
 	}
 	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
-		return fmt.Errorf("parallel: write manifest: %w", err)
+		return fmt.Errorf("swarm: write manifest: %w", err)
 	}
 	return nil
 }
@@ -485,7 +492,7 @@ func writeResume(path, blockID string, providers map[string]ProviderResult) erro
 		Providers: make(map[string]resumeProviderHint, len(providers)),
 	}
 	if strings.TrimSpace(blockID) == "" {
-		doc.Block.Name = "parallel"
+		doc.Block.Name = "swarm"
 	} else {
 		doc.Block.Name = strings.TrimSpace(blockID)
 	}
@@ -527,10 +534,10 @@ func writeResume(path, blockID string, providers map[string]ProviderResult) erro
 
 	data, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
-		return fmt.Errorf("parallel: marshal resume: %w", err)
+		return fmt.Errorf("swarm: marshal resume: %w", err)
 	}
 	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
-		return fmt.Errorf("parallel: write resume: %w", err)
+		return fmt.Errorf("swarm: write resume: %w", err)
 	}
 	return nil
 }
@@ -577,7 +584,7 @@ func ensureProgressFile(path string) error {
 		return nil
 	}
 	if err := os.WriteFile(path, []byte{}, 0o644); err != nil {
-		return fmt.Errorf("parallel: create progress file: %w", err)
+		return fmt.Errorf("swarm: create progress file: %w", err)
 	}
 	return nil
 }
@@ -597,26 +604,26 @@ func readProviderState(path string) (providerState, error) {
 func writeProviderState(path string, state providerState) error {
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
-		return fmt.Errorf("parallel: marshal provider state: %w", err)
+		return fmt.Errorf("swarm: marshal provider state: %w", err)
 	}
 	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
-		return fmt.Errorf("parallel: write provider state: %w", err)
+		return fmt.Errorf("swarm: write provider state: %w", err)
 	}
 	return nil
 }
 
-func effectiveStageRuns(stage compile.ParallelStage) int {
+func effectiveStageRuns(stage compile.SwarmStage) int {
 	if stage.Runs > 0 {
 		return stage.Runs
 	}
 	return 1
 }
 
-func stageDirectoryName(index int, stage compile.ParallelStage) string {
+func stageDirectoryName(index int, stage compile.SwarmStage) string {
 	return fmt.Sprintf("stage-%02d-%s", index+1, sanitizeSegment(parallelStageKey(stage, index)))
 }
 
-func parallelStageKey(stage compile.ParallelStage, index int) string {
+func parallelStageKey(stage compile.SwarmStage, index int) string {
 	if name := strings.TrimSpace(stage.Name); name != "" {
 		return name
 	}
@@ -633,7 +640,7 @@ func formatBlockDirName(index int, blockID string) string {
 	if index < 0 {
 		index = 0
 	}
-	base := fmt.Sprintf("parallel-%02d", index)
+	base := fmt.Sprintf("swarm-%02d", index)
 	if trimmed := strings.TrimSpace(blockID); trimmed != "" {
 		return base + "-" + sanitizeSegment(trimmed)
 	}
@@ -642,6 +649,63 @@ func formatBlockDirName(index int, blockID string) string {
 
 func normalizedProviderName(name string) string {
 	return sanitizeSegment(strings.ToLower(strings.TrimSpace(name)))
+}
+
+type suffixedProvider struct {
+	spec         compile.ProviderConfig
+	instanceName string
+}
+
+// suffixDuplicateProviders detects duplicate normalized provider names and
+// auto-suffixes them: [claude, claude, claude] → [claude-1, claude-2, claude-3].
+// Single unique providers keep their original names: [claude, codex] → [claude, codex].
+func suffixDuplicateProviders(providers []compile.ProviderConfig) []suffixedProvider {
+	// Count occurrences of each normalized name.
+	counts := map[string]int{}
+	for _, p := range providers {
+		counts[normalizedProviderName(p.Name)]++
+	}
+
+	// Track the next suffix index per name.
+	nextIndex := map[string]int{}
+	result := make([]suffixedProvider, 0, len(providers))
+	for _, p := range providers {
+		name := normalizedProviderName(p.Name)
+		if counts[name] > 1 {
+			idx := nextIndex[name] + 1
+			nextIndex[name] = idx
+			result = append(result, suffixedProvider{
+				spec:         p,
+				instanceName: fmt.Sprintf("%s-%d", name, idx),
+			})
+		} else {
+			result = append(result, suffixedProvider{
+				spec:         p,
+				instanceName: name,
+			})
+		}
+	}
+	return result
+}
+
+// StripInstanceSuffix removes a trailing "-N" instance suffix from a provider
+// name to recover the canonical provider type (e.g. "claude-2" → "claude").
+// Names without a numeric suffix are returned as-is.
+func StripInstanceSuffix(instanceName string) string {
+	idx := strings.LastIndex(instanceName, "-")
+	if idx < 0 {
+		return instanceName
+	}
+	suffix := instanceName[idx+1:]
+	for _, r := range suffix {
+		if r < '0' || r > '9' {
+			return instanceName
+		}
+	}
+	if len(suffix) == 0 {
+		return instanceName
+	}
+	return instanceName[:idx]
 }
 
 func sanitizeSegment(value string) string {

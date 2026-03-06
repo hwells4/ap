@@ -1,4 +1,4 @@
-package parallel
+package swarm
 
 import (
 	"context"
@@ -33,7 +33,7 @@ func TestManifest_MapsProviderNamesToOutputPaths(t *testing.T) {
 			{Name: "claude"},
 			{Name: "codex"},
 		},
-		Stages: []compile.ParallelStage{
+		Stages: []compile.SwarmStage{
 			{ID: "analyze", Stage: "analyze", Runs: 1},
 		},
 		Executor: executor,
@@ -141,7 +141,7 @@ func TestResumeHints_GeneratedAfterRun(t *testing.T) {
 			{Name: "claude"},
 			{Name: "codex"},
 		},
-		Stages: []compile.ParallelStage{
+		Stages: []compile.SwarmStage{
 			{ID: "analyze", Stage: "analyze", Runs: 1},
 		},
 		Executor: executor,
@@ -197,7 +197,7 @@ func TestResumeHints_PartialCompletion(t *testing.T) {
 			{Name: "claude"},
 			{Name: "codex"},
 		},
-		Stages: []compile.ParallelStage{
+		Stages: []compile.SwarmStage{
 			{ID: "analyze", Stage: "analyze", Runs: 1},
 		},
 		Executor: executor,
@@ -258,7 +258,7 @@ func TestManifest_MultipleStages(t *testing.T) {
 		Providers: []compile.ProviderConfig{
 			{Name: "claude"},
 		},
-		Stages: []compile.ParallelStage{
+		Stages: []compile.SwarmStage{
 			{ID: "plan", Stage: "plan", Runs: 3},
 			{ID: "refine", Stage: "refine", Runs: 2},
 		},
@@ -313,7 +313,7 @@ func TestResult_IncludesResumePath(t *testing.T) {
 		Providers: []compile.ProviderConfig{
 			{Name: "claude"},
 		},
-		Stages: []compile.ParallelStage{
+		Stages: []compile.SwarmStage{
 			{ID: "analyze", Stage: "analyze", Runs: 1},
 		},
 		Executor: executor,

@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// writeManifest creates a manifest.json for testing from_parallel resolution.
+// writeManifest creates a manifest.json for testing from_swarm resolution.
 func writeManifest(t *testing.T, dir string, blockName string, providers map[string]map[string]any) string {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -30,12 +30,12 @@ func writeManifest(t *testing.T, dir string, blockName string, providers map[str
 	return path
 }
 
-func TestFromParallel_ShortForm_AllProviders(t *testing.T) {
+func TestFromSwarm_ShortForm_AllProviders(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Create manifest with two providers.
-	blockDir := filepath.Join(tmpDir, "parallel-00-iterate")
+	blockDir := filepath.Join(tmpDir, "swarm-00-iterate")
 	manifestPath := writeManifest(t, blockDir, "iterate", map[string]map[string]any{
 		"claude": {
 			"analyze": map[string]any{
@@ -58,11 +58,11 @@ func TestFromParallel_ShortForm_AllProviders(t *testing.T) {
 	stageConfig := StageConfig{
 		ID:    "synthesize",
 		Index: intPtr(1),
-		ParallelBlocks: map[string]ParallelBlock{
+		SwarmBlocks: map[string]SwarmBlock{
 			"iterate": {ManifestPath: manifestPath},
 		},
 		Inputs: &InputsConfig{
-			FromParallel: json.RawMessage(`"analyze"`),
+			FromSwarm: json.RawMessage(`"analyze"`),
 		},
 	}
 
@@ -71,11 +71,11 @@ func TestFromParallel_ShortForm_AllProviders(t *testing.T) {
 		t.Fatalf("BuildInputs: %v", err)
 	}
 
-	if len(inputs.FromParallel) != 1 {
-		t.Fatalf("from_parallel length = %d, want 1", len(inputs.FromParallel))
+	if len(inputs.FromSwarm) != 1 {
+		t.Fatalf("from_swarm length = %d, want 1", len(inputs.FromSwarm))
 	}
 
-	entry := inputs.FromParallel[0]
+	entry := inputs.FromSwarm[0]
 	if entry["stage"] != "analyze" {
 		t.Fatalf("stage = %v, want analyze", entry["stage"])
 	}
@@ -103,11 +103,11 @@ func TestFromParallel_ShortForm_AllProviders(t *testing.T) {
 	}
 }
 
-func TestFromParallel_FullForm_ProviderFilter(t *testing.T) {
+func TestFromSwarm_FullForm_ProviderFilter(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	blockDir := filepath.Join(tmpDir, "parallel-00-iterate")
+	blockDir := filepath.Join(tmpDir, "swarm-00-iterate")
 	manifestPath := writeManifest(t, blockDir, "iterate", map[string]map[string]any{
 		"claude": {
 			"analyze": map[string]any{
@@ -135,11 +135,11 @@ func TestFromParallel_FullForm_ProviderFilter(t *testing.T) {
 	stageConfig := StageConfig{
 		ID:    "synthesize",
 		Index: intPtr(1),
-		ParallelBlocks: map[string]ParallelBlock{
+		SwarmBlocks: map[string]SwarmBlock{
 			"iterate": {ManifestPath: manifestPath},
 		},
 		Inputs: &InputsConfig{
-			FromParallel: json.RawMessage(`{"stage":"analyze","providers":["claude","gemini"]}`),
+			FromSwarm: json.RawMessage(`{"stage":"analyze","providers":["claude","gemini"]}`),
 		},
 	}
 
@@ -148,13 +148,13 @@ func TestFromParallel_FullForm_ProviderFilter(t *testing.T) {
 		t.Fatalf("BuildInputs: %v", err)
 	}
 
-	if len(inputs.FromParallel) != 1 {
-		t.Fatalf("from_parallel length = %d, want 1", len(inputs.FromParallel))
+	if len(inputs.FromSwarm) != 1 {
+		t.Fatalf("from_swarm length = %d, want 1", len(inputs.FromSwarm))
 	}
 
-	providers, ok := inputs.FromParallel[0]["providers"].(map[string]any)
+	providers, ok := inputs.FromSwarm[0]["providers"].(map[string]any)
 	if !ok {
-		t.Fatalf("providers is not a map: %T", inputs.FromParallel[0]["providers"])
+		t.Fatalf("providers is not a map: %T", inputs.FromSwarm[0]["providers"])
 	}
 
 	// Only claude and gemini should be included, not codex.
@@ -172,11 +172,11 @@ func TestFromParallel_FullForm_ProviderFilter(t *testing.T) {
 	}
 }
 
-func TestFromParallel_SelectHistory(t *testing.T) {
+func TestFromSwarm_SelectHistory(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	blockDir := filepath.Join(tmpDir, "parallel-00-iterate")
+	blockDir := filepath.Join(tmpDir, "swarm-00-iterate")
 	manifestPath := writeManifest(t, blockDir, "iterate", map[string]map[string]any{
 		"claude": {
 			"plan": map[string]any{
@@ -192,11 +192,11 @@ func TestFromParallel_SelectHistory(t *testing.T) {
 	stageConfig := StageConfig{
 		ID:    "synthesize",
 		Index: intPtr(1),
-		ParallelBlocks: map[string]ParallelBlock{
+		SwarmBlocks: map[string]SwarmBlock{
 			"iterate": {ManifestPath: manifestPath},
 		},
 		Inputs: &InputsConfig{
-			FromParallel: json.RawMessage(`{"stage":"plan","select":"history"}`),
+			FromSwarm: json.RawMessage(`{"stage":"plan","select":"history"}`),
 		},
 	}
 
@@ -205,9 +205,9 @@ func TestFromParallel_SelectHistory(t *testing.T) {
 		t.Fatalf("BuildInputs: %v", err)
 	}
 
-	providers, ok := inputs.FromParallel[0]["providers"].(map[string]any)
+	providers, ok := inputs.FromSwarm[0]["providers"].(map[string]any)
 	if !ok {
-		t.Fatalf("providers not a map: %T", inputs.FromParallel[0]["providers"])
+		t.Fatalf("providers not a map: %T", inputs.FromSwarm[0]["providers"])
 	}
 	claude, ok := providers["claude"].(map[string]any)
 	if !ok {
@@ -230,16 +230,16 @@ func TestFromParallel_SelectHistory(t *testing.T) {
 		}
 	}
 
-	if inputs.FromParallel[0]["select"] != "history" {
-		t.Fatalf("select = %v, want history", inputs.FromParallel[0]["select"])
+	if inputs.FromSwarm[0]["select"] != "history" {
+		t.Fatalf("select = %v, want history", inputs.FromSwarm[0]["select"])
 	}
 }
 
-func TestFromParallel_SelectLatest_OmitsHistory(t *testing.T) {
+func TestFromSwarm_SelectLatest_OmitsHistory(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	blockDir := filepath.Join(tmpDir, "parallel-00-iterate")
+	blockDir := filepath.Join(tmpDir, "swarm-00-iterate")
 	manifestPath := writeManifest(t, blockDir, "iterate", map[string]map[string]any{
 		"claude": {
 			"plan": map[string]any{
@@ -254,11 +254,11 @@ func TestFromParallel_SelectLatest_OmitsHistory(t *testing.T) {
 	stageConfig := StageConfig{
 		ID:    "synthesize",
 		Index: intPtr(1),
-		ParallelBlocks: map[string]ParallelBlock{
+		SwarmBlocks: map[string]SwarmBlock{
 			"iterate": {ManifestPath: manifestPath},
 		},
 		Inputs: &InputsConfig{
-			FromParallel: json.RawMessage(`{"stage":"plan","select":"latest"}`),
+			FromSwarm: json.RawMessage(`{"stage":"plan","select":"latest"}`),
 		},
 	}
 
@@ -267,9 +267,9 @@ func TestFromParallel_SelectLatest_OmitsHistory(t *testing.T) {
 		t.Fatalf("BuildInputs: %v", err)
 	}
 
-	providers, ok := inputs.FromParallel[0]["providers"].(map[string]any)
+	providers, ok := inputs.FromSwarm[0]["providers"].(map[string]any)
 	if !ok {
-		t.Fatalf("providers not a map: %T", inputs.FromParallel[0]["providers"])
+		t.Fatalf("providers not a map: %T", inputs.FromSwarm[0]["providers"])
 	}
 	claude, ok := providers["claude"].(map[string]any)
 	if !ok {
@@ -282,7 +282,7 @@ func TestFromParallel_SelectLatest_OmitsHistory(t *testing.T) {
 	}
 }
 
-func TestFromParallel_NoManifest_ReturnsEmpty(t *testing.T) {
+func TestFromSwarm_NoManifest_ReturnsEmpty(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
@@ -290,7 +290,7 @@ func TestFromParallel_NoManifest_ReturnsEmpty(t *testing.T) {
 		ID:    "synthesize",
 		Index: intPtr(1),
 		Inputs: &InputsConfig{
-			FromParallel: json.RawMessage(`"analyze"`),
+			FromSwarm: json.RawMessage(`"analyze"`),
 		},
 	}
 
@@ -299,18 +299,18 @@ func TestFromParallel_NoManifest_ReturnsEmpty(t *testing.T) {
 		t.Fatalf("BuildInputs: %v", err)
 	}
 
-	// from_parallel should still appear but with empty providers.
-	if len(inputs.FromParallel) != 1 {
-		t.Fatalf("from_parallel length = %d, want 1", len(inputs.FromParallel))
+	// from_swarm should still appear but with empty providers.
+	if len(inputs.FromSwarm) != 1 {
+		t.Fatalf("from_swarm length = %d, want 1", len(inputs.FromSwarm))
 	}
 }
 
-func TestFromParallel_ManifestDiscovery(t *testing.T) {
+func TestFromSwarm_ManifestDiscovery(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	// Create manifest in parallel-00-iterate/ without explicit config.
-	blockDir := filepath.Join(tmpDir, "parallel-00-iterate")
+	// Create manifest in swarm-00-iterate/ without explicit config.
+	blockDir := filepath.Join(tmpDir, "swarm-00-iterate")
 	writeManifest(t, blockDir, "iterate", map[string]map[string]any{
 		"claude": {
 			"analyze": map[string]any{
@@ -321,12 +321,12 @@ func TestFromParallel_ManifestDiscovery(t *testing.T) {
 		},
 	})
 
-	// No ParallelBlocks config — manifest should be discovered from filesystem.
+	// No SwarmBlocks config — manifest should be discovered from filesystem.
 	stageConfig := StageConfig{
 		ID:    "synthesize",
 		Index: intPtr(1),
 		Inputs: &InputsConfig{
-			FromParallel: json.RawMessage(`"analyze"`),
+			FromSwarm: json.RawMessage(`"analyze"`),
 		},
 	}
 
@@ -335,13 +335,13 @@ func TestFromParallel_ManifestDiscovery(t *testing.T) {
 		t.Fatalf("BuildInputs: %v", err)
 	}
 
-	if len(inputs.FromParallel) != 1 {
-		t.Fatalf("from_parallel length = %d, want 1", len(inputs.FromParallel))
+	if len(inputs.FromSwarm) != 1 {
+		t.Fatalf("from_swarm length = %d, want 1", len(inputs.FromSwarm))
 	}
 
-	providers, ok := inputs.FromParallel[0]["providers"].(map[string]any)
+	providers, ok := inputs.FromSwarm[0]["providers"].(map[string]any)
 	if !ok {
-		t.Fatalf("providers not a map: %T", inputs.FromParallel[0]["providers"])
+		t.Fatalf("providers not a map: %T", inputs.FromSwarm[0]["providers"])
 	}
 	if _, ok := providers["claude"]; !ok {
 		t.Fatal("claude should be discovered from manifest")

@@ -18,7 +18,14 @@ type Signals struct {
 	Inject   string          `json:"inject,omitempty"`
 	Escalate *EscalateSignal `json:"escalate,omitempty"`
 	Spawn    json.RawMessage `json:"spawn,omitempty"`
+	Message  *MessageSignal  `json:"message,omitempty"`
 	Warnings []string        `json:"warnings,omitempty"`
+}
+
+// MessageSignal represents a message from one provider to another in a swarm block.
+type MessageSignal struct {
+	To      string `json:"to"`
+	Content string `json:"content"`
 }
 
 // EscalateSignal represents an escalation request from the agent.

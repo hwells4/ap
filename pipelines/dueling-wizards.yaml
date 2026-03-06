@@ -13,7 +13,7 @@ description: Cross-evaluation debate between Claude and Codex (Jeffrey Emanuel p
 nodes:
   # Block 1: Both generate ideas independently (same prompt, same inputs)
   - id: ideate
-    parallel:
+    swarm:
       providers:
         - name: claude
           model: opus
@@ -28,18 +28,18 @@ nodes:
 
   # Block 2: Cross-evaluate (each evaluates the OTHER's ideas)
   - id: evaluate
-    parallel:
+    swarm:
       providers:
         - name: claude
           model: opus
           inputs:
-            from_parallel:
+            from_swarm:
               stage: generate
               providers: [codex]  # Claude gets Codex's ideas
         - name: codex
           model: gpt-5.2-codex:xhigh
           inputs:
-            from_parallel:
+            from_swarm:
               stage: generate
               providers: [claude]  # Codex gets Claude's ideas
       stages:
@@ -52,12 +52,12 @@ nodes:
 
   # Block 3: Cross-reflect (each sees OWN ideas + OTHER's critique)
   - id: reflect
-    parallel:
+    swarm:
       providers:
         - name: claude
           model: opus
           inputs:
-            from_parallel:
+            from_swarm:
               - stage: generate
                 providers: [claude]  # My original ideas
               - stage: rate
@@ -65,7 +65,7 @@ nodes:
         - name: codex
           model: gpt-5.2-codex:xhigh
           inputs:
-            from_parallel:
+            from_swarm:
               - stage: generate
                 providers: [codex]   # My original ideas
               - stage: rate
@@ -82,7 +82,7 @@ nodes:
   - id: synthesize
     stage: elegance
     inputs:
-      from_parallel:
+      from_swarm:
         stage: respond  # Gets both providers' final outputs
     termination:
       type: fixed

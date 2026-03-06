@@ -10,7 +10,7 @@ description: Two-model debate for plan refinement—recommend, critique, respond
 nodes:
   # Block 1: Both analyze the plan and write recommendations
   - id: recommend
-    parallel:
+    swarm:
       providers:
         - name: claude
           model: opus
@@ -26,18 +26,18 @@ nodes:
   # Block 2: Cross-critique (each evaluates the OTHER's recommendations)
   # Each provider receives: original plan (from_initial) + other's recommendations
   - id: critique
-    parallel:
+    swarm:
       providers:
         - name: claude
           model: opus
           inputs:
-            from_parallel:
+            from_swarm:
               stage: recs
               providers: [codex]  # Claude critiques Codex's recommendations
         - name: codex
           model: gpt-5.2-codex:xhigh
           inputs:
-            from_parallel:
+            from_swarm:
               stage: recs
               providers: [claude]  # Codex critiques Claude's recommendations
       stages:
@@ -50,12 +50,12 @@ nodes:
   # Block 3: Respond to critique
   # Each provider receives: own recommendations + other's critique (+ plan from initial)
   - id: respond
-    parallel:
+    swarm:
       providers:
         - name: claude
           model: opus
           inputs:
-            from_parallel:
+            from_swarm:
               - stage: recs
                 providers: [claude]  # My recommendations
               - stage: crit
@@ -63,7 +63,7 @@ nodes:
         - name: codex
           model: gpt-5.2-codex:xhigh
           inputs:
-            from_parallel:
+            from_swarm:
               - stage: recs
                 providers: [codex]   # My recommendations
               - stage: crit
@@ -79,7 +79,7 @@ nodes:
   - id: implement
     stage: implement-changes
     inputs:
-      from_parallel:
+      from_swarm:
         stage: resp  # Gets both providers' final responses (which reference recs + critiques)
     termination:
       type: fixed

@@ -29,11 +29,11 @@ nodes:
 	// Pipeline using deprecated stages key
 	f.Add([]byte("name: old\nstages:\n  - id: a\n    stage: improve-plan\n"))
 
-	// Parallel block
-	f.Add([]byte(`name: parallel
+	// Swarm block
+	f.Add([]byte(`name: swarm-fuzz
 nodes:
   - id: recommend
-    parallel:
+    swarm:
       providers: [claude, codex]
       stages:
         - id: recs

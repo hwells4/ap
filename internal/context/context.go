@@ -33,8 +33,8 @@ type StageConfig struct {
 	Guardrails        *GuardrailsConfig        `json:"guardrails"`
 	Inputs            *InputsConfig            `json:"inputs"`
 	Commands          map[string]any           `json:"commands"`
-	ParallelScope     *ParallelScope           `json:"parallel_scope"`
-	ParallelBlocks    map[string]ParallelBlock `json:"parallel_blocks"`
+	SwarmScope     *SwarmScope           `json:"swarm_scope"`
+	SwarmBlocks    map[string]SwarmBlock `json:"parallel_blocks"`
 }
 
 // GuardrailsConfig represents guardrails settings from stage config.
@@ -46,17 +46,17 @@ type GuardrailsConfig struct {
 type InputsConfig struct {
 	From         string          `json:"from"`
 	Select       string          `json:"select"`
-	FromParallel json.RawMessage `json:"from_parallel"`
+	FromSwarm json.RawMessage `json:"from_swarm"`
 }
 
-// ParallelScope defines scope roots for parallel blocks.
-type ParallelScope struct {
+// SwarmScope defines scope roots for swarm blocks.
+type SwarmScope struct {
 	ScopeRoot    string `json:"scope_root"`
 	PipelineRoot string `json:"pipeline_root"`
 }
 
-// ParallelBlock describes a parallel block manifest location.
-type ParallelBlock struct {
+// SwarmBlock describes a swarm block manifest location.
+type SwarmBlock struct {
 	ManifestPath string `json:"manifest_path"`
 }
 
@@ -95,7 +95,7 @@ type Inputs struct {
 	FromStage              map[string][]string `json:"from_stage"`
 	FromPreviousIterations []string            `json:"from_previous_iterations"`
 	FromInitial            []string            `json:"from_initial"`
-	FromParallel           []map[string]any    `json:"from_parallel,omitempty"`
+	FromSwarm           []map[string]any    `json:"from_swarm,omitempty"`
 }
 
 // Limits contains iteration limits.
@@ -323,21 +323,21 @@ func BuildInputs(runDir string, stageConfig StageConfig, iteration int) (Inputs,
 	}
 
 	planFile := filepath.Join(runDir, "plan.json")
-	if stageConfig.ParallelScope != nil && stageConfig.ParallelScope.PipelineRoot != "" {
-		pipelinePlan := filepath.Join(stageConfig.ParallelScope.PipelineRoot, "plan.json")
+	if stageConfig.SwarmScope != nil && stageConfig.SwarmScope.PipelineRoot != "" {
+		pipelinePlan := filepath.Join(stageConfig.SwarmScope.PipelineRoot, "plan.json")
 		if fsutil.FileExists(pipelinePlan) {
 			planFile = pipelinePlan
 		}
 	}
 	inputs.FromInitial = loadPlanInputs(planFile)
 
-	if stageConfig.Inputs != nil && len(stageConfig.Inputs.FromParallel) > 0 {
-		fromParallel, include, err := buildFromParallelInputs(stageConfig, runDir)
+	if stageConfig.Inputs != nil && len(stageConfig.Inputs.FromSwarm) > 0 {
+		fromSwarm, include, err := buildFromSwarmInputs(stageConfig, runDir)
 		if err != nil {
 			return Inputs{}, err
 		}
 		if include {
-			inputs.FromParallel = fromParallel
+			inputs.FromSwarm = fromSwarm
 		}
 	}
 
@@ -369,12 +369,12 @@ func stageTemplate(stageConfig StageConfig) string {
 }
 
 func resolveStageDir(runDir string, stageConfig StageConfig, stageName string) string {
-	if stageConfig.ParallelScope != nil && stageConfig.ParallelScope.ScopeRoot != "" {
-		if dir := findStageDir(stageConfig.ParallelScope.ScopeRoot, stageName); dir != "" {
+	if stageConfig.SwarmScope != nil && stageConfig.SwarmScope.ScopeRoot != "" {
+		if dir := findStageDir(stageConfig.SwarmScope.ScopeRoot, stageName); dir != "" {
 			return dir
 		}
-		if stageConfig.ParallelScope.PipelineRoot != "" {
-			return findStageDir(stageConfig.ParallelScope.PipelineRoot, stageName)
+		if stageConfig.SwarmScope.PipelineRoot != "" {
+			return findStageDir(stageConfig.SwarmScope.PipelineRoot, stageName)
 		}
 		return ""
 	}
@@ -476,15 +476,15 @@ func loadPlanInputs(planFile string) []string {
 	return inputs
 }
 
-func buildFromParallelInputs(stageConfig StageConfig, runDir string) ([]map[string]any, bool, error) {
-	raw := bytes.TrimSpace(stageConfig.Inputs.FromParallel)
+func buildFromSwarmInputs(stageConfig StageConfig, runDir string) ([]map[string]any, bool, error) {
+	raw := bytes.TrimSpace(stageConfig.Inputs.FromSwarm)
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, false, nil
 	}
 
 	var decoded any
 	if err := json.Unmarshal(raw, &decoded); err != nil {
-		return nil, false, fmt.Errorf("parse from_parallel: %w", err)
+		return nil, false, fmt.Errorf("parse from_swarm: %w", err)
 	}
 
 	switch decoded.(type) {
@@ -492,10 +492,10 @@ func buildFromParallelInputs(stageConfig StageConfig, runDir string) ([]map[stri
 		var entries []map[string]any
 		var rawEntries []json.RawMessage
 		if err := json.Unmarshal(raw, &rawEntries); err != nil {
-			return nil, false, fmt.Errorf("parse from_parallel array: %w", err)
+			return nil, false, fmt.Errorf("parse from_swarm array: %w", err)
 		}
 		for _, entry := range rawEntries {
-			resolved, found, err := buildFromParallelInputsSingle(entry, stageConfig, runDir)
+			resolved, found, err := buildFromSwarmInputsSingle(entry, stageConfig, runDir)
 			if err != nil {
 				return nil, false, err
 			}
@@ -508,7 +508,7 @@ func buildFromParallelInputs(stageConfig StageConfig, runDir string) ([]map[stri
 		}
 		return entries, true, nil
 	default:
-		resolved, found, err := buildFromParallelInputsSingle(raw, stageConfig, runDir)
+		resolved, found, err := buildFromSwarmInputsSingle(raw, stageConfig, runDir)
 		if err != nil {
 			return nil, false, err
 		}
@@ -519,14 +519,14 @@ func buildFromParallelInputs(stageConfig StageConfig, runDir string) ([]map[stri
 	}
 }
 
-type fromParallelConfig struct {
+type fromSwarmConfig struct {
 	Stage     string          `json:"stage"`
 	Block     string          `json:"block"`
 	Select    string          `json:"select"`
 	Providers json.RawMessage `json:"providers"`
 }
 
-func buildFromParallelInputsSingle(raw json.RawMessage, stageConfig StageConfig, runDir string) (map[string]any, bool, error) {
+func buildFromSwarmInputsSingle(raw json.RawMessage, stageConfig StageConfig, runDir string) (map[string]any, bool, error) {
 	stageName := ""
 	blockName := ""
 	selectMode := "latest"
@@ -537,9 +537,9 @@ func buildFromParallelInputsSingle(raw json.RawMessage, stageConfig StageConfig,
 	if err := json.Unmarshal(raw, &asString); err == nil {
 		stageName = asString
 	} else {
-		var cfg fromParallelConfig
+		var cfg fromSwarmConfig
 		if err := json.Unmarshal(raw, &cfg); err != nil {
-			return nil, false, fmt.Errorf("parse from_parallel entry: %w", err)
+			return nil, false, fmt.Errorf("parse from_swarm entry: %w", err)
 		}
 		stageName = cfg.Stage
 		blockName = cfg.Block
@@ -645,17 +645,17 @@ func buildFromParallelInputsSingle(raw json.RawMessage, stageConfig StageConfig,
 func resolveManifestPath(stageConfig StageConfig, runDir, stageName, blockName string) string {
 	manifestPath := ""
 
-	if blockName != "" && stageConfig.ParallelBlocks != nil {
-		if block, ok := stageConfig.ParallelBlocks[blockName]; ok {
+	if blockName != "" && stageConfig.SwarmBlocks != nil {
+		if block, ok := stageConfig.SwarmBlocks[blockName]; ok {
 			manifestPath = block.ManifestPath
 		}
-	} else if len(stageConfig.ParallelBlocks) > 0 {
-		keys := make([]string, 0, len(stageConfig.ParallelBlocks))
-		for key := range stageConfig.ParallelBlocks {
+	} else if len(stageConfig.SwarmBlocks) > 0 {
+		keys := make([]string, 0, len(stageConfig.SwarmBlocks))
+		for key := range stageConfig.SwarmBlocks {
 			keys = append(keys, key)
 		}
 		sort.Strings(keys)
-		manifestPath = stageConfig.ParallelBlocks[keys[0]].ManifestPath
+		manifestPath = stageConfig.SwarmBlocks[keys[0]].ManifestPath
 	}
 
 	if manifestPath != "" && fsutil.FileExists(manifestPath) {
@@ -663,8 +663,8 @@ func resolveManifestPath(stageConfig StageConfig, runDir, stageName, blockName s
 	}
 
 	pipelineRoot := ""
-	if stageConfig.ParallelScope != nil {
-		pipelineRoot = stageConfig.ParallelScope.PipelineRoot
+	if stageConfig.SwarmScope != nil {
+		pipelineRoot = stageConfig.SwarmScope.PipelineRoot
 	}
 	if pipelineRoot != "" {
 		if path := findManifestForStage(pipelineRoot, stageName); path != "" {
@@ -676,7 +676,7 @@ func resolveManifestPath(stageConfig StageConfig, runDir, stageName, blockName s
 }
 
 func findManifestForStage(root, stageName string) string {
-	pattern := filepath.Join(root, "parallel-*")
+	pattern := filepath.Join(root, "swarm-*")
 	matches, err := filepath.Glob(pattern)
 	if err != nil || len(matches) == 0 {
 		return ""

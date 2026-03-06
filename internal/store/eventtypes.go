@@ -47,4 +47,15 @@ const (
 	TypeJudgeVerdict = "judge.verdict"
 	// TypeJudgeFallback marks that the judge has entered fallback mode.
 	TypeJudgeFallback = "judge.fallback"
+
+	// TypeSwarmStart marks the start of a swarm block.
+	TypeSwarmStart = "swarm.started"
+	// TypeSwarmComplete marks the completion of a swarm block.
+	TypeSwarmComplete = "swarm.completed"
+	// TypeProviderStart marks the start of a provider within a swarm block.
+	TypeProviderStart = "swarm.provider.started"
+	// TypeProviderComplete marks the completion of a provider within a swarm block.
+	TypeProviderComplete = "swarm.provider.completed"
+	// TypeProviderFailed marks the failure of a provider within a swarm block.
+	TypeProviderFailed = "swarm.provider.failed"
 )

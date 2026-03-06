@@ -3,7 +3,7 @@ description: Parallel analysis with Claude Opus and Codex
 
 nodes:
   - id: analyze
-    parallel:
+    swarm:
       providers: [claude, codex]
       stages:
         - name: improve

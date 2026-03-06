@@ -44,7 +44,7 @@ type Node struct {
 	Context     string             `yaml:"context,omitempty" json:"context,omitempty"`
 	Inputs      Inputs             `yaml:"inputs,omitempty" json:"inputs,omitempty"`
 	Termination Termination        `yaml:"termination,omitempty" json:"termination,omitempty"`
-	Parallel    *ParallelBlock     `yaml:"parallel,omitempty" json:"parallel,omitempty"`
+	Swarm       *SwarmBlock         `yaml:"swarm,omitempty" json:"swarm,omitempty"`
 	Meta        map[string]any     `yaml:",inline" json:"meta,omitempty"`
 }
 
@@ -53,7 +53,7 @@ type Inputs struct {
 	From         string      `yaml:"from,omitempty" json:"from,omitempty"`
 	Select       string      `yaml:"select,omitempty" json:"select,omitempty"`
 	FromInitial  bool        `yaml:"from_initial,omitempty" json:"from_initial,omitempty"`
-	FromParallel interface{} `yaml:"from_parallel,omitempty" json:"from_parallel,omitempty"`
+	FromSwarm    interface{} `yaml:"from_swarm,omitempty" json:"from_swarm,omitempty"`
 }
 
 // Termination holds per-node termination overrides.
@@ -67,24 +67,24 @@ type Termination struct {
 	Accept        string `yaml:"accept,omitempty" json:"accept,omitempty"`
 }
 
-// ParallelBlock describes a parallel provider execution block.
-type ParallelBlock struct {
-	Providers ProviderList    `yaml:"providers" json:"providers"`
-	Stages    []ParallelStage `yaml:"stages" json:"stages"`
+// SwarmBlock describes a swarm provider execution block.
+type SwarmBlock struct {
+	Providers ProviderList  `yaml:"providers" json:"providers"`
+	Stages    []SwarmStage  `yaml:"stages" json:"stages"`
 }
 
 // ProviderList supports scalar and object provider declarations.
 type ProviderList []ProviderConfig
 
-// ProviderConfig describes one provider in a parallel block.
+// ProviderConfig describes one provider in a swarm block.
 type ProviderConfig struct {
 	Name   string `yaml:"name" json:"name"`
 	Model  string `yaml:"model,omitempty" json:"model,omitempty"`
 	Inputs Inputs `yaml:"inputs,omitempty" json:"inputs,omitempty"`
 }
 
-// ParallelStage is a stage definition nested under parallel.stages.
-type ParallelStage struct {
+// SwarmStage is a stage definition nested under swarm.stages.
+type SwarmStage struct {
 	ID          string      `yaml:"id,omitempty" json:"id,omitempty"`
 	Name        string      `yaml:"name,omitempty" json:"name,omitempty"`
 	Stage       string      `yaml:"stage" json:"stage"`
@@ -209,13 +209,13 @@ func validatePipeline(pipeline *Pipeline, sourcePath string) error {
 			)
 		}
 
-		if node.Parallel != nil {
+		if node.Swarm != nil {
 			if err := validateParallelNode(node, resolveOpts); err != nil {
 				return err
 			}
 		} else {
 			if node.Stage == "" {
-				return fmt.Errorf("%w: node %q must set stage or parallel", ErrInvalidPipeline, node.ID)
+				return fmt.Errorf("%w: node %q must set stage or swarm", ErrInvalidPipeline, node.ID)
 			}
 			if _, err := stage.ResolveStage(node.Stage, resolveOpts); err != nil {
 				return fmt.Errorf("%w: node %q references unknown stage %q: %v", ErrInvalidPipeline, node.ID, node.Stage, err)
@@ -247,15 +247,15 @@ func validatePipeline(pipeline *Pipeline, sourcePath string) error {
 }
 
 func validateParallelNode(node *Node, resolveOpts stage.ResolveOptions) error {
-	if node.Parallel == nil {
+	if node.Swarm == nil {
 		return nil
 	}
-	block := node.Parallel
+	block := node.Swarm
 	if len(block.Providers) == 0 {
-		return fmt.Errorf("%w: node %q parallel.providers must not be empty", ErrInvalidPipeline, node.ID)
+		return fmt.Errorf("%w: node %q swarm.providers must not be empty", ErrInvalidPipeline, node.ID)
 	}
 	if len(block.Stages) == 0 {
-		return fmt.Errorf("%w: node %q parallel.stages must not be empty", ErrInvalidPipeline, node.ID)
+		return fmt.Errorf("%w: node %q swarm.stages must not be empty", ErrInvalidPipeline, node.ID)
 	}
 
 	for i := range block.Providers {
@@ -264,7 +264,7 @@ func validateParallelNode(node *Node, resolveOpts stage.ResolveOptions) error {
 		block.Providers[i].Inputs.From = strings.TrimSpace(block.Providers[i].Inputs.From)
 		block.Providers[i].Inputs.Select = strings.TrimSpace(block.Providers[i].Inputs.Select)
 		if block.Providers[i].Name == "" {
-			return fmt.Errorf("%w: node %q parallel.providers[%d] has empty name", ErrInvalidPipeline, node.ID, i)
+			return fmt.Errorf("%w: node %q swarm.providers[%d] has empty name", ErrInvalidPipeline, node.ID, i)
 		}
 		if block.Providers[i].Inputs.Select == "" && block.Providers[i].Inputs.From != "" {
 			block.Providers[i].Inputs.Select = SelectLatest
@@ -273,7 +273,7 @@ func validateParallelNode(node *Node, resolveOpts stage.ResolveOptions) error {
 			block.Providers[i].Inputs.Select != SelectLatest &&
 			block.Providers[i].Inputs.Select != SelectAll {
 			return fmt.Errorf(
-				"%w: node %q parallel.providers[%d] inputs.select must be %q or %q",
+				"%w: node %q swarm.providers[%d] inputs.select must be %q or %q",
 				ErrInvalidPipeline,
 				node.ID,
 				i,
@@ -297,7 +297,7 @@ func validateParallelNode(node *Node, resolveOpts stage.ResolveOptions) error {
 		if block.Stages[i].ID != "" {
 			if stageIDs[block.Stages[i].ID] {
 				return fmt.Errorf(
-					"%w: node %q parallel.stages has duplicate id/name %q",
+					"%w: node %q swarm.stages has duplicate id/name %q",
 					ErrInvalidPipeline,
 					node.ID,
 					block.Stages[i].ID,
@@ -306,11 +306,11 @@ func validateParallelNode(node *Node, resolveOpts stage.ResolveOptions) error {
 			stageIDs[block.Stages[i].ID] = true
 		}
 		if block.Stages[i].Stage == "" {
-			return fmt.Errorf("%w: node %q parallel.stages[%d] stage is required", ErrInvalidPipeline, node.ID, i)
+			return fmt.Errorf("%w: node %q swarm.stages[%d] stage is required", ErrInvalidPipeline, node.ID, i)
 		}
 		if _, err := stage.ResolveStage(block.Stages[i].Stage, resolveOpts); err != nil {
 			return fmt.Errorf(
-				"%w: node %q parallel.stages[%d] references unknown stage %q: %v",
+				"%w: node %q swarm.stages[%d] references unknown stage %q: %v",
 				ErrInvalidPipeline,
 				node.ID,
 				i,
