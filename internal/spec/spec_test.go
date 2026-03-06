@@ -547,6 +547,143 @@ func TestChainSpecKindAndRaw(t *testing.T) {
 	}
 }
 
+func TestParseRepeatChain(t *testing.T) {
+	t.Parallel()
+	spec, err := ParseWithOptions("(a:3 -> b:1) x3", ParseOptions{SkipStageLookup: true})
+	if err != nil {
+		t.Fatalf("Parse repeat chain error = %v", err)
+	}
+	chain, ok := spec.(ChainSpec)
+	if !ok {
+		t.Fatalf("Parse repeat chain = %T, want ChainSpec", spec)
+	}
+	if len(chain.Stages) != 6 {
+		t.Fatalf("len(Stages) = %d, want 6", len(chain.Stages))
+	}
+	for i, want := range []struct {
+		name string
+		iter int
+	}{
+		{"a", 3}, {"b", 1}, {"a", 3}, {"b", 1}, {"a", 3}, {"b", 1},
+	} {
+		if chain.Stages[i].Name != want.name || chain.Stages[i].Iterations != want.iter {
+			t.Errorf("stage[%d] = {%q, %d}, want {%q, %d}",
+				i, chain.Stages[i].Name, chain.Stages[i].Iterations, want.name, want.iter)
+		}
+	}
+}
+
+func TestParseRepeatSingleStage(t *testing.T) {
+	t.Parallel()
+	spec, err := ParseWithOptions("(a:5) x3", ParseOptions{SkipStageLookup: true})
+	if err != nil {
+		t.Fatalf("Parse repeat single stage error = %v", err)
+	}
+	chain, ok := spec.(ChainSpec)
+	if !ok {
+		t.Fatalf("Parse repeat single = %T, want ChainSpec", spec)
+	}
+	if len(chain.Stages) != 3 {
+		t.Fatalf("len(Stages) = %d, want 3", len(chain.Stages))
+	}
+	for i, s := range chain.Stages {
+		if s.Name != "a" || s.Iterations != 5 {
+			t.Errorf("stage[%d] = {%q, %d}, want {a, 5}", i, s.Name, s.Iterations)
+		}
+	}
+}
+
+func TestParseRepeatOne(t *testing.T) {
+	t.Parallel()
+	spec, err := ParseWithOptions("(a -> b) x1", ParseOptions{SkipStageLookup: true})
+	if err != nil {
+		t.Fatalf("Parse repeat x1 error = %v", err)
+	}
+	chain, ok := spec.(ChainSpec)
+	if !ok {
+		t.Fatalf("Parse repeat x1 = %T, want ChainSpec", spec)
+	}
+	if len(chain.Stages) != 2 {
+		t.Fatalf("len(Stages) = %d, want 2", len(chain.Stages))
+	}
+}
+
+func TestParseRepeatNoParens(t *testing.T) {
+	t.Parallel()
+	// "a -> b x3" is NOT repeat syntax — should parse as a chain with "b x3" as a stage
+	// (which will fail stage lookup or parse normally depending on options)
+	spec, err := ParseWithOptions("a -> b", ParseOptions{SkipStageLookup: true})
+	if err != nil {
+		t.Fatalf("Parse non-repeat chain error = %v", err)
+	}
+	chain, ok := spec.(ChainSpec)
+	if !ok {
+		t.Fatalf("Parse non-repeat = %T, want ChainSpec", spec)
+	}
+	if len(chain.Stages) != 2 {
+		t.Fatalf("len(Stages) = %d, want 2", len(chain.Stages))
+	}
+}
+
+func TestParseRepeatInvalidCount(t *testing.T) {
+	t.Parallel()
+	_, err := ParseWithOptions("(a -> b) x0", ParseOptions{SkipStageLookup: true})
+	if err == nil {
+		t.Fatal("expected error for x0 repeat")
+	}
+}
+
+func TestParseRepeatVariants(t *testing.T) {
+	t.Parallel()
+	variants := []string{
+		"(a:3 -> b:1) x2",
+		"(a:3 -> b:1)x2",
+		"(a:3 -> b:1) X2",
+		"(a:3 -> b:1) *2",
+	}
+	for _, input := range variants {
+		spec, err := ParseWithOptions(input, ParseOptions{SkipStageLookup: true})
+		if err != nil {
+			t.Errorf("Parse(%q) error = %v", input, err)
+			continue
+		}
+		chain, ok := spec.(ChainSpec)
+		if !ok {
+			t.Errorf("Parse(%q) = %T, want ChainSpec", input, spec)
+			continue
+		}
+		if len(chain.Stages) != 4 {
+			t.Errorf("Parse(%q) len(Stages) = %d, want 4", input, len(chain.Stages))
+		}
+	}
+}
+
+func TestChainRepeat_PreservesIterations(t *testing.T) {
+	t.Parallel()
+	chain := ChainSpec{
+		raw: "a:10 -> b:3",
+		Stages: []StageSpec{
+			{Name: "a", Iterations: 10},
+			{Name: "b", Iterations: 3},
+		},
+	}
+	expanded := chain.Repeat(2)
+	if len(expanded.Stages) != 4 {
+		t.Fatalf("len(Stages) = %d, want 4", len(expanded.Stages))
+	}
+	for i, want := range []struct {
+		name string
+		iter int
+	}{
+		{"a", 10}, {"b", 3}, {"a", 10}, {"b", 3},
+	} {
+		if expanded.Stages[i].Name != want.name || expanded.Stages[i].Iterations != want.iter {
+			t.Errorf("stage[%d] = {%q, %d}, want {%q, %d}",
+				i, expanded.Stages[i].Name, expanded.Stages[i].Iterations, want.name, want.iter)
+		}
+	}
+}
+
 func containsAll(s string, substrs ...string) bool {
 	for _, sub := range substrs {
 		found := false

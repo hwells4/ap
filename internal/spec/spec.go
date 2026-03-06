@@ -76,6 +76,21 @@ func (c ChainSpec) Kind() SpecKind { return KindChain }
 // Raw returns the original input string.
 func (c ChainSpec) Raw() string { return c.raw }
 
+// Repeat expands the chain by repeating its stages n times.
+func (c ChainSpec) Repeat(n int) ChainSpec {
+	if n <= 1 {
+		return c
+	}
+	repeated := make([]StageSpec, 0, len(c.Stages)*n)
+	for i := 0; i < n; i++ {
+		repeated = append(repeated, c.Stages...)
+	}
+	return ChainSpec{
+		raw:    fmt.Sprintf("(%s) x%d", c.raw, n),
+		Stages: repeated,
+	}
+}
+
 // ToPipeline converts a chain into a sequential Pipeline representation.
 //
 // Each stage is converted into one node. For all nodes after the first,
@@ -146,6 +161,26 @@ func ParseWithOptions(input string, opts ParseOptions) (Spec, error) {
 	input = strings.TrimSpace(input)
 	if input == "" {
 		return nil, ErrEmpty
+	}
+
+	// 0. Repeat wrapper: (chain) xN
+	if inner, count, ok := parseRepeatWrapper(input); ok {
+		if count <= 0 {
+			return nil, fmt.Errorf("%w: repeat count must be positive, got %d", ErrInvalidSpec, count)
+		}
+		innerSpec, err := ParseWithOptions(inner, opts)
+		if err != nil {
+			return nil, err
+		}
+		switch s := innerSpec.(type) {
+		case ChainSpec:
+			return s.Repeat(count), nil
+		case StageSpec:
+			chain := ChainSpec{raw: inner, Stages: []StageSpec{s}}
+			return chain.Repeat(count), nil
+		default:
+			return nil, fmt.Errorf("%w: repeat syntax only works with stage or chain specs", ErrInvalidSpec)
+		}
 	}
 
 	chainInput, isChain := normalizeChainInput(input)
@@ -276,7 +311,20 @@ func resolveStageSpec(stageSpec StageSpec, opts ParseOptions) (StageSpec, error)
 var (
 	chainArrowRecoveryPattern = regexp.MustCompile(`\s>\s`)
 	chainCommaRecoveryPattern = regexp.MustCompile(`\s*,\s*`)
+	repeatPattern             = regexp.MustCompile(`^\((.+)\)\s*[xX*](\d+)$`)
 )
+
+func parseRepeatWrapper(input string) (inner string, count int, ok bool) {
+	m := repeatPattern.FindStringSubmatch(input)
+	if m == nil {
+		return "", 0, false
+	}
+	n, err := strconv.Atoi(m[2])
+	if err != nil {
+		return "", 0, false
+	}
+	return strings.TrimSpace(m[1]), n, true
+}
 
 func normalizeChainInput(input string) (string, bool) {
 	if strings.Contains(input, "->") {

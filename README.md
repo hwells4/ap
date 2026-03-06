@@ -19,6 +19,9 @@ go build -o ap ./cmd/ap
 ## Quick Start
 
 ```bash
+# Run a bug-hunt + security-audit loop, repeated 3 times
+ap run "(bug-hunt:3 -> security-audit:1) x3" audit-session
+
 # List available stages
 ap list
 
@@ -155,23 +158,22 @@ ap query iterations --session NAME [--stage NAME] [--json]
 ap query events --session NAME [--type TYPE] [--after SEQ] [--json]
 ```
 
-```bash
-ap query sessions --status running --json
-ap query iterations --session my-session --json
-ap query events --session my-session --type signal.escalate --after 5 --json
-```
-
 ## Spec Types
 
 The `<spec>` argument determines what to run, in order of parsing precedence:
 
 | Type | Example | Description |
 |------|---------|-------------|
+| Repeat | `"(a:5 -> b:3) x3"` | Repeat a chain N times |
 | Chain | `"a:5 -> b:5"` | Sequential multi-stage pipeline |
 | YAML file | `./pipeline.yaml` | Pipeline definition file |
 | Prompt file | `./prompt.md` | Direct prompt for the agent |
 | Stage with count | `ralph:25` | Named stage with iteration override |
 | Bare stage | `ralph` | Named stage with default iterations |
+
+**Repeat syntax**: `(chain) xN` expands the chain N times. Accepts `x`, `X`, or `*` as the multiplier. `(a:3 -> b:1) x3` becomes `a:3 -> b:1 -> a:3 -> b:1 -> a:3 -> b:1`.
+
+**Spec recovery**: `ralph 25` is recovered to `ralph:25`. Chain separators ` > ` and `,` are normalized to ` -> `.
 
 ## Stages
 
@@ -187,14 +189,66 @@ Stages are reusable units of work containing a prompt template and configuration
 
 Project stages override builtins with the same name. Use `ap list` to see all available stages.
 
+### Stage Configuration
+
+```yaml
+name: my-stage
+description: "What this stage does"
+prompt: "custom-prompt.md"    # default: prompt.md (relative to stage dir)
+
+termination:
+  type: fixed                 # fixed | judgment | race
+  iterations: 10              # fixed: stop after N (default: 1)
+  consensus: 2                # judgment: consecutive stops needed (default: 2)
+  min_iterations: 3           # judgment: minimum before stop allowed (default: 3)
+
+delay: 3                      # seconds between iterations
+output_path: "out/${SESSION}-${ITERATION}.md"  # custom output file path
+```
+
+## Termination Strategies
+
+| Type | Config | Description | Status |
+|------|--------|-------------|--------|
+| `fixed` | `iterations: N` | Stop after N iterations (default: 1). Immediate stop on `"stop"` or `"error"` decision. | Tested |
+| `judgment` | `consensus: 2, min_iterations: 3` | Judge model evaluates after each iteration. Needs N consecutive `"stop"` verdicts. Falls back to fixed after 3 judge failures. | Tested |
+| `race` | `agents: N, accept: first` | N concurrent providers run in parallel. First successful result wins. Requires `parallel` block. | Not wired — see below |
+
+> **Note**: `race` termination and `parallel` blocks have unit-tested components (`internal/parallel/`, `internal/termination/race.go`, `internal/context/from_parallel`) but the runner does not yet support parallel nodes (`runner.go:959` rejects them). These features are architectural scaffolding — do not use in production pipelines.
+
+## Pipelines
+
+Multi-stage workflows defined in YAML:
+
+```yaml
+name: my-pipeline
+nodes:
+  - id: plan
+    stage: improve-plan
+    runs: 5
+
+  - id: refine
+    stage: refine-tasks
+    runs: 3
+    inputs:
+      from: plan              # read outputs from the "plan" node
+      select: latest          # "latest" (default) or "all"
+      from_initial: true      # include CLI --input files
+```
+
+## Session History & Progress
+
+Two files track session state across iterations:
+
+- **`progress.md`** — Session-scoped working notes written by the agent. Survives stage transitions.
+- **`history.md`** — Runner-generated iteration summary rebuilt from SQLite before each iteration. Read-only for agents.
+
 ## Providers
 
 | Name | Aliases | Description |
 |------|---------|-------------|
 | `claude` | `anthropic` | Claude API (default) |
 | `codex` | - | Codex CLI |
-
-Resolution precedence: CLI flag > `AP_PROVIDER` env var > config file > `claude`.
 
 ## Configuration
 
@@ -228,9 +282,9 @@ hooks:
   on_idle: "echo idle"
 ```
 
-**Defaults precedence** (for launcher, provider, model):
+**Precedence** (for launcher, provider, model): CLI flag > `AP_*` env var > config file > compiled default.
 
-CLI flag > `AP_*` env var > config file > compiled default
+**Environment variables**: `AP_PROVIDER`, `AP_MODEL`, `AP_LAUNCHER`, `AP_OUTPUT`.
 
 ## Storage Model
 
@@ -260,15 +314,6 @@ pending -> running -> completed
 
 A machine-wide control plane at `~/.local/state/ap/control.db` indexes sessions across projects. When a session name isn't found locally, `ap` queries the control plane. If the name is ambiguous across projects, an error with `--project-root` suggestions is returned.
 
-## Launchers
-
-| Backend | Description |
-|---------|-------------|
-| `tmux` | Creates a tmux session (default) |
-| `process` | Spawns a direct subprocess |
-
-Resolution: `AP_LAUNCHER` env var > config `defaults.launcher` > `tmux`.
-
 ## Forgiving Syntax
 
 `ap` recovers from common mistakes and reports corrections in output.
@@ -277,19 +322,9 @@ Resolution: `AP_LAUNCHER` env var > config `defaults.launcher` > `tmux`.
 
 **Typo correction**: Levenshtein distance matching for commands and stage names. Destructive commands (`kill`, `clean`) only accept exact synonyms -- no fuzzy matching.
 
-**Spec recovery**: `ralph 25` -> `ralph:25`, swapped `<session> <spec>` -> `<spec> <session>`.
+**Spec recovery**: `ralph 25` -> `ralph:25`, swapped `<session> <spec>` -> `<spec> <session>`, chain arrows ` > ` and `,` -> ` -> `.
 
 **Provider aliases**: `anthropic` -> `claude`.
-
-Corrections appear in JSON output:
-
-```json
-{
-  "corrections": [
-    {"from": "start", "to": "run", "hint": "command alias normalized"}
-  ]
-}
-```
 
 ## Output Contract
 
@@ -329,23 +364,37 @@ Corrections appear in JSON output:
 ```
 cmd/ap/             CLI commands and arg parsing
 internal/
+  compile/          YAML pipeline compiler -> Pipeline object
   config/           YAML configuration (~/.config/ap/config.yaml)
+  context/          Context manifest (context.json) generation
   controlplane/     Machine-wide session index
   engine/           Iteration engine (provider interaction loop)
+  exec/             Process execution, signal cascade, bounded I/O
+  extract/          Agent output extraction (ap-result parsing)
   fuzzy/            Typo correction and command synonyms
-  lock/             Process-level session locking
+  judge/            Judgment termination with consensus tracking
+  lock/             Process-level session locking (flock)
+  messages/         Live message bus (JSONL per session)
+  mock/             MockProvider for testing
   output/           JSON/human output formatting
-  runner/           Session runner orchestration
+  parallel/         Concurrent provider execution (race strategy)
+  resolve/          ${VAR} template substitution
+  runner/           Session runner orchestration, retry, signal dispatch
   session/          Launcher backends (tmux, process)
-  signals/          Escalation and spawn signal dispatch
+  signals/          Signal parsing and validation
   spec/             Spec parsing (stage, chain, file)
   stage/            Stage resolution (builtin + project)
   store/            SQLite session/iteration/event store
+  termination/      Termination strategies (fixed, judgment, race)
+  testutil/         Test utilities and fake provider binaries
+  validate/         Input validation and security checks
 pkg/
   provider/         Provider interface and registry
   provider/claude/  Claude provider
   provider/codex/   Codex provider
 ```
+
+For the full agent contract (context.json schema, template variables, signal formats, event types, retry config), see [AGENTS.md](AGENTS.md).
 
 ## Testing
 
