@@ -3,6 +3,7 @@ package stage
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"io/fs"
@@ -12,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/hwells4/ap/internal/fsutil"
+	"gopkg.in/yaml.v3"
 )
 
 // Definition describes a resolved stage configuration.
@@ -45,6 +47,22 @@ func (d Definition) ReadPrompt() ([]byte, error) {
 		return fs.ReadFile(d.embeddedFS, d.embeddedPromptPath)
 	}
 	return os.ReadFile(d.PromptPath)
+}
+
+// ReadOutputPath returns the output_path value from stage.yaml, if set.
+// Returns empty string when output_path is not configured.
+func (d Definition) ReadOutputPath() string {
+	configData, err := d.ReadConfig()
+	if err != nil {
+		return ""
+	}
+	var doc struct {
+		OutputPath string `yaml:"output_path"`
+	}
+	if err := yaml.NewDecoder(bytes.NewReader(configData)).Decode(&doc); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(doc.OutputPath)
 }
 
 // ResolveOptions defines search roots for stage resolution.

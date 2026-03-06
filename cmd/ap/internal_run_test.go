@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/hwells4/ap/internal/compile"
 	"github.com/hwells4/ap/internal/output"
 )
 
@@ -324,6 +325,149 @@ func TestRunRequestFile_JSONSchema(t *testing.T) {
 
 func hasSubstring(s, sub string) bool {
 	return len(s) >= len(sub) && bytes.Contains([]byte(s), []byte(sub))
+}
+
+func TestReadRunRequest_PipelineRelaxesValidation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "req.json")
+
+	// A request with Pipeline set but no Stage and zero Iterations should pass.
+	payload := map[string]any{
+		"session":  "pipeline-session",
+		"provider": "claude",
+		"run_dir":  "/runs/pipeline-session",
+		"pipeline": map[string]any{
+			"name": "test-pipeline",
+			"nodes": []map[string]any{
+				{"id": "plan", "stage": "improve-plan", "runs": 2},
+				{"id": "refine", "stage": "refine-tasks", "runs": 1},
+			},
+		},
+	}
+	data, _ := json.Marshal(payload)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := ReadRunRequest(path)
+	if err != nil {
+		t.Fatalf("ReadRunRequest() error: %v (pipeline should relax stage/iterations checks)", err)
+	}
+	if req.Pipeline == nil {
+		t.Fatal("Pipeline is nil after read")
+	}
+	if len(req.Pipeline.Nodes) != 2 {
+		t.Fatalf("Pipeline.Nodes = %d, want 2", len(req.Pipeline.Nodes))
+	}
+}
+
+func TestReadRunRequest_PipelineStillRequiresProvider(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "req.json")
+
+	// Even with a pipeline, provider is required.
+	payload := map[string]any{
+		"session": "pipeline-session",
+		"run_dir": "/runs/pipeline-session",
+		"pipeline": map[string]any{
+			"name":  "test",
+			"nodes": []map[string]any{{"id": "a", "stage": "ralph", "runs": 1}},
+		},
+	}
+	data, _ := json.Marshal(payload)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ReadRunRequest(path)
+	if err == nil {
+		t.Fatal("expected error for missing provider")
+	}
+	if !hasSubstring(err.Error(), "missing provider") {
+		t.Errorf("error = %q, want 'missing provider'", err)
+	}
+}
+
+func TestReadRunRequest_PipelineStillRequiresRunDir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "req.json")
+
+	payload := map[string]any{
+		"session":  "pipeline-session",
+		"provider": "claude",
+		"pipeline": map[string]any{
+			"name":  "test",
+			"nodes": []map[string]any{{"id": "a", "stage": "ralph", "runs": 1}},
+		},
+	}
+	data, _ := json.Marshal(payload)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ReadRunRequest(path)
+	if err == nil {
+		t.Fatal("expected error for missing run_dir")
+	}
+	if !hasSubstring(err.Error(), "missing run_dir") {
+		t.Errorf("error = %q, want 'missing run_dir'", err)
+	}
+}
+
+func TestRunRequestFile_PipelineRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "req.json")
+
+	original := RunRequestFile{
+		Session:    "pipeline-rt",
+		Stage:      "improve-plan",
+		Provider:   "claude",
+		Iterations: 1,
+		RunDir:     filepath.Join(dir, "runs", "pipeline-rt"),
+		Pipeline: &compile.Pipeline{
+			Name: "chain",
+			Nodes: []compile.Node{
+				{ID: "plan", Stage: "improve-plan", Runs: 5},
+				{
+					ID:    "refine",
+					Stage: "refine-tasks",
+					Runs:  3,
+					Inputs: compile.Inputs{
+						From:   "plan",
+						Select: "latest",
+					},
+				},
+			},
+		},
+	}
+
+	if err := WriteRunRequest(path, original); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := ReadRunRequest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if loaded.Pipeline == nil {
+		t.Fatal("Pipeline is nil after round-trip")
+	}
+	if len(loaded.Pipeline.Nodes) != 2 {
+		t.Fatalf("Pipeline.Nodes = %d, want 2", len(loaded.Pipeline.Nodes))
+	}
+	if loaded.Pipeline.Name != "chain" {
+		t.Fatalf("Pipeline.Name = %q, want chain", loaded.Pipeline.Name)
+	}
+	if loaded.Pipeline.Nodes[0].Stage != "improve-plan" {
+		t.Fatalf("node[0].Stage = %q, want improve-plan", loaded.Pipeline.Nodes[0].Stage)
+	}
+	if loaded.Pipeline.Nodes[1].Inputs.From != "plan" {
+		t.Fatalf("node[1].Inputs.From = %q, want plan", loaded.Pipeline.Nodes[1].Inputs.From)
+	}
+	if loaded.Pipeline.Nodes[0].Runs != 5 {
+		t.Fatalf("node[0].Runs = %d, want 5", loaded.Pipeline.Nodes[0].Runs)
+	}
 }
 
 func TestParseOnEscalateOverride(t *testing.T) {

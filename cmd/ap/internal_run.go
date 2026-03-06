@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/hwells4/ap/internal/compile"
 	"github.com/hwells4/ap/internal/config"
 	"github.com/hwells4/ap/internal/engine"
 	"github.com/hwells4/ap/internal/lock"
@@ -28,6 +29,7 @@ type RunRequestFile struct {
 	Model          string            `json:"model"`
 	Iterations     int               `json:"iterations"`
 	PromptTemplate string            `json:"prompt_template"`
+	Pipeline       *compile.Pipeline `json:"pipeline,omitempty"`
 	WorkDir        string            `json:"work_dir"`
 	Env            map[string]string `json:"env"`
 	RunDir         string            `json:"run_dir"`
@@ -38,6 +40,7 @@ type RunRequestFile struct {
 	ConfigRoot     string            `json:"config_root,omitempty"`
 	ProjectKey     string            `json:"project_key,omitempty"`
 	TargetSource   string            `json:"target_source,omitempty"`
+	OutputPath     string            `json:"output_path,omitempty"`
 }
 
 // WriteRunRequest atomically writes a run_request.json file.
@@ -74,13 +77,14 @@ func ReadRunRequest(path string) (RunRequestFile, error) {
 	if req.Session == "" {
 		return RunRequestFile{}, fmt.Errorf("run request: missing session")
 	}
-	if req.Stage == "" {
+	hasPipeline := req.Pipeline != nil && len(req.Pipeline.Nodes) > 0
+	if req.Stage == "" && !hasPipeline {
 		return RunRequestFile{}, fmt.Errorf("run request: missing stage")
 	}
 	if req.Provider == "" {
 		return RunRequestFile{}, fmt.Errorf("run request: missing provider")
 	}
-	if req.Iterations <= 0 {
+	if req.Iterations <= 0 && !hasPipeline {
 		return RunRequestFile{}, fmt.Errorf("run request: iterations must be positive, got %d", req.Iterations)
 	}
 	if req.RunDir == "" {
@@ -194,8 +198,9 @@ func runInternalRun(args []string, deps cliDeps) int {
 	}
 
 	// Resolve prompt template if not already in request.
+	// When a pipeline is set, the runner resolves per-stage prompts itself.
 	promptTemplate := req.PromptTemplate
-	if promptTemplate == "" {
+	if promptTemplate == "" && req.Pipeline == nil {
 		def, stageErr := stage.ResolveStage(req.Stage, stage.ResolveOptions{
 			ProjectRoot: workDir,
 		})
@@ -235,9 +240,11 @@ func runInternalRun(args []string, deps cliDeps) int {
 		Session:              req.Session,
 		RunDir:               req.RunDir,
 		StageName:            req.Stage,
+		Pipeline:             req.Pipeline,
 		Provider:             prov,
 		Iterations:           req.Iterations,
 		PromptTemplate:       promptTemplate,
+		OutputPath:           strings.TrimSpace(req.OutputPath),
 		Model:                req.Model,
 		WorkDir:              workDir,
 		RunTarget:            target,

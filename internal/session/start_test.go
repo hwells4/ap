@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/hwells4/ap/internal/compile"
 	"github.com/hwells4/ap/internal/spec"
 	"github.com/hwells4/ap/internal/stage"
 )
@@ -198,3 +199,228 @@ func (s *stubLauncher) Start(session string, runnerCmd []string, opts StartOptio
 func (s *stubLauncher) Kill(string) error { return nil }
 func (s *stubLauncher) Available() bool   { return true }
 func (s *stubLauncher) Name() string      { return "stub" }
+
+func TestIntegration_Start_ChainSpec(t *testing.T) {
+	projectRoot := t.TempDir()
+
+	// Build a ChainSpec with two built-in stages.
+	stages := []spec.StageSpec{
+		mustStageSpec(t, projectRoot, "improve-plan", 2),
+		mustStageSpec(t, projectRoot, "refine-tasks", 3),
+	}
+	chainSpec := spec.ChainSpec{Stages: stages}
+
+	launcher := &stubLauncher{
+		handle: SessionHandle{
+			Session: "chain-session",
+			PID:     5001,
+			Backend: "stub",
+		},
+	}
+
+	started, err := Start(chainSpec, "chain-session", StartOpts{
+		ProjectRoot: projectRoot,
+		Provider:    "claude",
+		Executable:  "/usr/local/bin/ap",
+		Launcher:    launcher,
+	})
+	if err != nil {
+		t.Fatalf("Start(ChainSpec) error: %v", err)
+	}
+
+	if started.Name != "chain-session" {
+		t.Fatalf("session name = %q, want %q", started.Name, "chain-session")
+	}
+	if launcher.calls != 1 {
+		t.Fatalf("launcher calls = %d, want 1", launcher.calls)
+	}
+
+	var request runRequestFile
+	if err := readJSON(started.RunRequestPath, &request); err != nil {
+		t.Fatalf("read request: %v", err)
+	}
+
+	// Pipeline should be set.
+	if request.Pipeline == nil {
+		t.Fatal("request.Pipeline is nil, expected pipeline from ChainSpec")
+	}
+	if len(request.Pipeline.Nodes) != 2 {
+		t.Fatalf("pipeline nodes = %d, want 2", len(request.Pipeline.Nodes))
+	}
+	if request.Pipeline.Nodes[0].Stage != "improve-plan" {
+		t.Fatalf("pipeline node[0].Stage = %q, want improve-plan", request.Pipeline.Nodes[0].Stage)
+	}
+	if request.Pipeline.Nodes[1].Stage != "refine-tasks" {
+		t.Fatalf("pipeline node[1].Stage = %q, want refine-tasks", request.Pipeline.Nodes[1].Stage)
+	}
+
+	// Stage should be first node's stage name.
+	if request.Stage != "improve-plan" {
+		t.Fatalf("request.Stage = %q, want improve-plan", request.Stage)
+	}
+	// Iterations=1 (runner manages real counts).
+	if request.Iterations != 1 {
+		t.Fatalf("request.Iterations = %d, want 1", request.Iterations)
+	}
+	// PromptTemplate should be empty (runner resolves per-stage).
+	if request.PromptTemplate != "" {
+		t.Fatalf("request.PromptTemplate = %q, want empty", request.PromptTemplate)
+	}
+}
+
+func TestIntegration_Start_FileYAML(t *testing.T) {
+	projectRoot := t.TempDir()
+
+	// Create a minimal pipeline YAML file.
+	pipelineDir := filepath.Join(projectRoot, "pipelines")
+	if err := os.MkdirAll(pipelineDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yamlPath := filepath.Join(pipelineDir, "test.yaml")
+	yamlContent := `name: test-pipeline
+nodes:
+  - id: plan
+    stage: improve-plan
+    runs: 2
+  - id: refine
+    stage: refine-tasks
+    runs: 1
+    inputs:
+      from: plan
+      select: latest
+`
+	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fileSpec := spec.FileSpec{
+		Path:     yamlPath,
+		FileKind: spec.KindFileYAML,
+	}
+
+	launcher := &stubLauncher{
+		handle: SessionHandle{
+			Session: "yaml-session",
+			PID:     5002,
+			Backend: "stub",
+		},
+	}
+
+	started, err := Start(fileSpec, "yaml-session", StartOpts{
+		ProjectRoot: projectRoot,
+		Provider:    "claude",
+		Executable:  "/usr/local/bin/ap",
+		Launcher:    launcher,
+	})
+	if err != nil {
+		t.Fatalf("Start(FileSpec YAML) error: %v", err)
+	}
+
+	if started.Name != "yaml-session" {
+		t.Fatalf("session name = %q, want %q", started.Name, "yaml-session")
+	}
+
+	var request runRequestFile
+	if err := readJSON(started.RunRequestPath, &request); err != nil {
+		t.Fatalf("read request: %v", err)
+	}
+
+	if request.Pipeline == nil {
+		t.Fatal("request.Pipeline is nil, expected pipeline from FileSpec YAML")
+	}
+	if len(request.Pipeline.Nodes) != 2 {
+		t.Fatalf("pipeline nodes = %d, want 2", len(request.Pipeline.Nodes))
+	}
+	if request.Pipeline.Name != "test-pipeline" {
+		t.Fatalf("pipeline name = %q, want test-pipeline", request.Pipeline.Name)
+	}
+	if request.Stage != "improve-plan" {
+		t.Fatalf("request.Stage = %q, want improve-plan", request.Stage)
+	}
+	if request.Iterations != 1 {
+		t.Fatalf("request.Iterations = %d, want 1", request.Iterations)
+	}
+}
+
+func TestIntegration_Start_UnsupportedSpec(t *testing.T) {
+	projectRoot := t.TempDir()
+
+	// FileSpec with KindFilePrompt is unsupported.
+	promptPath := filepath.Join(projectRoot, "prompt.md")
+	if err := os.WriteFile(promptPath, []byte("Do work"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fileSpec := spec.FileSpec{
+		Path:     promptPath,
+		FileKind: spec.KindFilePrompt,
+	}
+
+	launcher := &stubLauncher{
+		handle: SessionHandle{Session: "nope", PID: 1, Backend: "stub"},
+	}
+
+	_, err := Start(fileSpec, "nope-session", StartOpts{
+		ProjectRoot: projectRoot,
+		Launcher:    launcher,
+	})
+	if err == nil {
+		t.Fatal("expected error for unsupported spec")
+	}
+	if !errors.Is(err, ErrUnsupportedSpec) {
+		t.Fatalf("error = %v, want ErrUnsupportedSpec", err)
+	}
+	if launcher.calls != 0 {
+		t.Fatalf("launcher should not be called for unsupported spec, got %d calls", launcher.calls)
+	}
+}
+
+func TestIntegration_Start_ChainSpec_PipelineRoundTrip(t *testing.T) {
+	projectRoot := t.TempDir()
+
+	stages := []spec.StageSpec{
+		mustStageSpec(t, projectRoot, "ralph", 5),
+		mustStageSpec(t, projectRoot, "improve-plan", 3),
+	}
+	chainSpec := spec.ChainSpec{Stages: stages}
+
+	launcher := &stubLauncher{
+		handle: SessionHandle{Session: "roundtrip", PID: 6001, Backend: "stub"},
+	}
+
+	started, err := Start(chainSpec, "roundtrip", StartOpts{
+		ProjectRoot: projectRoot,
+		Launcher:    launcher,
+	})
+	if err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+
+	// Read the JSON, re-parse, and verify Pipeline survives serialization.
+	data, err := os.ReadFile(started.RunRequestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded runRequestFile
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Pipeline == nil {
+		t.Fatal("round-tripped Pipeline is nil")
+	}
+	if len(decoded.Pipeline.Nodes) != 2 {
+		t.Fatalf("round-tripped pipeline nodes = %d, want 2", len(decoded.Pipeline.Nodes))
+	}
+	// Chain should wire inputs.from on second node.
+	if decoded.Pipeline.Nodes[1].Inputs.From == "" {
+		t.Fatal("second node should have inputs.from set by chain wiring")
+	}
+	if decoded.Pipeline.Nodes[0].Runs != 5 {
+		t.Fatalf("node[0].Runs = %d, want 5", decoded.Pipeline.Nodes[0].Runs)
+	}
+	if decoded.Pipeline.Nodes[1].Runs != 3 {
+		t.Fatalf("node[1].Runs = %d, want 3", decoded.Pipeline.Nodes[1].Runs)
+	}
+}
+
+// Verify compile.Pipeline is not needed as unused import.
+var _ = compile.Pipeline{}

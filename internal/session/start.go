@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/hwells4/ap/internal/compile"
 	"github.com/hwells4/ap/internal/runtarget"
 	"github.com/hwells4/ap/internal/spec"
 	"github.com/hwells4/ap/internal/stage"
@@ -50,25 +51,27 @@ type StartOpts struct {
 }
 
 type runRequestFile struct {
-	Session        string            `json:"session"`
-	Stage          string            `json:"stage"`
-	Provider       string            `json:"provider"`
-	Model          string            `json:"model,omitempty"`
-	Iterations     int               `json:"iterations"`
-	PromptTemplate string            `json:"prompt_template"`
-	WorkDir        string            `json:"work_dir"`
-	Env            map[string]string `json:"env,omitempty"`
-	RunDir         string            `json:"run_dir"`
-	InputFiles     []string          `json:"input_files,omitempty"`
-	OnEscalate     string            `json:"on_escalate,omitempty"`
-	Context        string            `json:"context,omitempty"`
-	Force          bool              `json:"force,omitempty"`
-	ParentSession  string            `json:"parent_session,omitempty"`
-	ProjectRoot    string            `json:"project_root,omitempty"`
-	RepoRoot       string            `json:"repo_root,omitempty"`
-	ConfigRoot     string            `json:"config_root,omitempty"`
-	ProjectKey     string            `json:"project_key,omitempty"`
-	TargetSource   string            `json:"target_source,omitempty"`
+	Session        string             `json:"session"`
+	Stage          string             `json:"stage"`
+	Provider       string             `json:"provider"`
+	Model          string             `json:"model,omitempty"`
+	Iterations     int                `json:"iterations"`
+	PromptTemplate string             `json:"prompt_template"`
+	Pipeline       *compile.Pipeline  `json:"pipeline,omitempty"`
+	WorkDir        string             `json:"work_dir"`
+	Env            map[string]string  `json:"env,omitempty"`
+	RunDir         string             `json:"run_dir"`
+	InputFiles     []string           `json:"input_files,omitempty"`
+	OnEscalate     string             `json:"on_escalate,omitempty"`
+	Context        string             `json:"context,omitempty"`
+	Force          bool               `json:"force,omitempty"`
+	ParentSession  string             `json:"parent_session,omitempty"`
+	ProjectRoot    string             `json:"project_root,omitempty"`
+	RepoRoot       string             `json:"repo_root,omitempty"`
+	ConfigRoot     string             `json:"config_root,omitempty"`
+	ProjectKey     string             `json:"project_key,omitempty"`
+	TargetSource   string             `json:"target_source,omitempty"`
+	OutputPath     string             `json:"output_path,omitempty"`
 }
 
 // Start writes the session run request and delegates process creation to the
@@ -104,10 +107,48 @@ func Start(parsed spec.Spec, session string, opts StartOpts) (*Session, error) {
 		return nil, fmt.Errorf("%w: %s", ErrSessionExists, sessionName)
 	}
 
-	stageName, iterations, promptTemplate, err := resolveStageSpec(parsed, projectRoot)
-	if err != nil {
-		return nil, err
+	var (
+		stageName      string
+		iterations     int
+		promptTemplate string
+		pipeline       *compile.Pipeline
+	)
+
+	var outputPath string
+
+	switch parsed.Kind() {
+	case spec.KindStage:
+		var err error
+		stageName, iterations, promptTemplate, outputPath, err = resolveStageSpec(parsed, projectRoot)
+		if err != nil {
+			return nil, err
+		}
+
+	case spec.KindChain:
+		chainSpec := parsed.(spec.ChainSpec)
+		p := chainSpec.ToPipeline()
+		pipeline = &p
+		if len(p.Nodes) > 0 {
+			stageName = p.Nodes[0].Stage
+		}
+		iterations = 1
+
+	case spec.KindFileYAML:
+		fileSpec := parsed.(spec.FileSpec)
+		p, err := compile.Compile(fileSpec.Path)
+		if err != nil {
+			return nil, fmt.Errorf("session: compile pipeline %q: %w", fileSpec.Path, err)
+		}
+		pipeline = p
+		if len(p.Nodes) > 0 {
+			stageName = p.Nodes[0].Stage
+		}
+		iterations = 1
+
+	default:
+		return nil, fmt.Errorf("%w: %T", ErrUnsupportedSpec, parsed)
 	}
+
 	inputFiles, err := normalizeInputFiles(projectRoot, opts.InputFiles)
 	if err != nil {
 		return nil, err
@@ -130,6 +171,7 @@ func Start(parsed spec.Spec, session string, opts StartOpts) (*Session, error) {
 		Model:          strings.TrimSpace(opts.Model),
 		Iterations:     iterations,
 		PromptTemplate: promptTemplate,
+		Pipeline:       pipeline,
 		WorkDir:        target.ProjectRoot,
 		Env:            cloneStringMap(opts.Env),
 		RunDir:         layout.SessionDir,
@@ -143,6 +185,7 @@ func Start(parsed spec.Spec, session string, opts StartOpts) (*Session, error) {
 		ConfigRoot:     target.ConfigRoot,
 		ProjectKey:     target.ProjectKey,
 		TargetSource:   target.Source,
+		OutputPath:     outputPath,
 	}
 	if err := writeRunRequest(layout.RunRequestPath, request); err != nil {
 		return nil, err
@@ -203,15 +246,15 @@ func sessionDirExists(projectRoot, session string) bool {
 	return err == nil && info.IsDir()
 }
 
-func resolveStageSpec(parsed spec.Spec, projectRoot string) (string, int, string, error) {
+func resolveStageSpec(parsed spec.Spec, projectRoot string) (string, int, string, string, error) {
 	stageSpec, ok := parsed.(spec.StageSpec)
 	if !ok {
-		return "", 0, "", fmt.Errorf("%w: %T", ErrUnsupportedSpec, parsed)
+		return "", 0, "", "", fmt.Errorf("%w: %T", ErrUnsupportedSpec, parsed)
 	}
 
 	stageName := strings.TrimSpace(stageSpec.Name)
 	if stageName == "" {
-		return "", 0, "", fmt.Errorf("session: stage name is empty")
+		return "", 0, "", "", fmt.Errorf("session: stage name is empty")
 	}
 
 	definition := stageSpec.Definition
@@ -221,13 +264,13 @@ func resolveStageSpec(parsed spec.Spec, projectRoot string) (string, int, string
 			ProjectRoot: projectRoot,
 		})
 		if err != nil {
-			return "", 0, "", fmt.Errorf("session: resolve stage %q: %w", stageName, err)
+			return "", 0, "", "", fmt.Errorf("session: resolve stage %q: %w", stageName, err)
 		}
 	}
 
 	promptBytes, err := definition.ReadPrompt()
 	if err != nil {
-		return "", 0, "", fmt.Errorf("session: read stage prompt %q: %w", stageName, err)
+		return "", 0, "", "", fmt.Errorf("session: read stage prompt %q: %w", stageName, err)
 	}
 
 	iterations := stageSpec.Iterations
@@ -235,7 +278,9 @@ func resolveStageSpec(parsed spec.Spec, projectRoot string) (string, int, string
 		iterations = 1
 	}
 
-	return stageName, iterations, string(promptBytes), nil
+	outputPath := definition.ReadOutputPath()
+
+	return stageName, iterations, string(promptBytes), outputPath, nil
 }
 
 func providerOrDefault(provider string) string {
