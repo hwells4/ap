@@ -2,7 +2,7 @@
 date: 2026-02-27
 type: plan
 status: draft
-revision: 10
+revision: 11
 project: go-engine-rewrite
 supersedes: 2026-01-15-go-engine-rewrite-prd.md
 reviewed_by:
@@ -17,7 +17,70 @@ reviewed_by:
   - claude-opus-4.6 + codex-gpt-5.3 (robot mode design)
 ---
 
-# Agent Pipelines v2: Go Rewrite Plan (Rev 10)
+# Agent Pipelines v2: Go Rewrite Plan (Rev 11)
+
+## Current State (as of 2026-03-05)
+
+> **Critical note:** This plan was originally written against a file-based state model (`events.jsonl` + `state.json`). The codebase has since migrated to **SQLite** (`.ap/ap.db`, WAL mode). Sections below that reference `events.jsonl`, `state.json`, `last_event_offset`, and file-based crash recovery describe the *original design intent*. The actual implementation uses SQLite tables: `sessions`, `iterations`, `outputs`, `events`, `locks`, `session_children`, `schema_version`. See `internal/store/` and `AGENTS.md` for the authoritative storage contract.
+
+### What's Built (all tests passing)
+
+| Package | Status | Notes |
+|---------|--------|-------|
+| `cmd/ap/` | **Complete** | All 7 CLI commands + `_run` + `query` + `watch`. 28 source files. |
+| `internal/runner` | **Complete** | 1201 LOC. Iteration loop, signal dispatch, YAML pipeline execution. |
+| `internal/session` | **Complete** | 358 LOC. Session launcher with TmuxLauncher/ProcessLauncher. |
+| `internal/store` | **Complete** | SQLite-backed state. Replaces `events.jsonl` + `state.json`. |
+| `internal/controlplane` | **Complete** | Machine-wide session index (`~/.local/state/ap/control.db`). |
+| `internal/config` | **Complete** | Centralized config defaults for launcher, provider, model. |
+| `internal/spec` | **Complete** | Unified spec parser (stage, chain, YAML, prompt file). |
+| `internal/compile` | **Complete** | YAML pipeline compiler → Pipeline object. |
+| `internal/fuzzy` | **Complete** | Command synonyms, Levenshtein, flag normalization, argument recovery. |
+| `internal/output` | **Complete** | TTY detection, JSON mode, structured errors, exit codes. |
+| `internal/signals` | **Complete** | inject/spawn/escalate parse, validate, dispatch. |
+| `internal/judge` | **Complete** | Haiku judgment termination with consensus tracking. |
+| `internal/parallel` | **Complete** | Concurrent provider execution with isolated contexts. |
+| `internal/messages` | **Complete** | Live message bus (JSONL per session). |
+| `internal/lock` | **Complete** | flock-based session locking with stale PID detection. |
+| `internal/mock` | **Complete** | MockProvider with configurable canned responses. |
+| `internal/exec` | **Complete** | Process execution, signal cascade, bounded I/O. |
+| `internal/context` | **Complete** | v3 context.json generation. |
+| `internal/resolve` | **Complete** | `${VAR}` template substitution. |
+| `internal/extract` | **Complete** | Agent output extraction/normalization. |
+| `internal/termination` | **Complete** | Fixed iteration + judgment strategies. |
+| `internal/stage` | **Complete** | Stage definition resolution with multi-precedence search. |
+| `internal/validate` | **Complete** | Security checks. |
+| `internal/fsutil` | **Complete** | Shared file utilities. |
+| `internal/engine` | **Complete** | Provider registration. |
+| `internal/hooks` | **Complete** | Hook system. |
+| `internal/testutil` | **Complete** | Test utilities. |
+| `internal/runtarget` | **Complete** | Run target resolution. |
+| `pkg/provider/claude` | **Complete** | Claude CLI provider. |
+| `pkg/provider/codex` | **Complete** | Codex CLI provider. |
+
+### What Remains
+
+1. **YAML pipeline E2E validation** — The `internal/compile` package compiles YAML pipelines, but end-to-end testing of `ap run pipeline.yaml session` with real multi-node execution needs hardening.
+2. **Race termination strategy** — Designed (Rev 10 Addition 3) but not implemented.
+3. **Auto-retry with backoff** — Designed (Rev 10 Addition 4) but not implemented.
+4. **Signal handler chain (webhook/exec)** — Escalation always pauses + prints to stdout. Pluggable webhook/exec handlers not yet wired.
+5. **Ephemeral callback listener** — Designed but not implemented.
+6. **Beads cleanup on crash** — Runner releasing `in_progress` beads on crash/kill.
+7. **Plan-to-reality reconciliation** — Many sections below describe the file-based architecture that has been superseded by SQLite.
+
+### Milestone Completion Status
+
+| Milestone | Status |
+|-----------|--------|
+| Pre-M0: Structural Cleanup | **DONE** |
+| M0a: Minimal Loop | **DONE** |
+| M0b: Session Management + Stage Lookup | **DONE** |
+| M0c: Agent Signals | **DONE** (basic dispatch; webhook/exec handlers pending) |
+| M1: Judgment Termination | **DONE** |
+| M2: Codex Provider + Signal Handlers | **PARTIAL** (Codex done, signal handlers pending) |
+| M3: Multi-Stage Pipelines | **DONE** (chain parser + YAML compiler) |
+| M4: Parallel Blocks + Message Bus | **DONE** |
+| M5: `ap watch` + Race Termination | **PARTIAL** (`ap watch` done, race termination pending) |
 
 ## What We're Building
 
@@ -119,33 +182,26 @@ Higher-numbered rules are only evaluated if no higher-priority rule fires.
 
 ## What Already Exists
 
-The `work/gorewrite` branch has **10 production-ready packages**:
+> **Updated 2026-03-05:** All packages are production-ready on `main`. The `work/gorewrite` branch was merged. See "Current State" section above for the full inventory.
 
-| Package | Lines | Status |
-|---------|-------|--------|
-| `internal/exec` | 443 | Production-ready. Process execution, signal cascade, bounded I/O. |
-| `internal/events` | 167 | Production-ready. Append-only events.jsonl with flock. |
-| `internal/state` | 356 | Production-ready. Session lifecycle + crash recovery. Has `ResumeFrom()`. |
-| `internal/context` | 694 | Production-ready. v3 context.json generation. |
-| `internal/resolve` | 186 | Production-ready. `${VAR}` template substitution. |
-| `internal/result` | 197 | Production-ready. Agent output normalization. |
-| `internal/termination` | 85 | Production-ready. Fixed iteration strategy only. |
-| `internal/validate` | 213 | Production-ready. Security checks. |
-| `internal/stage` | 191 | Production-ready. Stage definition resolution. |
-| `internal/engine` | 62 | Production-ready. Provider registration (thin wrapper). |
-| `pkg/provider` | 119 | SDK types. Has Claude CLI provider at `pkg/provider/claude/cli.go`. |
+All packages listed in the original plan are implemented and tested. Key additions beyond the original plan:
 
-**Empty stubs** (need implementation): `internal/compile`, `internal/judge`, `internal/parallel`, `internal/lock`, `internal/mock`.
+| Package | Purpose |
+|---------|---------|
+| `internal/store` | SQLite-backed session state (replaces `internal/events` + `internal/state`) |
+| `internal/controlplane` | Machine-wide control plane (`~/.local/state/ap/control.db`) for cross-project session resolution |
+| `internal/config` | Centralized config defaults for launcher, provider, model |
+| `internal/runtarget` | Run target resolution (CLI, config file, environment) |
+| `internal/extract` | Agent output extraction/normalization (replaces `internal/result`) |
+| `internal/testutil` | Test utilities and helpers |
 
-**New packages** (not in original codebase): `internal/runner` (iteration loop orchestrator), `internal/signals` (~250 lines, agent signal parsing + dispatch + handler chain), `internal/session` (session launcher — delegates to Launcher for process creation, used by both CLI and spawn), `internal/spec` (unified spec parser → typed AST).
-
-**`cmd/ap/main.go`**: Empty. This is where it all starts.
+**`cmd/ap/main.go`**: 28KB, fully implemented with all CLI commands.
 
 ---
 
-## Pre-Build Cleanup (BLOCKING — do before any feature work)
+## Pre-Build Cleanup (COMPLETED)
 
-The code reviews found structural defects that will block M0. Fix these first.
+> **Status: ALL DONE.** These were completed during initial development. Preserved below for design rationale context.
 
 ### P1. Unify Provider Interface
 
@@ -539,6 +595,14 @@ ap logs my-session -f     # follow (live tail)
 ap logs my-session --json # structured event output
 ap clean my-session       # remove session dir + lock + tmux session
 ap clean --all            # clean all completed/failed sessions
+
+# === Query (direct store access, added post-Rev 10) ===
+ap query sessions [--status STATUS] [--json]        # list sessions, optionally filter by status
+ap query iterations --session NAME [--stage NAME] [--json]  # all iterations for a session
+ap query events --session NAME [--type TYPE] [--after SEQ] [--json]  # filtered events
+
+# === Watch (reactive event subscriptions, Rev 10 Addition 2) ===
+ap watch [--json]         # watch session events live
 ```
 
 ### `ap run` Spec Resolution
@@ -879,9 +943,9 @@ Both: child initializes (acquire lock → create state → open event writer →
 
 ### Monitoring (`ap status`)
 
-`ap status` is the primary way to observe running sessions. It reads the pre-computed `state.json` snapshot — no tmux attachment needed, no event log scanning.
+`ap status` is the primary way to observe running sessions. It queries the SQLite store — no tmux attachment needed, no file scanning.
 
-**O(1) status via incremental snapshot:** The runner maintains `state.json` as a single pre-computed snapshot, updated atomically (write-to-temp + rename in same directory) after each event append. This file contains everything `ap status` needs: current stage, iteration, recent activity (last 5 iterations), aggregate file counts, signal history, and child session status. `ap status` reads this one file regardless of session length — a 500-iteration session is just as fast as a 5-iteration session. On crash, `state.json` is regenerated from `events.jsonl`.
+**O(1) status via SQLite queries:** `ap status` queries the `sessions` table for current state and the `iterations` table for recent activity. SQLite WAL mode allows concurrent reads while the runner writes. A 500-iteration session is just as fast as a 5-iteration session. No snapshot file to maintain or regenerate on crash.
 
 ```
 $ ap status auth
@@ -1279,13 +1343,32 @@ The listener rejects any POST without a matching `Authorization: Bearer {callbac
 - No security surface — listener exists only while waiting, localhost only
 - Multiple pipelines — each escalation gets its own port, no routing needed
 
-### State Model (Event-Sourced)
+### State Model (SQLite-Backed)
 
-**`events.jsonl` is the single source of truth.** All state — including signal lifecycle — is derived from the event log. `state.json` is a compact snapshot/cursor, NOT a parallel data store.
+> **Updated 2026-03-05:** The original design used `events.jsonl` + `state.json` files. This was replaced by a single SQLite database (`.ap/ap.db`, WAL mode) during the storage migration (commit `c2100a8`). The SQLite store provides ACID transactions, enforced state machine transitions, and simpler crash recovery without manual `fsync` ordering.
 
-**Write ordering for crash consistency:** append event line → `fsync` → write `state.json` atomically (temp + rename) → `fsync`. Event readers must tolerate partial trailing lines (truncated last line = incomplete write, ignore it). Snapshot regeneration from events must handle a corrupt/partial last event line by skipping it.
+**`.ap/ap.db` is the single source of truth.** All session state lives in SQLite tables:
 
-**`state.json`** — bounded snapshot, regenerated from events on startup. This is the **authoritative schema** — `ap status --json` returns this object directly.
+| Table | Purpose |
+|-------|---------|
+| `sessions` | Session metadata, status, current stage/iteration, provider/model |
+| `iterations` | Per-iteration decision, summary, exit code, signals, duration |
+| `outputs` | stdout/stderr/context_json paired 1:1 with iterations |
+| `events` | Append-only audit log with monotonic `seq` per session |
+| `locks` | (Reserved, not actively used — flock-based locking via `.ap/locks/`) |
+| `session_children` | Parent→child session relationships |
+| `schema_version` | Database schema versioning for migrations |
+
+**Session state machine** (enforced at store level via `UpdateSessionStatus`):
+- `running` → `paused`, `completed`, `failed`, `aborted`
+- `paused` → `running`, `aborted`
+- `failed` → `running`, `aborted`
+- `completed` and `aborted` are **terminal** (no further transitions)
+- Invalid transitions return an error — no silent state corruption.
+
+**Machine-wide control plane** (`~/.local/state/ap/control.db`): A second SQLite database indexes sessions across all projects. This enables cross-project session lookup via `--project-root` or automatic resolution when a session name is unique globally.
+
+**The `state.json` schema below is preserved for reference** — it documents the JSON shape that `ap status --json` returns, even though the backing store is now SQLite, not a file.
 
 ```json
 {
@@ -1424,20 +1507,20 @@ Only use signals when genuinely useful. Most iterations just need `decision` and
 
 ## Milestones
 
-### Pre-M0: Structural Cleanup (1 day)
+### Pre-M0: Structural Cleanup (DONE)
 **Goal:** Code compiles, interfaces are unified, mock provider exists.
 
-- [ ] P1: Unify Provider interface (delete `internal/provider` types, use `pkg/provider`)
-- [ ] P2: Fix Claude provider to use `internal/exec.Run()`
-- [ ] P3: Add `gopkg.in/yaml.v3` to go.mod
-- [ ] P4: Keep entrypoint under `cmd/ap/`
-- [ ] P5: Extract `fileExists` to `internal/fsutil`
-- [ ] P6: Implement `internal/mock` (MockProvider with canned responses)
-- [ ] Freeze the `Provider` interface — this is the contract all agents build against
+- [x] P1: Unify Provider interface (delete `internal/provider` types, use `pkg/provider`)
+- [x] P2: Fix Claude provider to use `internal/exec.Run()`
+- [x] P3: Add `gopkg.in/yaml.v3` to go.mod
+- [x] P4: Keep entrypoint under `cmd/ap/`
+- [x] P5: Extract `fileExists` to `internal/fsutil`
+- [x] P6: Implement `internal/mock` (MockProvider with canned responses)
+- [x] Freeze the `Provider` interface — this is the contract all agents build against
 
 **Test:** `go build ./cmd/ap/` produces a binary. `go test ./...` passes (all existing + mock tests).
 
-### M0a: Minimal Loop (2 days)
+### M0a: Minimal Loop (DONE)
 **Goal:** `ap run ./prompt.md -n 3 --fg my-session` runs 3 iterations end-to-end with Claude in foreground. No signals, no resume, no background — just the core loop. Robot mode output layer is wired from day one.
 
 What to build:
@@ -1473,7 +1556,7 @@ What already exists that we wire up:
 - Integration: `ap` (no args) returns help under 100 tokens (human) or alias map (JSON)
 - E2E (optional): Same with real Claude CLI for 1 iteration
 
-### M0b: Session Management + Stage Lookup (3 days)
+### M0b: Session Management + Stage Lookup (DONE)
 **Goal:** `ap run elegance my-session` resolves built-in stages by name, launches in background, and returns immediately. `ap status` shows rich session state. `ap list`, `ap resume`, locking all work.
 
 What to build:
@@ -1541,7 +1624,7 @@ What to build:
 - Fuzzy: `ap kill auth` on dead session returns exit 0 (idempotent)
 - AGENTS.md exists and is under 100 lines
 
-### M0c: Agent Signals (2 days)
+### M0c: Agent Signals (DONE — basic dispatch; webhook/exec handlers deferred to M2)
 **Goal:** The 3 agent signals are parsed, validated, dispatched, and tracked via event-sourced lifecycle. Resume doesn't duplicate side effects.
 
 What to build:
@@ -1564,7 +1647,7 @@ What to build:
 - Integration: Spawn respects `max_child_sessions` limit
 - Integration: Spawn uses `session.Start()` which delegates to the Launcher (separate process)
 
-### M1: Judgment Termination (1 day)
+### M1: Judgment Termination (DONE)
 **Goal:** Judgment-based loops work. `ap run elegance my-session` runs until consensus.
 
 What to build:
@@ -1582,7 +1665,7 @@ What to build:
 - Handles judge failures gracefully
 - Falls back to fixed iteration on repeated judge errors
 
-### M2: Codex Provider + Signal Handlers (1-2 days)
+### M2: Codex Provider + Signal Handlers (PARTIAL — Codex done, handlers pending)
 **Goal:** `ap run ralph --provider codex my-session` works. Signal handlers are configurable.
 
 What to build:
@@ -1607,7 +1690,7 @@ What to build:
 
 **Test:** Same prompt runs with both `--provider claude` and `--provider codex`. Codex exits cleanly with code 0. Webhook handler delivers escalation to a test HTTP server. Handler failure falls through gracefully.
 
-### M3: Multi-Stage Pipelines (2 days)
+### M3: Multi-Stage Pipelines (DONE)
 **Goal:** `ap run "improve-plan:5 -> refine-tasks:5" my-session` and `ap run refine.yaml my-session` both work. This completes the core product — everything is a pipeline.
 
 What to build:
@@ -1621,7 +1704,7 @@ What to build:
 - `ap run refine.yaml test` produces identical behavior
 - Spawn signal with `"run": "a:5 -> b:3"` creates multi-stage child session
 
-### M4: Parallel Blocks (1 day)
+### M4: Parallel Blocks (DONE)
 **Goal:** Parallel provider execution works. Completes full feature parity with the Bash engine.
 
 What to build:
@@ -1862,11 +1945,11 @@ That's the whole product. Everything else is iteration.
 
 ---
 
-## Rev 10 Additions (2026-03-03)
+## Rev 10 Additions (2026-03-03) — Status Update
 
-The following four features were identified during Agent Relay design review and incorporated into the plan. All fit cleanly into existing or new milestones.
+The following four features were identified during Agent Relay design review. Two are now implemented, two remain.
 
-### Addition 1: Live Message Bus (`internal/messages`)
+### Addition 1: Live Message Bus (`internal/messages`) — DONE
 
 **What:** Agents can communicate mid-iteration via a shared append-only JSONL file per session (`.ap/runs/{session}/messages.jsonl`). The runner tails this file for structured messages. Agents in parallel blocks can read each other's messages in real-time.
 
@@ -1882,7 +1965,7 @@ The following four features were identified during Agent Relay design review and
 
 **Milestone:** M4 (parallel blocks) — message bus only matters when multiple agents run concurrently. Added as a sub-task of parallel block implementation.
 
-### Addition 2: `ap watch` Command
+### Addition 2: `ap watch` Command — DONE
 
 **What:** Reactive event subscriptions. Tail `events.jsonl` and execute commands when specific events fire.
 
@@ -1903,7 +1986,7 @@ hooks:
 
 **Milestone:** M5 (new). Not blocking anything else. Low effort (~0.5 day) since `ap logs -f` already does event tailing — `ap watch` adds filtering + exec dispatch.
 
-### Addition 3: Race Termination Strategy
+### Addition 3: Race Termination Strategy — NOT YET IMPLEMENTED
 
 **What:** Spawn N agents on the same problem concurrently, take the first one that writes `decision: stop` with a successful result, kill the rest.
 
@@ -1921,7 +2004,7 @@ termination:
 
 **Milestone:** M5 (alongside `ap watch`). Low effort (~0.5 day) since it builds on parallel block infrastructure.
 
-### Addition 4: Auto-Retry with Backoff
+### Addition 4: Auto-Retry with Backoff — NOT YET IMPLEMENTED
 
 **What:** Instead of the current "fail fast, resume smart" behavior, stages can optionally configure automatic retry on provider failure.
 
@@ -1953,3 +2036,119 @@ retry:
 | M4 | Parallel blocks + **live message bus** | 1.5 days | +0.5 day for message bus |
 | **M5** | **`ap watch` + race termination** | **1 day** | **NEW milestone** |
 | **Total** | | **~15.5 days** | **+1.5 days from Rev 9's ~14 days** |
+
+---
+
+## Remaining Work (Rev 11, 2026-03-05)
+
+The following items remain unimplemented. Each is scoped for independent implementation.
+
+### R1: Pluggable Signal Handler Chain (from M2)
+
+**Status:** Escalation currently always pauses + prints to stdout. Webhook and exec handlers are designed but not wired.
+
+**What to build:**
+- [ ] `internal/signals/handlers/` — handler interface + implementations
+  - `webhook.go` — HTTP POST with JSON payload, timeout, retry
+  - `exec.go` — run command with argv array + variable expansion
+  - `stdout.go` — print to terminal (always-on backstop, already exists)
+- [ ] Handler chain configuration in `~/.config/ap/config.yaml` (schema defined in plan)
+- [ ] `--on-escalate` CLI flag for one-off webhook/exec configuration
+- [ ] Graceful failure: log warning via `signal.handler.error` event, fall through to next handler
+
+**Test:**
+- Webhook handler delivers escalation to a test HTTP server
+- Handler failure falls through gracefully (logged, not fatal)
+- Handler timeout (30s default) fires correctly
+
+**Effort:** ~1 day
+
+### R2: Ephemeral Callback Listener (from M2)
+
+**Status:** Designed in detail but not implemented.
+
+**What to build:**
+- [ ] Ephemeral HTTP listener on `127.0.0.1:0` (OS-assigned port)
+- [ ] `callback_url` in outbound webhook payloads
+- [ ] `callback_token` generation for non-localhost callbacks (crypto/rand, 32 bytes)
+- [ ] Single endpoint: `POST /resume {"context": "string"}`
+- [ ] Timeout behavior: configurable per-escalation, default 5m
+- [ ] `callback_host` config option for Tailscale/tunnel scenarios
+
+**Test:**
+- Listener starts, receives POST, resumes session
+- Token validation works for non-localhost
+- Timeout fires and falls through to manual `ap resume`
+
+**Effort:** ~0.5 day
+
+### R3: Race Termination Strategy (Rev 10 Addition 3)
+
+**Status:** Designed but not implemented. Depends on `internal/parallel` (already done).
+
+**What to build:**
+- [ ] `internal/termination/race.go` — new strategy type
+- [ ] Monitor parallel agents' status files
+- [ ] On first successful `decision: stop`, kill remaining agents via process group signals
+- [ ] Integration with `stage.yaml` termination config: `type: race`, `agents: N`, `accept: first`
+
+**Test:**
+- 3 parallel agents, first to write `stop` wins, others are killed
+- Handles case where winner crashes (fall back to next finisher)
+
+**Effort:** ~0.5 day
+
+### R4: Auto-Retry with Backoff (Rev 10 Addition 4)
+
+**Status:** Designed but not implemented.
+
+**What to build:**
+- [ ] Retry logic in `internal/runner` iteration loop
+- [ ] Exponential backoff: `backoff` base × 2^attempt
+- [ ] `iteration.retried` event type
+- [ ] `on_exhausted` policy: `abort` (default) or `pause`
+- [ ] `stage.yaml` config: `retry: { max_attempts: 3, backoff: 5s, on_exhausted: pause }`
+
+**Test:**
+- Provider failure triggers retry with correct delay
+- Retry exhaustion triggers `on_exhausted` policy
+- `iteration.retried` events are emitted correctly
+
+**Effort:** ~0.5 day
+
+### R5: Beads Cleanup on Crash/Kill
+
+**Status:** Mentioned in plan but not implemented.
+
+**What to build:**
+- [ ] On session crash/kill, runner releases `in_progress` beads labeled `pipeline/{session}` back to `open`
+- [ ] Integration with `bd` CLI (shell out to `bd` with appropriate flags)
+- [ ] Must be idempotent (running cleanup twice is safe)
+
+**Test:**
+- Simulate crash → verify beads are released
+- No-op if no beads are in progress
+
+**Effort:** ~0.5 day
+
+### R6: YAML Pipeline E2E Hardening
+
+**Status:** `internal/compile` works. End-to-end YAML pipeline tests need expansion.
+
+**What to build:**
+- [ ] E2E test: `ap run refine.yaml test-session` with mock provider — verify multi-node execution
+- [ ] E2E test: verify stage-to-stage output passing (`inputs.from`, `inputs.select`)
+- [ ] E2E test: parallel blocks in YAML with provider isolation
+- [ ] E2E test: error handling — stage failure mid-pipeline
+- [ ] E2E test: pipeline with mixed termination strategies (fixed + judgment)
+
+**Effort:** ~1 day
+
+### Priority Order
+
+1. **R6** (YAML E2E hardening) — validates the core product claim "everything is a pipeline"
+2. **R1** (Signal handlers) — enables integration with external systems (OpenClaw, Slack)
+3. **R4** (Auto-retry) — practical resilience for production use
+4. **R2** (Callback listener) — automated escalation response
+5. **R5** (Beads cleanup) — operational correctness
+6. **R3** (Race termination) — advanced feature, can wait

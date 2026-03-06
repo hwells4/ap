@@ -10,15 +10,15 @@ Binary: `ap`. Module: `github.com/hwells4/ap`.
 | Start with fixed iterations | `ap run <stage>:<n> <session>` |
 | Explain spec only | `ap run <spec> <session> --explain-spec --json` |
 | List available stages | `ap list [--json]` |
-| Check session snapshot | `ap status <session> [--json]` |
-| Resume paused/failed session | `ap resume <session> [--context "..."] [--json]` |
-| Terminate a session | `ap kill <session> [--json]` |
-| Read session events | `ap logs <session> [-f] [--json]` |
+| Check session snapshot | `ap status <session> [--project-root DIR] [--json]` |
+| Resume paused/failed session | `ap resume <session> [--context "..."] [--project-root DIR] [--json]` |
+| Terminate a session | `ap kill <session> [--project-root DIR] [--json]` |
+| Read session events | `ap logs <session> [-f] [--project-root DIR] [--json]` |
 | Watch sessions live | `ap watch [--json]` |
 | Query sessions | `ap query sessions [--status STATUS] [--json]` |
 | Query iterations | `ap query iterations --session NAME [--stage NAME] [--json]` |
 | Query events | `ap query events --session NAME [--type TYPE] [--after SEQ] [--json]` |
-| Clean run artifacts | `ap clean <session>|--all [--force] [--json]` |
+| Clean run artifacts | `ap clean <session>|--all [--force] [--project-root DIR] [--json]` |
 
 ## Storage Model
 - All session state lives in a single **SQLite database** (`.ap/ap.db`, WAL mode).
@@ -27,6 +27,12 @@ Binary: `ap`. Module: `github.com/hwells4/ap`.
 - The `iterations` table stores per-iteration decision, summary, exit code, and signals.
 - The `outputs` table stores stdout/stderr/context_json paired 1:1 with iterations.
 - Decision authority is the SQLite store (not stdout/stderr or any JSON file on disk).
+- A **machine-wide control plane** (`~/.local/state/ap/control.db`) indexes sessions across all projects. This enables cross-project session lookup via `--project-root` or automatic resolution when a session name is unique.
+- **Session state machine** (enforced at store level):
+  - `running` → `paused`, `completed`, `failed`, `aborted`
+  - `paused` → `running`, `aborted`
+  - `failed` → `running`, `aborted`
+  - `completed` and `aborted` are **terminal** (no further transitions).
 
 ## Output Contract
 - JSON mode is enabled by `--json`, non-TTY stdout, or `AP_OUTPUT=json`.
@@ -71,8 +77,16 @@ Binary: `ap`. Module: `github.com/hwells4/ap`.
 - YAML pipeline file: `./pipeline.yaml`
 - Prompt file: `./prompt.md`
 
+## Cross-Project Session Resolution
+- Commands that take `<session>` support `--project-root DIR` to target a specific project.
+- Without `--project-root`, resolution order: local store → control plane index → error.
+- If the session name is unique across all projects, it resolves automatically.
+- If ambiguous (same name in multiple projects), returns `SESSION_AMBIGUOUS` with suggestions.
+
 ## Agent Notes
-- Internal launcher entrypoint is `ap _run --session <name> --request <path>`.
+- Internal launcher entrypoint is `ap _run --session <name> --request <path> [--resume]`.
 - Decision authority is the SQLite store (`.ap/ap.db`), not stdout/stderr.
 - Preserve and inspect `corrections[]` for deterministic machine workflows.
 - `run_request.json` is also persisted to disk in `.ap/runs/<session>/` for crash recovery.
+- `ap resume` re-launches the session process via the launcher (tmux/process). It also cleans orphaned iterations (stuck in "started" from a prior crash) before resuming.
+- Process-level mutual exclusion uses `flock` on `.ap/locks/{session}.lock` (not the SQLite `locks` table).
