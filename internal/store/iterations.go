@@ -44,6 +44,7 @@ type IterationRow struct {
 	SignalsJSON  string
 	StartedAt    string
 	CompletedAt  *string
+	DurationMS   int64
 	WorkManifest string
 }
 
@@ -110,10 +111,10 @@ func (s *Store) CompleteIteration(ctx context.Context, input IterationComplete) 
 	var iterID int64
 	err = tx.QueryRowContext(ctx, `
 		UPDATE iterations
-		SET status = 'completed', decision = ?, summary = ?, exit_code = ?, signals_json = ?, completed_at = ?
+		SET status = 'completed', decision = ?, summary = ?, exit_code = ?, signals_json = ?, completed_at = ?, duration_ms = ?
 		WHERE session_name = ? AND stage_name = ? AND iteration = ?
 		RETURNING id`,
-		input.Decision, input.Summary, input.ExitCode, input.SignalsJSON, now,
+		input.Decision, input.Summary, input.ExitCode, input.SignalsJSON, now, input.DurationMS,
 		input.SessionName, input.StageName, input.Iteration,
 	).Scan(&iterID)
 	if err != nil {
@@ -234,7 +235,7 @@ func (s *Store) GetIterations(ctx context.Context, sessionName string, stageFilt
 	if stageFilter != "" {
 		query = `SELECT i.id, i.session_name, i.stage_name, i.iteration, i.status,
 		                i.decision, i.summary, i.exit_code, i.signals_json,
-		                i.started_at, i.completed_at,
+		                i.started_at, i.completed_at, i.duration_ms,
 		                COALESCE(o.context_json, '{}') AS work_manifest
 		         FROM iterations i
 		         LEFT JOIN outputs o ON o.iteration_id = i.id
@@ -243,7 +244,7 @@ func (s *Store) GetIterations(ctx context.Context, sessionName string, stageFilt
 	} else {
 		query = `SELECT i.id, i.session_name, i.stage_name, i.iteration, i.status,
 		                i.decision, i.summary, i.exit_code, i.signals_json,
-		                i.started_at, i.completed_at,
+		                i.started_at, i.completed_at, i.duration_ms,
 		                COALESCE(o.context_json, '{}') AS work_manifest
 		         FROM iterations i
 		         LEFT JOIN outputs o ON o.iteration_id = i.id
@@ -263,7 +264,7 @@ func (s *Store) GetIterations(ctx context.Context, sessionName string, stageFilt
 		if err := rows.Scan(
 			&r.ID, &r.SessionName, &r.StageName, &r.Iteration, &r.Status,
 			&r.Decision, &r.Summary, &r.ExitCode, &r.SignalsJSON,
-			&r.StartedAt, &r.CompletedAt, &r.WorkManifest,
+			&r.StartedAt, &r.CompletedAt, &r.DurationMS, &r.WorkManifest,
 		); err != nil {
 			return nil, fmt.Errorf("store: get iterations scan: %w", err)
 		}

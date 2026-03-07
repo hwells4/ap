@@ -536,6 +536,7 @@ func iterationRowToMap(r store.IterationRow) map[string]any {
 		"decision":     r.Decision,
 		"summary":      r.Summary,
 		"exit_code":    r.ExitCode,
+		"duration_ms":  r.DurationMS,
 		"started_at":   r.StartedAt,
 	}
 	if r.CompletedAt != nil {

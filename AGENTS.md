@@ -147,7 +147,7 @@ Signals are directives inside `ap-result` that trigger runner-side actions.
 |------|--------|-------------|
 | `fixed` | `iterations: N` | Stop after N iterations. Default: 1. Immediate stop on `"stop"` or `"error"` decision. |
 | `judgment` | `consensus: 2, min_iterations: 3` | Judge model evaluates after each iteration. Needs N consecutive `"stop"` verdicts. Falls back to fixed after 3 judge failures. |
-| `race` | `agents: 2, accept: first` | N concurrent providers run in parallel. First successful result wins. |
+| `race` | `agents: 2, accept: first` | *(planned)* N concurrent providers run in parallel. First successful result wins. |
 
 ## Retry
 

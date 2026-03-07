@@ -85,12 +85,45 @@ Stages are reusable prompt + config bundles. Builtins are embedded; project stag
 
 All commands support `--json` for machine output.
 
+## Lifecycle Hooks
+
+Shell commands executed at key points in the session lifecycle. Hooks automate git workflows, notifications, and cleanup without the agent needing to know about them.
+
+| Hook | When |
+|------|------|
+| `pre_session` | Once, before first iteration |
+| `pre_iteration` | Before each iteration starts |
+| `pre_stage` | Before a pipeline stage begins |
+| `post_iteration` | After each completed iteration |
+| `post_stage` | After a pipeline stage completes |
+| `post_session` | After session completes successfully |
+| `on_failure` | When session fails |
+
+Configure hooks globally (`~/.config/ap/config.yaml`), in pipeline files, or per-stage (`stage.yaml`). Stage hooks override pipeline hooks, which override global hooks.
+
+```yaml
+# ~/.config/ap/config.yaml
+hooks:
+  pre_session: "git checkout -b ap/${SESSION} 2>/dev/null || git checkout ap/${SESSION}"
+  post_iteration: 'git add -A && git diff --cached --quiet || git commit -m "$AP_SUMMARY"'
+  post_session: "git push -u origin HEAD && gh pr create --fill"
+  on_failure: 'git stash -u -m "ap/${SESSION} failed" 2>/dev/null || true'
+```
+
+Environment variables `AP_SESSION`, `AP_STAGE`, `AP_ITERATION`, `AP_STATUS`, and `AP_SUMMARY` are available in all hooks. `$AP_SUMMARY` contains the agent's iteration summary — useful as a commit message.
+
+The builtin `codegen` stage ships with a full git lifecycle: branch creation, auto-commit per iteration, and PR creation on completion.
+
+```bash
+ap run codegen:10 my-feature -c "Implement user authentication"
+```
+
 ## Providers
 
 | Provider | Aliases | Default |
 |----------|---------|---------|
 | `claude` | `anthropic` | Yes |
-| `codex` | — | No |
+| `codex` | `openai` | No |
 
 ```bash
 ap run ralph:10 my-session --provider codex -m o4-mini

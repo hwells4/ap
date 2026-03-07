@@ -57,7 +57,7 @@ type SignalHandler struct {
 type LimitsConfig struct {
 	MaxChildSessions       int `yaml:"max_child_sessions"`
 	MaxSpawnDepth          int `yaml:"max_spawn_depth"`
-	MaxConcurrentProviders int `yaml:"max_concurrent_providers"`
+	MaxConcurrentProviders int `yaml:"max_concurrent_providers"` // reserved for race termination (not yet wired)
 }
 
 // HooksConfig defines shell hooks consumed by watch/event features and the runner.

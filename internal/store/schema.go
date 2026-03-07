@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 const ddl = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -115,6 +115,9 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec("CREATE INDEX IF NOT EXISTS idx_sessions_project_key ON sessions(project_key)"); err != nil {
 		return fmt.Errorf("store: migrate sessions project_key index: %w", err)
 	}
+	if err := s.ensureColumn("iterations", "duration_ms", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 
 	// Upsert schema version
 	_, err := s.db.Exec("DELETE FROM schema_version")
@@ -129,16 +132,20 @@ func (s *Store) migrate() error {
 }
 
 func (s *Store) ensureSessionColumn(name, ddlType string) error {
-	has, err := s.tableHasColumn("sessions", name)
+	return s.ensureColumn("sessions", name, ddlType)
+}
+
+func (s *Store) ensureColumn(table, name, ddlType string) error {
+	has, err := s.tableHasColumn(table, name)
 	if err != nil {
-		return fmt.Errorf("store: inspect column %q: %w", name, err)
+		return fmt.Errorf("store: inspect column %s.%s: %w", table, name, err)
 	}
 	if has {
 		return nil
 	}
-	query := fmt.Sprintf("ALTER TABLE sessions ADD COLUMN %s %s", name, ddlType)
+	query := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, name, ddlType)
 	if _, err := s.db.Exec(query); err != nil {
-		return fmt.Errorf("store: add sessions.%s: %w", name, err)
+		return fmt.Errorf("store: add %s.%s: %w", table, name, err)
 	}
 	return nil
 }
