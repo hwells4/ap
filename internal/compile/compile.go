@@ -94,6 +94,21 @@ type SwarmStage struct {
 	Termination Termination `yaml:"termination,omitempty" json:"termination,omitempty"`
 }
 
+// Key returns a display name for the stage, preferring Name > ID > Stage,
+// falling back to "stage-{index+1}".
+func (s SwarmStage) Key(index int) string {
+	if name := strings.TrimSpace(s.Name); name != "" {
+		return name
+	}
+	if id := strings.TrimSpace(s.ID); id != "" {
+		return id
+	}
+	if stageName := strings.TrimSpace(s.Stage); stageName != "" {
+		return stageName
+	}
+	return fmt.Sprintf("stage-%d", index+1)
+}
+
 type pipelineDocument struct {
 	Name        string            `yaml:"name"`
 	Description string            `yaml:"description,omitempty"`

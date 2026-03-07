@@ -234,16 +234,7 @@ func (e *swarmExecutor) resolveProvider(spec compile.ProviderConfig) (provider.P
 
 // swarmStageName returns the stage name for a swarm stage.
 func swarmStageName(ps compile.SwarmStage, index int) string {
-	if name := strings.TrimSpace(ps.Name); name != "" {
-		return name
-	}
-	if id := strings.TrimSpace(ps.ID); id != "" {
-		return id
-	}
-	if stageName := strings.TrimSpace(ps.Stage); stageName != "" {
-		return stageName
-	}
-	return fmt.Sprintf("stage-%d", index+1)
+	return ps.Key(index)
 }
 
 // resolveSwarmPrompt resolves a prompt template for a swarm provider iteration.
@@ -279,8 +270,8 @@ func writeProviderHistory(ctx context.Context, s *store.Store, session, compound
 		if summary == "" {
 			summary = "(no summary)"
 		}
-		if len(summary) > 200 {
-			summary = summary[:200] + "..."
+		if runes := []rune(summary); len(runes) > 200 {
+			summary = string(runes[:200]) + "..."
 		}
 		buf.WriteString(fmt.Sprintf("- **Iteration %d** [%s]: %s\n", r.Iteration, r.Decision, summary))
 	}

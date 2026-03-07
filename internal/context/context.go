@@ -207,8 +207,13 @@ func GenerateContext(session string, iteration int, stageConfig StageConfig, run
 	if err != nil {
 		return "", fmt.Errorf("marshal context: %w", err)
 	}
-	if err := os.WriteFile(manifestPath, append(payload, '\n'), 0o644); err != nil {
+	// Write to temp file then rename for atomic update.
+	tmpPath := manifestPath + ".tmp"
+	if err := os.WriteFile(tmpPath, append(payload, '\n'), 0o644); err != nil {
 		return "", fmt.Errorf("write context: %w", err)
+	}
+	if err := os.Rename(tmpPath, manifestPath); err != nil {
+		return "", fmt.Errorf("rename context: %w", err)
 	}
 	return manifestPath, nil
 }

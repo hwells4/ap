@@ -251,12 +251,13 @@ func NormalizeCode(code string) string {
 	if code == "" {
 		return "GENERAL_ERROR"
 	}
+	runes := []rune(code)
 	var b strings.Builder
 	lastUnderscore := false
-	for i, r := range code {
+	for i, r := range runes {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
 			if unicode.IsUpper(r) && i > 0 && !lastUnderscore {
-				prev := rune(code[i-1])
+				prev := runes[i-1]
 				if unicode.IsLower(prev) || unicode.IsDigit(prev) {
 					b.WriteByte('_')
 				}

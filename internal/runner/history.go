@@ -39,8 +39,8 @@ func writeHistory(ctx context.Context, s *store.Store, session, path string) {
 			summary = "(no summary)"
 		}
 		// Truncate long summaries to keep history compact.
-		if len(summary) > 200 {
-			summary = summary[:200] + "..."
+		if runes := []rune(summary); len(runes) > 200 {
+			summary = string(runes[:200]) + "..."
 		}
 		buf.WriteString(fmt.Sprintf("- **Iteration %d** [%s]: %s\n", r.Iteration, r.Decision, summary))
 	}

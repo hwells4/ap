@@ -168,8 +168,9 @@ func isClosingFence(line string, minTicks int) bool {
 
 func tail(s string, maxLen int) string {
 	s = strings.TrimSpace(s)
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
-	return s[len(s)-maxLen:]
+	return string(runes[len(runes)-maxLen:])
 }

@@ -624,16 +624,7 @@ func stageDirectoryName(index int, stage compile.SwarmStage) string {
 }
 
 func parallelStageKey(stage compile.SwarmStage, index int) string {
-	if name := strings.TrimSpace(stage.Name); name != "" {
-		return name
-	}
-	if id := strings.TrimSpace(stage.ID); id != "" {
-		return id
-	}
-	if stageName := strings.TrimSpace(stage.Stage); stageName != "" {
-		return stageName
-	}
-	return fmt.Sprintf("stage-%d", index+1)
+	return stage.Key(index)
 }
 
 func formatBlockDirName(index int, blockID string) string {
