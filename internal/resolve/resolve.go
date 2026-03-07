@@ -101,8 +101,10 @@ func VarsFromContext(path string) (Vars, error) {
 	}
 
 	iteration := ""
+	index := ""
 	if payload.Iteration != nil {
 		iteration = strconv.Itoa(*payload.Iteration)
+		index = strconv.Itoa(*payload.Iteration - 1)
 	}
 
 	vars := Vars{
@@ -113,6 +115,7 @@ func VarsFromContext(path string) (Vars, error) {
 		OUTPUT_PATH:   payload.Paths.OutputPath,
 		SESSION:       payload.Session,
 		ITERATION:     iteration,
+		INDEX:         index,
 		PROGRESS_FILE: payload.Paths.Progress,
 		MESSAGES:      payload.Paths.Messages,
 	}

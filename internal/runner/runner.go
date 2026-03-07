@@ -197,6 +197,16 @@ type Config struct {
 
 	// HookTimeout bounds lifecycle hook execution. Zero uses default (60s).
 	HookTimeout time.Duration
+
+	// IterationTimeout bounds a single provider execution. Zero means no
+	// timeout (the provider runs until it finishes or the session context
+	// is cancelled). When exceeded, the iteration is treated as a provider
+	// failure and follows the retry/on_exhausted policy.
+	IterationTimeout time.Duration
+
+	// InjectedContext seeds the ${CONTEXT} variable for the first iteration.
+	// Used by resume --context to pass override text from the user.
+	InjectedContext string
 }
 
 // Result captures the outcome of a run.
@@ -332,7 +342,7 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 	var lastResult extract.Result
 	completed := 0
 	spawnedChildren := 0
-	injectedContext := "" // text from inject signal, consumed once
+	injectedContext := cfg.InjectedContext // seeded from resume --context or inject signal
 	var summaries []string
 
 	for i := 1; i <= fixed.Target(); i++ {
@@ -414,7 +424,7 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 		cursorJSON := marshalCursorJSON(i, cfg.Provider.Name(), "", 0)
 
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
-			provResult, provErr = cfg.Provider.Execute(ctx, req)
+			provResult, provErr = executeWithTimeout(ctx, cfg.Provider, req, cfg.IterationTimeout)
 			if provErr == nil {
 				// Provider succeeded — extract decision from stdout.
 				iterResult, _, _ = extract.Extract(provResult.Stdout, provResult.ExitCode)
@@ -516,6 +526,7 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 			ContextJSON:  string(manifestJSON),
 			ProviderName: cfg.Provider.Name(),
 			DurationMS:   time.Since(iterStartTime).Milliseconds(),
+			StreamJSON:   provResult.StreamJSON,
 		})
 
 		// Run post_iteration hook.
@@ -756,7 +767,7 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 
 	completed := 0
 	spawnedChildren := 0
-	injectedContext := ""
+	injectedContext := cfg.InjectedContext
 
 	for nodeIdx, node := range nodes {
 		// Handle swarm nodes.
@@ -907,7 +918,7 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 				Env:     buildEnv(nodeCfg, i),
 			}
 
-			provResult, provErr := nodeCfg.Provider.Execute(ctx, req)
+			provResult, provErr := executeWithTimeout(ctx, nodeCfg.Provider, req, cfg.IterationTimeout)
 			if provErr != nil {
 				emitEvent(ctx, cfg, store.TypeIterationFailed, cursorJSON, map[string]any{
 					"iteration": i,
@@ -957,6 +968,7 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 				ContextJSON:  string(nodeManifestJSON),
 				ProviderName: cfg.Provider.Name(),
 				DurationMS:   time.Since(nodeIterStartTime).Milliseconds(),
+				StreamJSON:   provResult.StreamJSON,
 			}); err != nil {
 				emitEvent(ctx, cfg, store.TypeError, cursorJSON, map[string]any{
 					"error":     err.Error(),
@@ -1303,12 +1315,14 @@ func writeIterationOutput(path string, iterResult extract.Result, provResult pro
 	if path == "" {
 		return nil
 	}
-	content := strings.TrimSpace(iterResult.Summary)
-	if content == "" {
-		content = strings.TrimSpace(provResult.Stdout)
-	}
+	// Prefer full stdout so subsequent iterations see complete context,
+	// not just the one-line summary from ap-result.
+	content := strings.TrimSpace(provResult.Stdout)
 	if content == "" {
 		content = strings.TrimSpace(provResult.Output)
+	}
+	if content == "" {
+		content = strings.TrimSpace(iterResult.Summary)
 	}
 	if diffStat != "" {
 		content += "\n\n## Files Changed\n\n```\n" + diffStat + "\n```"
@@ -1522,4 +1536,20 @@ func marshalCursorJSON(iteration int, providerName, nodePath string, nodeRun int
 		return "{}"
 	}
 	return string(data)
+}
+
+// executeWithTimeout wraps provider execution with an optional timeout.
+// When timeout is zero or negative, the parent context is used as-is.
+func executeWithTimeout(ctx context.Context, prov provider.Provider, req provider.Request, timeout time.Duration) (provider.Result, error) {
+	if timeout <= 0 {
+		return prov.Execute(ctx, req)
+	}
+	iterCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result, err := prov.Execute(iterCtx, req)
+	if err != nil && iterCtx.Err() != nil && ctx.Err() == nil {
+		// The iteration timed out but the session context is still alive.
+		return result, fmt.Errorf("iteration timed out after %s: %w", timeout, err)
+	}
+	return result, err
 }

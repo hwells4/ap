@@ -41,6 +41,8 @@ type RunRequestFile struct {
 	ProjectKey     string            `json:"project_key,omitempty"`
 	TargetSource   string            `json:"target_source,omitempty"`
 	OutputPath     string            `json:"output_path,omitempty"`
+	SpawnDepth       int               `json:"spawn_depth,omitempty"`
+	ContextOverride  string            `json:"context_override,omitempty"`
 }
 
 // WriteRunRequest atomically writes a run_request.json file.
@@ -256,6 +258,8 @@ func runInternalRun(args []string, deps cliDeps) int {
 		OnEscalate:           req.OnEscalate,
 		SpawnMaxChildren:     limits.MaxChildSessions,
 		SpawnMaxDepth:        limits.MaxSpawnDepth,
+		SpawnDepth:           req.SpawnDepth,
+		InjectedContext:      req.ContextOverride,
 		EscalateHandlers:     escalateHandlers,
 		SpawnHandlers:        loadedConfig.SignalHandlers("spawn"),
 		SignalHandlerTimeout: loadedConfig.Signals.HandlerTimeout,
@@ -263,6 +267,7 @@ func runInternalRun(args []string, deps cliDeps) int {
 		ParentSession:        strings.TrimSpace(req.ParentSession),
 		Hooks:                hooks,
 		HookTimeout:          hookTimeout,
+		IterationTimeout:     limits.IterationTimeout,
 	}
 
 	// Execute runner.

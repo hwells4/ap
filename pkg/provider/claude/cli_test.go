@@ -2,7 +2,6 @@ package claude
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,8 +71,8 @@ head -c 1048576 </dev/zero | tr '\0' 'b' >&2
 `)
 
 	result, err := cli.Execute(context.Background(), provider.Request{Prompt: "hello"})
-	if !errors.Is(err, internalexec.ErrOutputTruncated) {
-		t.Fatalf("expected output truncation error, got: %v", err)
+	if err != nil {
+		t.Fatalf("expected no error (truncation is informational), got: %v", err)
 	}
 	if len(result.Stdout) > int(internalexec.DefaultMaxOutput) {
 		t.Fatalf("stdout exceeded bound: %d > %d", len(result.Stdout), internalexec.DefaultMaxOutput)
@@ -125,6 +124,71 @@ func TestResolveModel_Aliases(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("ResolveModel(%q) = %q, want %q", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestExtractTextFromStreamJSON(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "empty",
+			input: "",
+			want:  "",
+		},
+		{
+			name:  "plain text passthrough",
+			input: "hello world\nfoo bar\n",
+			want:  "hello world\nfoo bar\n",
+		},
+		{
+			name: "stream-json with assistant text",
+			input: `{"type":"system","subtype":"init","session_id":"abc","model":"opus"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Hello, I found the bug."}]}}
+{"type":"result","session_id":"abc"}
+`,
+			want: "Hello, I found the bug.",
+		},
+		{
+			name: "multiple assistant events",
+			input: `{"type":"system","subtype":"init","session_id":"abc","model":"opus"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"First part. "}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Second part."}]}}
+{"type":"result","session_id":"abc"}
+`,
+			want: "First part. Second part.",
+		},
+		{
+			name: "assistant with ap-result block",
+			// In real stream-json, newlines inside text are JSON-escaped.
+			input: "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"abc\",\"model\":\"opus\"}\n" +
+				"{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Done.\\n```ap-result\\n{\\\"decision\\\":\\\"stop\\\",\\\"summary\\\":\\\"All done\\\"}\\n```\"}]}}\n" +
+				"{\"type\":\"result\",\"session_id\":\"abc\"}\n",
+			want: "Done.\n```ap-result\n{\"decision\":\"stop\",\"summary\":\"All done\"}\n```",
+		},
+		{
+			name:  "malformed json lines ignored",
+			input: "{bad json}\n{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}\n",
+			want:  "ok",
+		},
+		{
+			name: "no assistant events falls back to raw",
+			input: `{"type":"system","subtype":"init","session_id":"abc","model":"opus"}
+{"type":"result","session_id":"abc"}
+`,
+			want: "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"abc\",\"model\":\"opus\"}\n{\"type\":\"result\",\"session_id\":\"abc\"}\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractTextFromStreamJSON(tt.input)
+			if got != tt.want {
+				t.Errorf("extractTextFromStreamJSON():\n  got:  %q\n  want: %q", got, tt.want)
+			}
+		})
 	}
 }
 

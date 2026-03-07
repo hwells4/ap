@@ -167,10 +167,8 @@ func Run(ctx context.Context, cmd *exec.Cmd, opts Options) (*Result, error) {
 		Duration:  duration,
 	}
 
-	// Return appropriate error
-	if truncated && waitErr == nil {
-		return result, ErrOutputTruncated
-	}
+	// Truncation is informational, not a failure. The Truncated field on the
+	// result indicates the condition; callers that care can check it.
 	return result, waitErr
 }
 

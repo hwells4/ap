@@ -55,9 +55,10 @@ type SignalHandler struct {
 
 // LimitsConfig defines operational limits used by the runner.
 type LimitsConfig struct {
-	MaxChildSessions       int `yaml:"max_child_sessions"`
-	MaxSpawnDepth          int `yaml:"max_spawn_depth"`
-	MaxConcurrentProviders int `yaml:"max_concurrent_providers"` // reserved for race termination (not yet wired)
+	MaxChildSessions       int           `yaml:"max_child_sessions"`
+	MaxSpawnDepth          int           `yaml:"max_spawn_depth"`
+	MaxConcurrentProviders int           `yaml:"max_concurrent_providers"` // reserved for race termination (not yet wired)
+	IterationTimeout       time.Duration `yaml:"iteration_timeout"`
 }
 
 // HooksConfig defines shell hooks consumed by watch/event features and the runner.
@@ -172,6 +173,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Limits.MaxConcurrentProviders < 0 {
 		return fmt.Errorf("limits.max_concurrent_providers must be >= 0")
+	}
+	if c.Limits.IterationTimeout < 0 {
+		return fmt.Errorf("limits.iteration_timeout must be >= 0")
 	}
 
 	if err := validateHandlers("signals.escalate", c.Signals.Escalate); err != nil {

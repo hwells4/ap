@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hwells4/ap/internal/fsutil"
+	"github.com/hwells4/ap/internal/resolve"
 )
 
 const (
@@ -164,11 +165,19 @@ func GenerateContext(session string, iteration int, stageConfig StageConfig, run
 		commands = map[string]any{}
 	}
 
-	// Resolve template variables in OutputPath (e.g. ${SESSION}, ${ITERATION}).
+	// Resolve ALL template variables in OutputPath (not just SESSION/ITERATION).
 	resolvedOutputPath := stageConfig.OutputPath
 	if resolvedOutputPath != "" {
-		resolvedOutputPath = strings.ReplaceAll(resolvedOutputPath, "${SESSION}", session)
-		resolvedOutputPath = strings.ReplaceAll(resolvedOutputPath, "${ITERATION}", fmt.Sprintf("%d", iteration))
+		vars := resolve.Vars{
+			SESSION:   session,
+			ITERATION: fmt.Sprintf("%d", iteration),
+			INDEX:     fmt.Sprintf("%d", iteration-1),
+			PROGRESS:  progressFile,
+			HISTORY:   historyFile,
+			OUTPUT:    outputFile,
+			MESSAGES:  messagesFile,
+		}
+		resolvedOutputPath = resolve.ResolveTemplate(resolvedOutputPath, vars)
 	}
 
 	manifest := ContextManifest{

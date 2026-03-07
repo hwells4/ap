@@ -29,6 +29,7 @@ type IterationComplete struct {
 	ContextJSON  string
 	ProviderName string
 	DurationMS   int64
+	StreamJSON   string
 }
 
 // IterationRow represents a row from the iterations table.
@@ -122,9 +123,9 @@ func (s *Store) CompleteIteration(ctx context.Context, input IterationComplete) 
 	}
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO outputs (iteration_id, stdout, stderr, context_json)
-		VALUES (?, ?, ?, ?)`,
-		iterID, input.Stdout, input.Stderr, input.ContextJSON,
+		INSERT INTO outputs (iteration_id, stdout, stderr, context_json, stream_json)
+		VALUES (?, ?, ?, ?, ?)`,
+		iterID, input.Stdout, input.Stderr, input.ContextJSON, input.StreamJSON,
 	)
 	if err != nil {
 		return fmt.Errorf("store: insert output: %w", err)

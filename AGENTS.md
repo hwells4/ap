@@ -149,6 +149,15 @@ Signals are directives inside `ap-result` that trigger runner-side actions.
 | `judgment` | `consensus: 2, min_iterations: 3` | Judge model evaluates after each iteration. Needs N consecutive `"stop"` verdicts. Falls back to fixed after 3 judge failures. |
 | `race` | `agents: 2, accept: first` | *(planned)* N concurrent providers run in parallel. First successful result wins. |
 
+## Iteration Timeout
+
+Per-iteration time limit on provider execution. Configured in `~/.config/ap/config.yaml` under `limits.iteration_timeout`. When exceeded, the iteration is treated as a provider failure and follows the retry/on_exhausted policy.
+
+```yaml
+limits:
+  iteration_timeout: 30m   # 0 = no timeout (default)
+```
+
 ## Retry
 
 Per-iteration retry on provider failure:

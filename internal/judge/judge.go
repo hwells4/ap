@@ -134,15 +134,34 @@ func parseVerdict(output string) (Verdict, error) {
 	return v, nil
 }
 
-// extractJSON finds the first JSON object in the string.
+// extractJSON finds the first JSON object in the string, correctly handling
+// braces inside JSON string values (e.g. {"rationale": "fix the } bracket"}).
 func extractJSON(s string) string {
 	start := strings.Index(s, "{")
 	if start == -1 {
 		return ""
 	}
 	depth := 0
+	inString := false
+	escaped := false
 	for i := start; i < len(s); i++ {
-		switch s[i] {
+		if escaped {
+			escaped = false
+			continue
+		}
+		ch := s[i]
+		if ch == '\\' && inString {
+			escaped = true
+			continue
+		}
+		if ch == '"' {
+			inString = !inString
+			continue
+		}
+		if inString {
+			continue
+		}
+		switch ch {
 		case '{':
 			depth++
 		case '}':

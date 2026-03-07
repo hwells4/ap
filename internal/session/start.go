@@ -43,6 +43,7 @@ type StartOpts struct {
 	Context       string
 	InputFiles    []string
 	ParentSession string
+	SpawnDepth    int
 	Force         bool
 	Env           map[string]string
 	Executable    string
@@ -72,6 +73,7 @@ type runRequestFile struct {
 	ProjectKey     string             `json:"project_key,omitempty"`
 	TargetSource   string             `json:"target_source,omitempty"`
 	OutputPath     string             `json:"output_path,omitempty"`
+	SpawnDepth     int                `json:"spawn_depth,omitempty"`
 }
 
 // Start writes the session run request and delegates process creation to the
@@ -186,6 +188,7 @@ func Start(parsed spec.Spec, session string, opts StartOpts) (*Session, error) {
 		ProjectKey:     target.ProjectKey,
 		TargetSource:   target.Source,
 		OutputPath:     outputPath,
+		SpawnDepth:     opts.SpawnDepth,
 	}
 	if err := writeRunRequest(layout.RunRequestPath, request); err != nil {
 		return nil, err

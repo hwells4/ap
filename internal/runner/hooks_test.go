@@ -34,7 +34,9 @@ func TestRunHook_VariableSubstitution(t *testing.T) {
 		"STATUS":    "running",
 	}
 
-	cmd := "echo '${SESSION} ${STAGE} ${ITERATION} ${STATUS}' > " + markerPath
+	// ${VAR} substitutions are shell-quoted for safety. Use them as standalone
+	// arguments (not embedded inside other quotes).
+	cmd := "echo ${SESSION} ${STAGE} ${ITERATION} ${STATUS} > " + markerPath
 	err := RunHook(context.Background(), "test", cmd, dir, vars, 10*time.Second)
 	if err != nil {
 		t.Fatalf("RunHook: %v", err)
@@ -171,7 +173,8 @@ func TestRunHook_SummaryVariable(t *testing.T) {
 		"SUMMARY": "Implemented feature X and fixed bug Y",
 	}
 
-	cmd := "echo '${SUMMARY}' > " + markerPath
+	// ${SUMMARY} is shell-quoted, so use it as a standalone arg (no extra quoting).
+	cmd := "echo ${SUMMARY} > " + markerPath
 	err := RunHook(context.Background(), "test", cmd, dir, vars, 10*time.Second)
 	if err != nil {
 		t.Fatalf("RunHook: %v", err)

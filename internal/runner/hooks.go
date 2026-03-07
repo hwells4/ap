@@ -10,6 +10,7 @@ import (
 	"time"
 
 	apexec "github.com/hwells4/ap/internal/exec"
+	"github.com/hwells4/ap/internal/shell"
 	"github.com/hwells4/ap/internal/store"
 )
 
@@ -157,11 +158,12 @@ func RunHook(ctx context.Context, name, command, workDir string, vars map[string
 		return nil
 	}
 
-	// Substitute ${VAR} placeholders.
+	// Substitute ${VAR} placeholders with shell-escaped values to prevent
+	// injection via agent-controlled content (e.g. ${SUMMARY}).
 	if len(vars) > 0 {
 		pairs := make([]string, 0, len(vars)*2)
 		for k, v := range vars {
-			pairs = append(pairs, "${"+k+"}", v)
+			pairs = append(pairs, "${"+k+"}", shell.Quote(v))
 		}
 		command = strings.NewReplacer(pairs...).Replace(command)
 	}

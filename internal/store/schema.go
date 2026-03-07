@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 const ddl = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -116,6 +116,9 @@ func (s *Store) migrate() error {
 		return fmt.Errorf("store: migrate sessions project_key index: %w", err)
 	}
 	if err := s.ensureColumn("iterations", "duration_ms", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("outputs", "stream_json", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 

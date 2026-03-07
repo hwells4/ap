@@ -156,6 +156,7 @@ func processSpawnSignals(
 			Model:         cfg.Model,
 			Context:       spawnSignal.Context,
 			ParentSession: cfg.Session,
+			SpawnDepth:    cfg.SpawnDepth + 1,
 			Executable:    cfg.ExecutablePath,
 			Launcher:      cfg.Launcher,
 			LauncherOpts: session.StartOptions{

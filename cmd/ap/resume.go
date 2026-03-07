@@ -188,6 +188,11 @@ func resumeSessionStore(deps cliDeps, sessionStore *store.Store, ctx context.Con
 		))
 	}
 
+	// Inject context override into the run request so the runner can seed ${CONTEXT}.
+	if contextOverride != "" {
+		req.ContextOverride = contextOverride
+	}
+
 	// Determine the run directory and write run_request.json to disk.
 	runDir := req.RunDir
 	if runDir == "" {

@@ -2,7 +2,6 @@ package codex
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,7 +62,7 @@ echo "stderr-line" >&2
 }
 
 func TestExecuteCommandConstruction(t *testing.T) {
-	// Verify the command includes bypass and ephemeral flags.
+	// Verify the command includes exec subcommand, bypass, and ephemeral flags.
 	cli := newTestCLI(t, `
 cat >/dev/null
 echo "$@"
@@ -77,6 +76,9 @@ echo "$@"
 	}
 
 	args := result.Stdout
+	if !strings.HasPrefix(strings.TrimSpace(args), "exec ") {
+		t.Errorf("missing exec subcommand at start of args: %s", args)
+	}
 	if !strings.Contains(args, "--dangerously-bypass-approvals-and-sandbox") {
 		t.Errorf("missing --dangerously-bypass-approvals-and-sandbox flag in: %s", args)
 	}
@@ -233,8 +235,8 @@ head -c 1048576 </dev/zero | tr '\0' 'b' >&2
 `)
 
 	result, err := cli.Execute(context.Background(), provider.Request{Prompt: "hello"})
-	if !errors.Is(err, internalexec.ErrOutputTruncated) {
-		t.Fatalf("expected output truncation error, got: %v", err)
+	if err != nil {
+		t.Fatalf("expected no error (truncation is informational), got: %v", err)
 	}
 	if len(result.Stdout) > int(internalexec.DefaultMaxOutput) {
 		t.Fatalf("stdout exceeded bound: %d > %d", len(result.Stdout), internalexec.DefaultMaxOutput)

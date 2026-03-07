@@ -11,6 +11,7 @@ import (
 
 	"github.com/hwells4/ap/internal/config"
 	"github.com/hwells4/ap/internal/output"
+	"github.com/hwells4/ap/internal/shell"
 	"github.com/hwells4/ap/internal/store"
 )
 
@@ -195,20 +196,20 @@ func matchEventType(actual, pattern string) bool {
 
 func expandWatchVars(cmd, session string, evt map[string]any) string {
 	result := cmd
-	result = strings.ReplaceAll(result, "${SESSION}", session)
+	result = strings.ReplaceAll(result, "${SESSION}", shell.Quote(session))
 
 	eventType, _ := evt["type"].(string)
-	result = strings.ReplaceAll(result, "${EVENT}", eventType)
+	result = strings.ReplaceAll(result, "${EVENT}", shell.Quote(eventType))
 
 	if data, ok := evt["data"].(map[string]any); ok {
 		if reason, ok := data["reason"].(string); ok {
-			result = strings.ReplaceAll(result, "${REASON}", reason)
+			result = strings.ReplaceAll(result, "${REASON}", shell.Quote(reason))
 		}
 	}
 
 	if cursor, ok := evt["cursor"].(map[string]any); ok {
 		if iter, ok := cursor["iteration"].(float64); ok {
-			result = strings.ReplaceAll(result, "${ITERATION}", fmt.Sprintf("%d", int(iter)))
+			result = strings.ReplaceAll(result, "${ITERATION}", shell.Quote(fmt.Sprintf("%d", int(iter))))
 		}
 	}
 

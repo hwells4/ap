@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	osexec "os/exec"
@@ -164,7 +165,7 @@ func (c *CLI) Execute(ctx context.Context, req provider.Request) (provider.Resul
 		binary = DefaultBinary
 	}
 
-	args := []string{"--model", model, "--print"}
+	args := []string{"--model", model, "--print", "-", "--output-format", "stream-json", "--verbose"}
 	if c.SkipPermissions {
 		args = append(args, "--dangerously-skip-permissions")
 	}
@@ -182,26 +183,31 @@ func (c *CLI) Execute(ctx context.Context, req provider.Request) (provider.Resul
 	execResult, err := internalexec.Run(ctx, cmd, internalexec.DefaultOptions())
 	finished := time.Now()
 
-	stdout := ""
+	rawStdout := ""
 	stderr := ""
 	exitCode := -1
 	duration := finished.Sub(started)
 	if execResult != nil {
-		stdout = string(execResult.Stdout)
+		rawStdout = string(execResult.Stdout)
 		stderr = string(execResult.Stderr)
 		exitCode = execResult.ExitCode
 		duration = execResult.Duration
 	}
 
+	// The stdout is NDJSON (stream-json format). Extract the text content
+	// for decision extraction, and preserve the raw stream for monitoring.
+	textOutput := extractTextFromStreamJSON(rawStdout)
+
 	result := provider.Result{
-		Output:     stdout, // Legacy compatibility
-		Stdout:     stdout,
+		Output:     textOutput,
+		Stdout:     textOutput,
 		Stderr:     stderr,
 		ExitCode:   exitCode,
 		Model:      model,
 		StartedAt:  started,
 		FinishedAt: finished,
 		Duration:   duration,
+		StreamJSON: rawStdout,
 	}
 	if err != nil {
 		return result, err
@@ -227,6 +233,74 @@ func normalizeModel(model string) string {
 	default:
 		return lowered
 	}
+}
+
+// extractTextFromStreamJSON reconstructs plain text output from Claude's
+// stream-json NDJSON format. Each line is a JSON event; text content lives
+// inside "assistant" events under message.content[].text. If the input
+// doesn't look like NDJSON, it's returned as-is (graceful fallback).
+func extractTextFromStreamJSON(ndjson string) string {
+	if ndjson == "" {
+		return ""
+	}
+	// Quick check: if first non-empty line doesn't start with '{', this
+	// isn't stream-json — return as-is for backward compatibility.
+	for _, line := range strings.SplitN(ndjson, "\n", 2) {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			if trimmed[0] != '{' {
+				return ndjson
+			}
+			break
+		}
+	}
+
+	var texts []string
+	for _, line := range strings.Split(ndjson, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var event map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			continue
+		}
+
+		var eventType string
+		if raw, ok := event["type"]; ok {
+			_ = json.Unmarshal(raw, &eventType)
+		}
+		if eventType != "assistant" {
+			continue
+		}
+
+		// Parse message.content[] for text blocks.
+		msgRaw, ok := event["message"]
+		if !ok {
+			continue
+		}
+		var message struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		}
+		if err := json.Unmarshal(msgRaw, &message); err != nil {
+			continue
+		}
+		for _, block := range message.Content {
+			if block.Type == "text" && block.Text != "" {
+				texts = append(texts, block.Text)
+			}
+		}
+	}
+
+	if len(texts) == 0 {
+		// No assistant text found — fall back to raw output so extraction
+		// can still attempt to find ap-result blocks or use defaults.
+		return ndjson
+	}
+	return strings.Join(texts, "")
 }
 
 func formatEnv(env map[string]string) []string {

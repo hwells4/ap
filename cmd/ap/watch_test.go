@@ -132,7 +132,7 @@ func TestExpandWatchVars(t *testing.T) {
 	}
 
 	cmd := expandWatchVars("echo ${SESSION} ${EVENT} ${REASON} ${ITERATION}", "my-sess", evt)
-	want := "echo my-sess session.completed all done 5"
+	want := "echo 'my-sess' 'session.completed' 'all done' '5'"
 	if cmd != want {
 		t.Fatalf("expandWatchVars = %q, want %q", cmd, want)
 	}
@@ -146,7 +146,7 @@ func TestExpandWatchVars_MissingData(t *testing.T) {
 	}
 
 	cmd := expandWatchVars("echo ${SESSION} ${EVENT} ${REASON} ${ITERATION}", "sess", evt)
-	want := "echo sess session.started ${REASON} ${ITERATION}"
+	want := "echo 'sess' 'session.started' ${REASON} ${ITERATION}"
 	if cmd != want {
 		t.Fatalf("expandWatchVars = %q, want %q", cmd, want)
 	}
@@ -165,8 +165,8 @@ func TestExpandWatchVars_MultipleSameVar(t *testing.T) {
 	t.Parallel()
 	evt := map[string]any{"type": "session.completed"}
 	cmd := expandWatchVars("${SESSION}/${SESSION}", "abc", evt)
-	if cmd != "abc/abc" {
-		t.Fatalf("expandWatchVars = %q, want abc/abc", cmd)
+	if cmd != "'abc'/'abc'" {
+		t.Fatalf("expandWatchVars = %q, want 'abc'/'abc'", cmd)
 	}
 }
 
@@ -184,14 +184,14 @@ func TestExpandWatchVars_TableDriven(t *testing.T) {
 			cmd:     "echo ${SESSION}",
 			session: "test-run",
 			evt:     map[string]any{"type": "session.started"},
-			want:    "echo test-run",
+			want:    "echo 'test-run'",
 		},
 		{
 			name:    "event var only",
 			cmd:     "echo ${EVENT}",
 			session: "s",
 			evt:     map[string]any{"type": "signal.escalate"},
-			want:    "echo signal.escalate",
+			want:    "echo 'signal.escalate'",
 		},
 		{
 			name:    "reason from data",
@@ -201,7 +201,7 @@ func TestExpandWatchVars_TableDriven(t *testing.T) {
 				"type": "session.failed",
 				"data": map[string]any{"reason": "timeout"},
 			},
-			want: "log timeout",
+			want: "log 'timeout'",
 		},
 		{
 			name:    "iteration from cursor",
@@ -211,14 +211,14 @@ func TestExpandWatchVars_TableDriven(t *testing.T) {
 				"type":   "iteration.completed",
 				"cursor": map[string]any{"iteration": float64(42)},
 			},
-			want: "iter 42",
+			want: "iter '42'",
 		},
 		{
 			name:    "empty event map",
 			cmd:     "${SESSION}",
 			session: "x",
 			evt:     map[string]any{},
-			want:    "x",
+			want:    "'x'",
 		},
 	}
 	for _, tc := range cases {

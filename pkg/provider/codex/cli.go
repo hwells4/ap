@@ -167,8 +167,8 @@ func (c *CLI) Execute(ctx context.Context, req provider.Request) (provider.Resul
 		binary = DefaultBinary
 	}
 
-	// Build args: --model MODEL --dangerously-bypass-approvals-and-sandbox --ephemeral -
-	args := []string{"--model", model}
+	// Build args: exec --model MODEL --dangerously-bypass-approvals-and-sandbox --ephemeral -
+	args := []string{"exec", "--model", model}
 	if c.Bypass {
 		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 	}

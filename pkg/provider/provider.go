@@ -48,6 +48,11 @@ type Result struct {
 
 	// Duration is the execution time.
 	Duration time.Duration
+
+	// StreamJSON is the raw NDJSON event stream from providers that support
+	// streaming output (e.g. Claude --output-format stream-json). Empty for
+	// providers that don't emit structured streams.
+	StreamJSON string
 }
 
 // Capability flags for provider features.
