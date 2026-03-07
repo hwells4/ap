@@ -30,6 +30,7 @@ type Pipeline struct {
 	Name        string            `yaml:"name" json:"name"`
 	Description string            `yaml:"description,omitempty" json:"description,omitempty"`
 	Commands    map[string]string `yaml:"commands,omitempty" json:"commands,omitempty"`
+	Hooks       map[string]string `yaml:"hooks,omitempty" json:"hooks,omitempty"`
 	Nodes       []Node            `yaml:"nodes" json:"nodes"`
 	SourcePath  string            `yaml:"-" json:"source_path"`
 }
@@ -97,6 +98,7 @@ type pipelineDocument struct {
 	Name        string            `yaml:"name"`
 	Description string            `yaml:"description,omitempty"`
 	Commands    map[string]string `yaml:"commands,omitempty"`
+	Hooks       map[string]string `yaml:"hooks,omitempty"`
 	Nodes       []Node            `yaml:"nodes"`
 	Stages      []Node            `yaml:"stages"`
 }
@@ -138,11 +140,15 @@ func Compile(yamlPath string) (*Pipeline, error) {
 		Name:        strings.TrimSpace(doc.Name),
 		Description: strings.TrimSpace(doc.Description),
 		Commands:    doc.Commands,
+		Hooks:       doc.Hooks,
 		Nodes:       nodes,
 		SourcePath:  path,
 	}
 	if pipeline.Commands == nil {
 		pipeline.Commands = map[string]string{}
+	}
+	if pipeline.Hooks == nil {
+		pipeline.Hooks = map[string]string{}
 	}
 
 	if err := validatePipeline(pipeline, path); err != nil {

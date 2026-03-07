@@ -1,0 +1,24 @@
+# Codegen Stage - General-purpose code generation loop
+# Git lifecycle (branch, commit, PR) handled entirely by hooks.
+# The agent focuses purely on coding — no git commands needed.
+
+name: codegen
+description: General-purpose code generation with automated git lifecycle
+
+termination:
+  type: fixed
+
+hooks:
+  pre_session: >-
+    git checkout -b ap/${SESSION} 2>/dev/null || git checkout ap/${SESSION}
+  post_iteration: >-
+    git add -A && git diff --cached --quiet || git commit -m "$AP_SUMMARY"
+  post_session: >-
+    git push -u origin HEAD &&
+    gh pr create
+    --title "ap: ${SESSION}"
+    --body "$(echo '## Summary'; echo ''; git log main..HEAD --reverse --format='- %s'; echo ''; echo '---'; echo 'Automated by \`ap run codegen\`')"
+  on_failure: >-
+    git stash -u -m "ap/${SESSION} failed at iteration ${ITERATION}" 2>/dev/null || true
+
+delay: 3

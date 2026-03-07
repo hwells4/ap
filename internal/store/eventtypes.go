@@ -58,4 +58,9 @@ const (
 	TypeProviderComplete = "swarm.provider.completed"
 	// TypeProviderFailed marks the failure of a provider within a swarm block.
 	TypeProviderFailed = "swarm.provider.failed"
+
+	// TypeHookCompleted marks a successful lifecycle hook execution.
+	TypeHookCompleted = "hook.completed"
+	// TypeHookFailed marks a non-fatal lifecycle hook failure.
+	TypeHookFailed = "hook.failed"
 )

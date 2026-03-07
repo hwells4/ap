@@ -171,6 +171,63 @@ Handler chain for `escalate` and `spawn` events. Configured in `~/.config/ap/con
 
 **Callback listener**: When configured, an ephemeral HTTP server listens for `POST /resume` responses. The `callback_url` and `callback_token` are included in webhook payloads for human-in-the-loop responses. Non-localhost binds auto-generate bearer tokens.
 
+## Lifecycle Hooks
+
+Deterministic shell commands executed by the runner at key lifecycle points. Non-fatal: failures emit `hook.failed` events but do not stop the session.
+
+| Hook | When | Example Use Case |
+|------|------|-----------------|
+| `pre_session` | Once, before first iteration | `git checkout -b ap/${SESSION}` |
+| `pre_iteration` | Before each iteration starts | Pull latest, run linter gate |
+| `pre_stage` | Before a pipeline stage begins | Initialize stage resources |
+| `post_iteration` | After each completed iteration | `git add -A && git commit -m "$AP_SUMMARY"` |
+| `post_stage` | After a pipeline stage completes | Stage-level commit/tag |
+| `post_session` | After session completes successfully | `git push -u origin HEAD && gh pr create --fill` |
+| `on_failure` | When session fails | Cleanup, notification |
+
+**Precedence** (most-specific wins, no merging):
+1. Stage hooks (`stage.yaml` `hooks:` field) — single-stage runs only
+2. Pipeline hooks (`pipeline.yaml` top-level `hooks:` field)
+3. Global hooks (`~/.config/ap/config.yaml` `hooks:` field)
+
+**Execution model**:
+- Shell: `sh -c <command>` (POSIX)
+- Working directory: project root
+- Environment: inherits parent process env plus `AP_SESSION`, `AP_STAGE`, `AP_ITERATION`, `AP_STATUS`, `AP_SUMMARY`
+- Variable substitution: `${SESSION}`, `${STAGE}`, `${ITERATION}`, `${STATUS}`, `${SUMMARY}` in command strings
+- `${SUMMARY}` / `$AP_SUMMARY`: the agent's iteration summary (from ap-result). Available to all hooks (accumulated state). Use `$AP_SUMMARY` (env var) for commit messages — it's shell-safe.
+- Timeout: 60 seconds default (configurable via `hooks.timeout` in config.yaml)
+
+**Configuration examples**:
+
+Global (`~/.config/ap/config.yaml`):
+```yaml
+hooks:
+  pre_session: "git checkout -b ap/${SESSION} 2>/dev/null || git checkout ap/${SESSION}"
+  post_iteration: 'git add -A && git diff --cached --quiet || git commit -m "$AP_SUMMARY"'
+  post_session: "git push -u origin HEAD"
+  timeout: 30s
+```
+
+Stage (`stages/ralph/stage.yaml`):
+```yaml
+name: ralph
+hooks:
+  post_iteration: "git add -A && git diff --cached --quiet || git commit -m 'ralph: iter ${ITERATION}'"
+```
+
+Pipeline (`pipelines/build-and-deploy.yaml`):
+```yaml
+name: build-and-deploy
+hooks:
+  pre_session: "git checkout -b deploy/${SESSION}"
+  post_session: "git push -u origin HEAD && gh pr create --fill"
+nodes:
+  - id: implement
+    stage: ralph
+    runs: 5
+```
+
 ## Session History & Progress
 
 | File | Location | Written By | Purpose |
@@ -221,6 +278,8 @@ Each iteration captures a git diff telemetry snapshot stored in iteration output
 | `signal.spawn` | Child session spawned |
 | `signal.spawn.failed` | Child spawn failed |
 | `signal.handler.error` | Handler error (non-fatal) |
+| `hook.completed` | Lifecycle hook executed successfully |
+| `hook.failed` | Lifecycle hook failure (non-fatal) |
 | `error` | General error |
 
 ## Run Artifact Layout

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,13 +11,24 @@ import (
 
 	"github.com/hwells4/ap/internal/output"
 	"github.com/hwells4/ap/internal/stage"
+	"github.com/hwells4/ap/internal/store"
 	"gopkg.in/yaml.v3"
 )
 
 type stageEntry struct {
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-	Source      string `json:"source"`
+	Name        string      `json:"name"`
+	Description string      `json:"description,omitempty"`
+	Source      string      `json:"source"`
+	Stats       *stageStats `json:"stats,omitempty"`
+}
+
+type stageStats struct {
+	TotalSessions   int     `json:"total_sessions"`
+	TotalIterations int     `json:"total_iterations"`
+	Completed       int     `json:"completed"`
+	Failed          int     `json:"failed"`
+	AvgIterations   float64 `json:"avg_iterations"`
+	LastRun         string  `json:"last_run"`
 }
 
 func runList(args []string, deps cliDeps) int {
@@ -64,6 +76,9 @@ func runList(args []string, deps cliDeps) int {
 		))
 	}
 
+	// Merge usage stats from the store (best-effort — missing DB is fine).
+	mergeStageStats(projectRoot, deps.store, stages)
+
 	if deps.mode == output.ModeJSON {
 		payload := output.NewSuccess(map[string]any{"stages": stages}, deps.corrections)
 		serialized, err := output.MarshalSuccess(payload)
@@ -77,6 +92,42 @@ func runList(args []string, deps cliDeps) int {
 
 	_, _ = fmt.Fprint(deps.stdout, renderListHuman(stages))
 	return output.ExitSuccess
+}
+
+// mergeStageStats loads stage usage statistics from the SQLite store
+// and attaches them to the discovered stages. Best-effort: failures are ignored.
+func mergeStageStats(projectRoot string, s *store.Store, stages []stageEntry) {
+	if s == nil {
+		// Try to open the store from the project root.
+		dbPath := filepath.Join(projectRoot, ".ap", "ap.db")
+		if _, err := os.Stat(dbPath); err != nil {
+			return // no database yet
+		}
+		opened, err := store.Open(dbPath)
+		if err != nil {
+			return
+		}
+		defer opened.Close()
+		s = opened
+	}
+
+	statsMap, err := s.GetStageStats(context.Background())
+	if err != nil {
+		return
+	}
+
+	for i, entry := range stages {
+		if st, ok := statsMap[entry.Name]; ok {
+			stages[i].Stats = &stageStats{
+				TotalSessions:   st.TotalSessions,
+				TotalIterations: st.TotalIterations,
+				Completed:       st.Completed,
+				Failed:          st.Failed,
+				AvgIterations:   st.AvgIterations,
+				LastRun:         st.LastRun,
+			}
+		}
+	}
 }
 
 func discoverStages(projectRoot string) ([]stageEntry, error) {
@@ -180,7 +231,20 @@ func renderListHuman(stages []stageEntry) string {
 			b.WriteString("\t")
 			b.WriteString(entry.Description)
 		}
+		if entry.Stats != nil {
+			b.WriteString(fmt.Sprintf("  [%d runs, avg %.1f iter, last: %s]",
+				entry.Stats.TotalSessions, entry.Stats.AvgIterations,
+				truncateTimestamp(entry.Stats.LastRun)))
+		}
 	}
 	b.WriteString("\n")
 	return b.String()
+}
+
+// truncateTimestamp trims an RFC3339 timestamp to just the date for display.
+func truncateTimestamp(ts string) string {
+	if len(ts) >= 10 {
+		return ts[:10]
+	}
+	return ts
 }

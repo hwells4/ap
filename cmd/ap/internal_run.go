@@ -235,6 +235,10 @@ func runInternalRun(args []string, deps cliDeps) int {
 	}
 	limits := loadedConfig.RunnerLimits()
 
+	// Resolve lifecycle hooks: stage > pipeline > config (most specific wins).
+	hooks := resolveLifecycleHooks(loadedConfig, req.Pipeline, req.Stage, workDir)
+	hookTimeout := loadedConfig.Hooks.Timeout
+
 	// Build runner config.
 	cfg := runner.Config{
 		Session:              req.Session,
@@ -257,6 +261,8 @@ func runInternalRun(args []string, deps cliDeps) int {
 		SignalHandlerTimeout: loadedConfig.Signals.HandlerTimeout,
 		Store:                s,
 		ParentSession:        strings.TrimSpace(req.ParentSession),
+		Hooks:                hooks,
+		HookTimeout:          hookTimeout,
 	}
 
 	// Execute runner.
@@ -423,4 +429,37 @@ func parseOnEscalateOverride(raw string) (config.SignalHandler, error) {
 	default:
 		return config.SignalHandler{}, fmt.Errorf("unsupported override type %q (expected webhook or exec)", kind)
 	}
+}
+
+// resolveLifecycleHooks builds LifecycleHooks with precedence:
+// stage hooks > pipeline hooks > global config hooks.
+// For each hook point, most-specific non-empty value wins.
+func resolveLifecycleHooks(cfg config.Config, pipeline *compile.Pipeline, stageName, projectRoot string) runner.LifecycleHooks {
+	globalHooks := cfg.WatchHooks()
+	hooks := runner.LifecycleHooks{
+		PreSession:    globalHooks.PreSession,
+		PreIteration:  globalHooks.PreIteration,
+		PreStage:      globalHooks.PreStage,
+		PostIteration: globalHooks.PostIteration,
+		PostStage:     globalHooks.PostStage,
+		PostSession:   globalHooks.PostSession,
+		OnFailure:     globalHooks.OnFailure,
+	}
+
+	// Pipeline hooks override global.
+	if pipeline != nil && len(pipeline.Hooks) > 0 {
+		hooks.ApplyOverrides(pipeline.Hooks)
+	}
+
+	// Stage hooks override pipeline and global (single-stage runs only).
+	if strings.TrimSpace(stageName) != "" && pipeline == nil {
+		def, err := stage.ResolveStage(stageName, stage.ResolveOptions{
+			ProjectRoot: projectRoot,
+		})
+		if err == nil {
+			hooks.ApplyOverrides(def.ReadHooks())
+		}
+	}
+
+	return hooks
 }

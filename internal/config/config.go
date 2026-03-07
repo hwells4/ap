@@ -60,11 +60,22 @@ type LimitsConfig struct {
 	MaxConcurrentProviders int `yaml:"max_concurrent_providers"`
 }
 
-// HooksConfig defines shell hooks consumed by watch/event features.
+// HooksConfig defines shell hooks consumed by watch/event features and the runner.
 type HooksConfig struct {
+	// Watch hooks (consumed by ap watch).
 	OnCompleted string `yaml:"on_completed,omitempty"`
 	OnEscalate  string `yaml:"on_escalate,omitempty"`
 	OnIdle      string `yaml:"on_idle,omitempty"`
+
+	// Runner lifecycle hooks.
+	PreSession    string        `yaml:"pre_session,omitempty"`
+	PreIteration  string        `yaml:"pre_iteration,omitempty"`
+	PreStage      string        `yaml:"pre_stage,omitempty"`
+	PostIteration string        `yaml:"post_iteration,omitempty"`
+	PostStage     string        `yaml:"post_stage,omitempty"`
+	PostSession   string        `yaml:"post_session,omitempty"`
+	OnFailure     string        `yaml:"on_failure,omitempty"`
+	Timeout       time.Duration `yaml:"timeout,omitempty"`
 }
 
 // Default returns a config with all default values applied.
@@ -86,7 +97,9 @@ func Default() Config {
 			MaxSpawnDepth:          defaultMaxSpawnDepth,
 			MaxConcurrentProviders: defaultMaxConcurrentProvider,
 		},
-		Hooks: HooksConfig{},
+		Hooks: HooksConfig{
+			Timeout: 60 * time.Second,
+		},
 	}
 }
 
@@ -249,6 +262,10 @@ func (c *Config) normalize() {
 	}
 	if c.Signals.Spawn == nil {
 		c.Signals.Spawn = []SignalHandler{}
+	}
+
+	if c.Hooks.Timeout == 0 {
+		c.Hooks.Timeout = 60 * time.Second
 	}
 }
 

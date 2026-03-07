@@ -191,6 +191,12 @@ type Config struct {
 	// RetryOnExhausted controls behavior when all retries are exhausted.
 	// "abort" (default) fails the session. "pause" pauses for investigation.
 	RetryOnExhausted string
+
+	// Hooks defines lifecycle hook commands for this run.
+	Hooks LifecycleHooks
+
+	// HookTimeout bounds lifecycle hook execution. Zero uses default (60s).
+	HookTimeout time.Duration
 }
 
 // Result captures the outcome of a run.
@@ -300,6 +306,11 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 	}
 	emitEvent(ctx, cfg, store.TypeSessionStart, "{}", startData)
 
+	// Initialize hook context — accumulates state, available to all hooks.
+	hc := NewHookContext(cfg)
+	hc.SetStage(cfg.StageName)
+	hc.Fire(ctx, "pre_session")
+
 	fixed := termination.NewFixed(termination.FixedConfig{Iterations: &cfg.Iterations})
 	stageConfig := buildStageConfig(cfg)
 
@@ -334,6 +345,9 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 				"terminated": true,
 			})
 			storeMarkFailed(ctx, cfg, "signal_terminated", err.Error())
+			hc.SetIteration(completed)
+			hc.SetStatus("failed")
+			hc.Fire(context.Background(), "on_failure")
 			emitEvent(ctx, cfg, store.TypeSessionComplete, "{}", map[string]any{
 				"iterations":  completed,
 				"reason":      "signal: " + err.Error(),
@@ -354,6 +368,10 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 			Iteration:    i,
 			ProviderName: cfg.Provider.Name(),
 		})
+
+		// Run pre_iteration hook.
+		hc.SetIteration(i)
+		hc.Fire(ctx, "pre_iteration")
 
 		// Capture git HEAD before provider execution.
 		preHead := ""
@@ -459,6 +477,9 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 			}
 
 			storeMarkFailed(ctx, cfg, "provider_error", provErr.Error())
+			hc.SetIteration(completed)
+			hc.SetStatus("failed")
+			hc.Fire(ctx, "on_failure")
 			return Result{
 				Iterations: completed,
 				Status:     store.StatusFailed,
@@ -496,6 +517,11 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 			ProviderName: cfg.Provider.Name(),
 			DurationMS:   time.Since(iterStartTime).Milliseconds(),
 		})
+
+		// Run post_iteration hook.
+		hc.SetIteration(i)
+		hc.SetSummary(iterResult.Summary)
+		hc.Fire(ctx, "post_iteration")
 
 		// Inject signal — store text for next iteration's ${CONTEXT}.
 		if iterResult.Signals.Inject != "" {
@@ -598,6 +624,9 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 
 			if judgeStop {
 				finishSession(ctx, cfg, completed, judgeReason)
+				hc.SetIteration(completed)
+				hc.SetStatus("completed")
+				hc.Fire(ctx, "post_session")
 				return Result{
 					Iterations: completed,
 					Status:     store.StatusCompleted,
@@ -610,6 +639,9 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 		shouldStop, reason := fixed.ShouldStop(i, lastResult.Decision)
 		if shouldStop {
 			finishSession(ctx, cfg, completed, reason)
+			hc.SetIteration(completed)
+			hc.SetStatus("completed")
+			hc.Fire(ctx, "post_session")
 			return Result{
 				Iterations: completed,
 				Status:     store.StatusCompleted,
@@ -621,6 +653,9 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 	// All iterations complete.
 	reason := fmt.Sprintf("Completed %d iterations (max: %d)", completed, fixed.Target())
 	finishSession(ctx, cfg, completed, reason)
+	hc.SetIteration(completed)
+	hc.SetStatus("completed")
+	hc.Fire(ctx, "post_session")
 	return Result{
 		Iterations: completed,
 		Status:     store.StatusCompleted,
@@ -710,6 +745,15 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 		},
 	})
 
+	// Initialize hook context for pipeline run.
+	hc := NewHookContext(cfg)
+	firstStage := nodes[0].StageName
+	if firstStage == "" {
+		firstStage = nodes[0].ID
+	}
+	hc.SetStage(firstStage)
+	hc.Fire(ctx, "pre_session")
+
 	completed := 0
 	spawnedChildren := 0
 	injectedContext := ""
@@ -722,9 +766,16 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 				"node_id":       node.ID,
 			})
 
+			hc.SetStage(node.ID)
+			hc.Fire(ctx, "pre_stage")
+
 			swarmResult, swarmErr := executeSwarmNode(ctx, cfg, node, nodeIdx, injectedContext)
 			if swarmErr != nil {
 				storeMarkFailed(ctx, cfg, "swarm_error", swarmErr.Error())
+				hc.SetStage(node.ID)
+				hc.SetIteration(completed)
+				hc.SetStatus("failed")
+				hc.Fire(ctx, "on_failure")
 				return Result{
 					Iterations: completed,
 					Status:     store.StatusFailed,
@@ -737,6 +788,9 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 
 			// Append stage boundary marker.
 			appendStageBoundary(cfg.RunDir, node.ID, swarmResult.Iterations)
+			hc.SetStage(node.ID)
+			hc.SetIteration(completed)
+			hc.Fire(ctx, "post_stage")
 			markStageCompleted(ctx, cfg, nodeIdx)
 			continue
 		}
@@ -767,6 +821,10 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 
 		stageConfig := buildPipelineStageConfig(node)
 		stageConfig.OutputPath = def.ReadOutputPath()
+
+		hc.SetStage(node.StageName)
+		hc.Fire(ctx, "pre_stage")
+
 		fixed := termination.NewFixed(termination.FixedConfig{Iterations: &node.Iterations})
 		var lastResult extract.Result
 		stageCompleted := 0
@@ -782,6 +840,10 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 					"node_id":    node.ID,
 				})
 				storeMarkFailed(ctx, cfg, "signal_terminated", err.Error())
+				hc.SetStage(node.StageName)
+				hc.SetIteration(completed)
+				hc.SetStatus("failed")
+				hc.Fire(context.Background(), "on_failure")
 				emitEvent(ctx, cfg, store.TypeSessionComplete, "{}", map[string]any{
 					"iterations":       completed,
 					"total_iterations": completed,
@@ -793,12 +855,6 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 					Status:     store.StatusFailed,
 					Error:      err.Error(),
 				}, nil
-			}
-
-			// Capture git HEAD before provider execution.
-			nodePreHead := ""
-			if isGitRepo(cfg.WorkDir) {
-				nodePreHead = gitHead(cfg.WorkDir)
 			}
 
 			nodeIterStartTime := time.Now()
@@ -815,6 +871,17 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 					"iteration": i,
 					"stage":     node.ID,
 				})
+			}
+
+			// Run pre_iteration hook.
+			hc.SetStage(node.StageName)
+			hc.SetIteration(i)
+			hc.Fire(ctx, "pre_iteration")
+
+			// Capture git HEAD before provider execution.
+			nodePreHead := ""
+			if isGitRepo(cfg.WorkDir) {
+				nodePreHead = gitHead(cfg.WorkDir)
 			}
 
 			cursorJSON := marshalCursorJSON(i, cfg.Provider.Name(), node.ID, nodeIdx+1)
@@ -850,6 +917,10 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 					"exit_code": provResult.ExitCode,
 				})
 				storeMarkFailed(ctx, cfg, "provider_error", provErr.Error())
+				hc.SetStage(node.StageName)
+				hc.SetIteration(completed)
+				hc.SetStatus("failed")
+				hc.Fire(ctx, "on_failure")
 				return Result{
 					Iterations: completed,
 					Status:     store.StatusFailed,
@@ -895,6 +966,12 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 					"stage":     node.ID,
 				})
 			}
+
+			// Run post_iteration hook.
+			hc.SetStage(node.StageName)
+			hc.SetIteration(i)
+			hc.SetSummary(iterResult.Summary)
+			hc.Fire(ctx, "post_iteration")
 
 			if iterResult.Signals.Inject != "" {
 				injectedContext = iterResult.Signals.Inject
@@ -976,6 +1053,8 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 			decision := strings.ToLower(strings.TrimSpace(lastResult.Decision))
 			if decision == "error" {
 				storeMarkFailed(ctx, cfg, "agent_error", fmt.Sprintf("agent requested error at stage %s iteration %d", node.StageName, i))
+				hc.SetStatus("failed")
+				hc.Fire(ctx, "on_failure")
 				return Result{
 					Iterations: completed,
 					Status:     store.StatusFailed,
@@ -989,6 +1068,9 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 
 		// Append stage boundary marker to session-scoped progress.
 		appendStageBoundary(cfg.RunDir, node.StageName, stageCompleted)
+		hc.SetStage(node.StageName)
+		hc.SetIteration(stageCompleted)
+		hc.Fire(ctx, "post_stage")
 
 		// Mark stage completed in stages_json.
 		markStageCompleted(ctx, cfg, nodeIdx)
@@ -996,6 +1078,9 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 
 	reason := fmt.Sprintf("Completed %d iterations across %d stages", completed, len(nodes))
 	finishSession(ctx, cfg, completed, reason)
+	hc.SetIteration(completed)
+	hc.SetStatus("completed")
+	hc.Fire(ctx, "post_session")
 	return Result{
 		Iterations: completed,
 		Status:     store.StatusCompleted,

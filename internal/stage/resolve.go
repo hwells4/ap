@@ -65,6 +65,22 @@ func (d Definition) ReadOutputPath() string {
 	return strings.TrimSpace(doc.OutputPath)
 }
 
+// ReadHooks returns the hooks map from stage.yaml, if set.
+// Returns nil when hooks are not configured.
+func (d Definition) ReadHooks() map[string]string {
+	configData, err := d.ReadConfig()
+	if err != nil {
+		return nil
+	}
+	var doc struct {
+		Hooks map[string]string `yaml:"hooks"`
+	}
+	if yaml.NewDecoder(bytes.NewReader(configData)).Decode(&doc) != nil {
+		return nil
+	}
+	return doc.Hooks
+}
+
 // ResolveOptions defines search roots for stage resolution.
 type ResolveOptions struct {
 	ProjectRoot        string

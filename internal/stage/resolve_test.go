@@ -225,6 +225,71 @@ func writeFile(t *testing.T, path string) {
 	}
 }
 
+func TestReadHooks_Present(t *testing.T) {
+	dir := t.TempDir()
+	stageDir := filepath.Join(dir, ".claude", "stages", "test")
+	if err := os.MkdirAll(stageDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	config := `name: test
+hooks:
+  pre_session: "git checkout -b work"
+  post_iteration: "git add -A && git commit -m 'iter'"
+`
+	if err := os.WriteFile(filepath.Join(stageDir, "stage.yaml"), []byte(config), 0o644); err != nil {
+		t.Fatalf("write stage.yaml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stageDir, "prompt.md"), []byte("prompt"), 0o644); err != nil {
+		t.Fatalf("write prompt.md: %v", err)
+	}
+
+	def, err := ResolveStage("test", ResolveOptions{ProjectRoot: dir})
+	if err != nil {
+		t.Fatalf("ResolveStage: %v", err)
+	}
+
+	hooks := def.ReadHooks()
+	if hooks == nil {
+		t.Fatal("expected hooks to be non-nil")
+	}
+	if hooks["pre_session"] != "git checkout -b work" {
+		t.Fatalf("pre_session = %q, want %q", hooks["pre_session"], "git checkout -b work")
+	}
+	if hooks["post_iteration"] != "git add -A && git commit -m 'iter'" {
+		t.Fatalf("post_iteration = %q", hooks["post_iteration"])
+	}
+	if hooks["post_session"] != "" {
+		t.Fatalf("post_session should be empty, got %q", hooks["post_session"])
+	}
+}
+
+func TestReadHooks_Absent(t *testing.T) {
+	dir := t.TempDir()
+	stageDir := filepath.Join(dir, ".claude", "stages", "nohooks")
+	if err := os.MkdirAll(stageDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	config := "name: nohooks\n"
+	if err := os.WriteFile(filepath.Join(stageDir, "stage.yaml"), []byte(config), 0o644); err != nil {
+		t.Fatalf("write stage.yaml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stageDir, "prompt.md"), []byte("prompt"), 0o644); err != nil {
+		t.Fatalf("write prompt.md: %v", err)
+	}
+
+	def, err := ResolveStage("nohooks", ResolveOptions{ProjectRoot: dir})
+	if err != nil {
+		t.Fatalf("ResolveStage: %v", err)
+	}
+
+	hooks := def.ReadHooks()
+	if len(hooks) != 0 {
+		t.Fatalf("expected no hooks, got %v", hooks)
+	}
+}
+
 func contains(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {

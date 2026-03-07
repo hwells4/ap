@@ -290,6 +290,68 @@ defaults:
 	}
 }
 
+func TestLoad_LifecycleHooks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lifecycle-hooks.yaml")
+	if err := os.WriteFile(path, []byte(`
+hooks:
+  pre_session: "git checkout -b work"
+  pre_iteration: "git pull --rebase"
+  pre_stage: "echo starting stage"
+  post_iteration: "git add -A && git commit -m 'iter'"
+  post_stage: "echo stage done"
+  post_session: "git push"
+  on_failure: "echo failed"
+  timeout: 30s
+`), 0o644); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	hooks := cfg.WatchHooks()
+	if hooks.PreSession != "git checkout -b work" {
+		t.Fatalf("PreSession = %q, want %q", hooks.PreSession, "git checkout -b work")
+	}
+	if hooks.PreIteration != "git pull --rebase" {
+		t.Fatalf("PreIteration = %q, want %q", hooks.PreIteration, "git pull --rebase")
+	}
+	if hooks.PreStage != "echo starting stage" {
+		t.Fatalf("PreStage = %q, want %q", hooks.PreStage, "echo starting stage")
+	}
+	if hooks.PostIteration != "git add -A && git commit -m 'iter'" {
+		t.Fatalf("PostIteration = %q", hooks.PostIteration)
+	}
+	if hooks.PostStage != "echo stage done" {
+		t.Fatalf("PostStage = %q", hooks.PostStage)
+	}
+	if hooks.PostSession != "git push" {
+		t.Fatalf("PostSession = %q", hooks.PostSession)
+	}
+	if hooks.OnFailure != "echo failed" {
+		t.Fatalf("OnFailure = %q", hooks.OnFailure)
+	}
+	if hooks.Timeout != 30*time.Second {
+		t.Fatalf("Timeout = %v, want 30s", hooks.Timeout)
+	}
+}
+
+func TestLoad_LifecycleHooksDefaultTimeout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.Hooks.Timeout != 60*time.Second {
+		t.Fatalf("default Timeout = %v, want 60s", cfg.Hooks.Timeout)
+	}
+}
+
 func TestNormalize_LowercasesDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "upper-defaults.yaml")
 	if err := os.WriteFile(path, []byte(`

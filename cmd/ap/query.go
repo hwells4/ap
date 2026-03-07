@@ -339,8 +339,14 @@ func queryIterationsCmd(args []string, deps cliDeps) int {
 		return output.ExitSuccess
 	}
 	for _, it := range iterations {
-		_, _ = fmt.Fprintf(deps.stdout, "iter=%-3v  stage=%-15v  status=%-10v  decision=%v\n",
-			it["iteration"], it["stage_name"], it["status"], it["decision"])
+		summary, _ := it["summary"].(string)
+		if summary != "" {
+			_, _ = fmt.Fprintf(deps.stdout, "iter=%-3v  stage=%-15v  [%v] %v\n",
+				it["iteration"], it["stage_name"], it["decision"], summary)
+		} else {
+			_, _ = fmt.Fprintf(deps.stdout, "iter=%-3v  stage=%-15v  [%v]\n",
+				it["iteration"], it["stage_name"], it["decision"])
+		}
 	}
 	return output.ExitSuccess
 }
@@ -472,8 +478,14 @@ func queryEventsCmd(args []string, deps cliDeps) int {
 		return output.ExitSuccess
 	}
 	for _, evt := range events {
-		_, _ = fmt.Fprintf(deps.stdout, "seq=%-4v  type=%-25v  ts=%v\n",
-			evt["seq"], evt["type"], evt["created_at"])
+		detail := eventDetailString(evt)
+		if detail != "" {
+			_, _ = fmt.Fprintf(deps.stdout, "seq=%-4v  %-25v  %v\n",
+				evt["seq"], evt["type"], detail)
+		} else {
+			_, _ = fmt.Fprintf(deps.stdout, "seq=%-4v  %-25v\n",
+				evt["seq"], evt["type"])
+		}
 	}
 	return output.ExitSuccess
 }
@@ -559,6 +571,50 @@ func eventRowToMap(r store.EventRow) map[string]any {
 		m["data"] = data
 	}
 	return m
+}
+
+// eventDetailString extracts a human-readable detail from an event's data payload.
+func eventDetailString(evt map[string]any) string {
+	data, ok := evt["data"].(map[string]any)
+	if !ok || len(data) == 0 {
+		return ""
+	}
+
+	evtType, _ := evt["type"].(string)
+	switch evtType {
+	case "iteration.completed":
+		summary, _ := data["summary"].(string)
+		decision, _ := data["decision"].(string)
+		if summary != "" {
+			return fmt.Sprintf("[%s] %s", decision, summary)
+		}
+		if decision != "" {
+			return fmt.Sprintf("[%s]", decision)
+		}
+	case "hook.completed":
+		hook, _ := data["hook"].(string)
+		return hook
+	case "hook.failed":
+		hook, _ := data["hook"].(string)
+		errMsg, _ := data["error"].(string)
+		if errMsg != "" {
+			return fmt.Sprintf("%s: %s", hook, errMsg)
+		}
+		return hook
+	case "signal.inject":
+		length, _ := data["length"].(float64)
+		return fmt.Sprintf("%d chars injected", int(length))
+	case "signal.escalate":
+		reason, _ := data["reason"].(string)
+		return reason
+	case "signal.spawn":
+		child, _ := data["child_session"].(string)
+		return child
+	case "error":
+		errMsg, _ := data["error"].(string)
+		return errMsg
+	}
+	return ""
 }
 
 func parsePositiveIntOrZero(s string) (int, error) {

@@ -201,6 +201,62 @@ nodes:
 	}
 }
 
+func TestCompileParsesPipelineHooks(t *testing.T) {
+	t.Parallel()
+
+	path := writePipelineFile(t, `
+name: hook-pipeline
+hooks:
+  pre_session: "git checkout -b work/${SESSION}"
+  post_iteration: "git add -A && git commit -m 'iter ${ITERATION}'"
+  post_session: "git push -u origin HEAD"
+nodes:
+  - id: improve-plan
+    stage: improve-plan
+    runs: 3
+`)
+
+	pipeline, err := Compile(path)
+	if err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+	if len(pipeline.Hooks) != 3 {
+		t.Fatalf("len(Hooks) = %d, want 3", len(pipeline.Hooks))
+	}
+	if pipeline.Hooks["pre_session"] != "git checkout -b work/${SESSION}" {
+		t.Fatalf("pre_session = %q", pipeline.Hooks["pre_session"])
+	}
+	if pipeline.Hooks["post_iteration"] != "git add -A && git commit -m 'iter ${ITERATION}'" {
+		t.Fatalf("post_iteration = %q", pipeline.Hooks["post_iteration"])
+	}
+	if pipeline.Hooks["post_session"] != "git push -u origin HEAD" {
+		t.Fatalf("post_session = %q", pipeline.Hooks["post_session"])
+	}
+}
+
+func TestCompileNoHooksDefaultsToEmptyMap(t *testing.T) {
+	t.Parallel()
+
+	path := writePipelineFile(t, `
+name: no-hooks
+nodes:
+  - id: improve-plan
+    stage: improve-plan
+    runs: 1
+`)
+
+	pipeline, err := Compile(path)
+	if err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+	if pipeline.Hooks == nil {
+		t.Fatal("Hooks should not be nil, want empty map")
+	}
+	if len(pipeline.Hooks) != 0 {
+		t.Fatalf("len(Hooks) = %d, want 0", len(pipeline.Hooks))
+	}
+}
+
 func TestCompileSamplesFromRepo(t *testing.T) {
 	t.Parallel()
 
