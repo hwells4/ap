@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/hwells4/ap/internal/compile"
+	"github.com/hwells4/ap/internal/config"
 	"github.com/hwells4/ap/internal/output"
 )
 
@@ -467,6 +468,58 @@ func TestRunRequestFile_PipelineRoundTrip(t *testing.T) {
 	}
 	if loaded.Pipeline.Nodes[0].Runs != 5 {
 		t.Fatalf("node[0].Runs = %d, want 5", loaded.Pipeline.Nodes[0].Runs)
+	}
+}
+
+func TestResolveLifecycleHooks_GlobalOnly(t *testing.T) {
+	cfg := config.Config{
+		Hooks: config.HooksConfig{
+			PreSession:    "global-pre-session",
+			PostIteration: "global-post-iter",
+			OnFailure:     "global-on-failure",
+		},
+	}
+
+	hooks := resolveLifecycleHooks(cfg, nil, "nonexistent-stage", t.TempDir())
+
+	if hooks.PreSession != "global-pre-session" {
+		t.Errorf("PreSession = %q, want %q", hooks.PreSession, "global-pre-session")
+	}
+	if hooks.PostIteration != "global-post-iter" {
+		t.Errorf("PostIteration = %q, want %q", hooks.PostIteration, "global-post-iter")
+	}
+	if hooks.OnFailure != "global-on-failure" {
+		t.Errorf("OnFailure = %q, want %q", hooks.OnFailure, "global-on-failure")
+	}
+}
+
+func TestResolveLifecycleHooks_PipelineOverridesGlobal(t *testing.T) {
+	cfg := config.Config{
+		Hooks: config.HooksConfig{
+			PreSession:    "global-pre-session",
+			PostIteration: "global-post-iter",
+		},
+	}
+
+	pipeline := &compile.Pipeline{
+		Name: "test-pipeline",
+		Hooks: map[string]string{
+			"post_iteration": "pipeline-post-iter",
+		},
+		Nodes: []compile.Node{
+			{ID: "a", Stage: "ralph", Runs: 1},
+		},
+	}
+
+	hooks := resolveLifecycleHooks(cfg, pipeline, "a", t.TempDir())
+
+	// post_iteration should be overridden by pipeline.
+	if hooks.PostIteration != "pipeline-post-iter" {
+		t.Errorf("PostIteration = %q, want %q (pipeline should override global)", hooks.PostIteration, "pipeline-post-iter")
+	}
+	// pre_session was NOT in pipeline hooks, so global value should be preserved.
+	if hooks.PreSession != "global-pre-session" {
+		t.Errorf("PreSession = %q, want %q (global should be preserved when not overridden)", hooks.PreSession, "global-pre-session")
 	}
 }
 
