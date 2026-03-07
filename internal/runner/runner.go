@@ -30,13 +30,13 @@ import (
 	apcontext "github.com/hwells4/ap/internal/context"
 	"github.com/hwells4/ap/internal/extract"
 	"github.com/hwells4/ap/internal/judge"
-	"github.com/hwells4/ap/internal/swarm"
 	"github.com/hwells4/ap/internal/resolve"
 	"github.com/hwells4/ap/internal/runtarget"
 	"github.com/hwells4/ap/internal/session"
 	"github.com/hwells4/ap/internal/signals"
 	"github.com/hwells4/ap/internal/stage"
 	"github.com/hwells4/ap/internal/store"
+	"github.com/hwells4/ap/internal/swarm"
 	"github.com/hwells4/ap/internal/termination"
 	"github.com/hwells4/ap/pkg/provider"
 )
@@ -258,6 +258,362 @@ func buildWorkManifest(workDir, preHead string) workManifest {
 	}
 }
 
+type iterationRetryConfig struct {
+	MaxAttempts           int
+	Backoff               time.Duration
+	OnExhausted           string
+	CountExhaustedFailure int
+}
+
+type iterationJudgmentConfig struct {
+	Strategy  *termination.Judgment
+	Evaluator termination.Evaluator
+	Summaries []string
+}
+
+type iterationTerminationConfig struct {
+	Fixed            termination.Fixed
+	Judgment         *iterationJudgmentConfig
+	StopStatus       string
+	FailOnAgentError bool
+}
+
+type iterationParams struct {
+	cfg                      Config
+	hookCtx                  *HookContext
+	iteration                int
+	providerFailureHookIter  int
+	stageConfig              apcontext.StageConfig
+	promptTemplate           string
+	storeStageName           string
+	hookStageName            string
+	cursorJSON               string
+	iterationEventData       map[string]any
+	signalEventData          map[string]any
+	outputErrorMessage       string
+	injectedContext          string
+	spawnedChildren          int
+	retry                    iterationRetryConfig
+	termination              iterationTerminationConfig
+	onStartIterationError    func(error)
+	onCompleteIterationError func(error)
+}
+
+type iterationOutcome struct {
+	completedDelta  int
+	injectedContext string
+	spawnedChildren int
+	stop            bool
+	status          string
+	reason          string
+	err             string
+}
+
+func mergeEventData(base map[string]any, extras map[string]any) map[string]any {
+	if len(extras) == 0 {
+		return base
+	}
+	merged := make(map[string]any, len(base)+len(extras))
+	for k, v := range base {
+		merged[k] = v
+	}
+	for k, v := range extras {
+		merged[k] = v
+	}
+	return merged
+}
+
+func executeIteration(ctx context.Context, params iterationParams) (iterationOutcome, error) {
+	cfg := params.cfg
+	i := params.iteration
+	iterStartTime := time.Now()
+
+	if err := cfg.Store.StartIteration(ctx, store.IterationInput{
+		SessionName:  cfg.Session,
+		StageName:    params.storeStageName,
+		Iteration:    i,
+		ProviderName: cfg.Provider.Name(),
+	}); err != nil && params.onStartIterationError != nil {
+		params.onStartIterationError(err)
+	}
+
+	params.hookCtx.SetStage(params.hookStageName)
+	params.hookCtx.SetIteration(i)
+	params.hookCtx.Fire(ctx, "pre_iteration")
+
+	preHead := ""
+	if isGitRepo(cfg.WorkDir) {
+		preHead = gitHead(cfg.WorkDir)
+	}
+
+	historyPath := filepath.Join(cfg.RunDir, "history.md")
+	writeHistory(ctx, cfg.Store, cfg.Session, historyPath)
+
+	ctxPath, err := apcontext.GenerateContext(cfg.Session, i, params.stageConfig, cfg.RunDir, nil)
+	if err != nil {
+		return iterationOutcome{}, fmt.Errorf("runner: generate context for iteration %d: %w", i, err)
+	}
+
+	prompt := resolvePrompt(params.promptTemplate, ctxPath, cfg.Session, i, params.stageConfig, params.injectedContext)
+	ctxVars, _ := resolve.VarsFromContext(ctxPath)
+
+	req := provider.Request{
+		Prompt:  prompt,
+		Model:   cfg.Model,
+		WorkDir: cfg.WorkDir,
+		Env:     buildEnv(cfg, i),
+	}
+
+	maxAttempts := params.retry.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
+	backoff := params.retry.Backoff
+	if backoff <= 0 {
+		backoff = defaultRetryBackoff
+	}
+
+	var provResult provider.Result
+	var provErr error
+	var iterResult extract.Result
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		provResult, provErr = executeWithTimeout(ctx, cfg.Provider, req, cfg.IterationTimeout)
+		if provErr == nil {
+			iterResult, _, _ = extract.Extract(provResult.Stdout, provResult.ExitCode)
+			break
+		}
+
+		if attempt >= maxAttempts {
+			break
+		}
+
+		emitEvent(ctx, cfg, store.TypeIterationRetried, params.cursorJSON, mergeEventData(map[string]any{
+			"iteration":    i,
+			"attempt":      attempt,
+			"max_attempts": maxAttempts,
+			"error":        provErr.Error(),
+			"backoff_ms":   backoff.Milliseconds(),
+		}, params.iterationEventData))
+
+		select {
+		case <-ctx.Done():
+			provErr = ctx.Err()
+		case <-time.After(backoff):
+		}
+		if ctx.Err() != nil {
+			provErr = ctx.Err()
+			break
+		}
+		backoff *= 2
+	}
+
+	if provErr != nil {
+		emitEvent(ctx, cfg, store.TypeIterationFailed, params.cursorJSON, mergeEventData(map[string]any{
+			"iteration": i,
+			"error":     provErr.Error(),
+			"exit_code": provResult.ExitCode,
+			"attempts":  maxAttempts,
+		}, params.iterationEventData))
+
+		outcome := iterationOutcome{
+			completedDelta: params.retry.CountExhaustedFailure,
+			stop:           true,
+		}
+
+		if strings.EqualFold(strings.TrimSpace(params.retry.OnExhausted), "pause") {
+			escJSON, _ := json.Marshal(map[string]any{
+				"type":   "retry_exhausted",
+				"reason": fmt.Sprintf("retry exhausted after %d attempts: %s", maxAttempts, provErr.Error()),
+			})
+			_ = cfg.Store.UpdateSession(ctx, cfg.Session, map[string]any{
+				"status":          "paused",
+				"escalation_json": string(escJSON),
+			})
+			outcome.status = store.StatusPaused
+			outcome.reason = "retry exhausted: " + provErr.Error()
+			return outcome, nil
+		}
+
+		storeMarkFailed(ctx, cfg, "provider_error", provErr.Error())
+		params.hookCtx.SetStage(params.hookStageName)
+		params.hookCtx.SetIteration(params.providerFailureHookIter)
+		params.hookCtx.SetStatus("failed")
+		params.hookCtx.Fire(ctx, "on_failure")
+
+		outcome.status = store.StatusFailed
+		outcome.err = provErr.Error()
+		return outcome, nil
+	}
+
+	manifest := buildWorkManifest(cfg.WorkDir, preHead)
+	manifestJSON, _ := json.Marshal(manifest)
+	diffStat := ""
+	if manifest.Git != nil {
+		diffStat = manifest.Git.DiffStat
+	}
+
+	if err := writeIterationOutput(ctxVars.OUTPUT, iterResult, provResult, diffStat); err != nil {
+		return iterationOutcome{}, fmt.Errorf("runner: %s: %w", params.outputErrorMessage, err)
+	}
+
+	signalsJSON, _ := json.Marshal(iterResult.Signals)
+	if err := cfg.Store.CompleteIteration(ctx, store.IterationComplete{
+		SessionName:  cfg.Session,
+		StageName:    params.storeStageName,
+		Iteration:    i,
+		Decision:     iterResult.Decision,
+		Summary:      iterResult.Summary,
+		ExitCode:     provResult.ExitCode,
+		SignalsJSON:  string(signalsJSON),
+		Stdout:       provResult.Stdout,
+		Stderr:       provResult.Stderr,
+		ContextJSON:  string(manifestJSON),
+		ProviderName: cfg.Provider.Name(),
+		DurationMS:   time.Since(iterStartTime).Milliseconds(),
+		StreamJSON:   provResult.StreamJSON,
+	}); err != nil && params.onCompleteIterationError != nil {
+		params.onCompleteIterationError(err)
+	}
+
+	params.hookCtx.SetStage(params.hookStageName)
+	params.hookCtx.SetIteration(i)
+	params.hookCtx.SetSummary(iterResult.Summary)
+	params.hookCtx.Fire(ctx, "post_iteration")
+
+	injectedContext := ""
+	if iterResult.Signals.Inject != "" {
+		injectedContext = iterResult.Signals.Inject
+		emitEvent(ctx, cfg, store.TypeSignalInject, params.cursorJSON, mergeEventData(map[string]any{
+			"iteration": i,
+			"length":    len(injectedContext),
+		}, params.signalEventData))
+	}
+
+	if params.termination.Judgment != nil {
+		params.termination.Judgment.Summaries = append(params.termination.Judgment.Summaries, iterResult.Summary)
+	}
+
+	spawnRes, spawnErr := processSpawnSignals(cfg, i, extractToSpawnSignals(iterResult.Signals.Spawn), params.spawnedChildren)
+	if spawnErr != nil {
+		return iterationOutcome{}, fmt.Errorf("runner: process spawn signals: %w", spawnErr)
+	}
+	if len(spawnRes.ChildNames) > 0 {
+		for _, child := range spawnRes.ChildNames {
+			_ = cfg.Store.AddChild(ctx, cfg.Session, child)
+		}
+	}
+
+	outcome := iterationOutcome{
+		completedDelta:  1,
+		injectedContext: injectedContext,
+		spawnedChildren: spawnRes.ChildCount,
+	}
+
+	if iterResult.Signals.Escalate != nil {
+		esc := extractToEscalate(iterResult.Signals.Escalate)
+		sigID := SignalID(i, "escalate", 0)
+
+		emitEvent(ctx, cfg, store.TypeSignalDispatching, params.cursorJSON, mergeEventData(map[string]any{
+			"signal_id":   sigID,
+			"signal_type": "escalate",
+			"iteration":   i,
+		}, nil))
+
+		escJSON, _ := json.Marshal(map[string]any{
+			"type":    esc.Type,
+			"reason":  esc.Reason,
+			"options": esc.Options,
+		})
+		_ = cfg.Store.UpdateSession(ctx, cfg.Session, map[string]any{
+			"status":          "paused",
+			"escalation_json": string(escJSON),
+		})
+
+		emitEvent(ctx, cfg, store.TypeSignalEscalate, params.cursorJSON, mergeEventData(map[string]any{
+			"signal_id": sigID,
+			"iteration": i,
+			"type":      esc.Type,
+			"reason":    esc.Reason,
+			"options":   esc.Options,
+		}, params.signalEventData))
+		if err := dispatchSignalHandlers(dispatchSignalInput{
+			Store:         cfg.Store,
+			Session:       cfg.Session,
+			Stage:         params.hookStageName,
+			Iteration:     i,
+			SignalID:      sigID,
+			SignalType:    "escalate",
+			Handlers:      cfg.EscalateHandlers,
+			Timeout:       cfg.SignalHandlerTimeout,
+			Output:        cfg.SignalOutput,
+			Escalation:    esc,
+			CallbackURL:   cfg.CallbackURL,
+			CallbackToken: cfg.CallbackToken,
+		}); err != nil {
+			return iterationOutcome{}, fmt.Errorf("runner: dispatch escalate handlers: %w", err)
+		}
+
+		outcome.stop = true
+		outcome.status = store.StatusPaused
+		outcome.reason = "escalation: " + esc.Reason
+		return outcome, nil
+	}
+
+	if params.termination.FailOnAgentError && strings.EqualFold(strings.TrimSpace(iterResult.Decision), "error") {
+		storeMarkFailed(ctx, cfg, "agent_error", fmt.Sprintf("agent requested error at stage %s iteration %d", params.hookStageName, i))
+		params.hookCtx.SetStatus("failed")
+		params.hookCtx.Fire(ctx, "on_failure")
+
+		outcome.stop = true
+		outcome.status = store.StatusFailed
+		outcome.err = "agent requested error"
+		return outcome, nil
+	}
+
+	if params.termination.Judgment != nil &&
+		params.termination.Judgment.Strategy != nil &&
+		params.termination.Judgment.Evaluator != nil &&
+		!params.termination.Judgment.Strategy.InFallback() {
+		judgeStop, judgeReason := params.termination.Judgment.Strategy.ShouldStop(
+			ctx,
+			i,
+			params.termination.Judgment.Evaluator,
+			params.termination.Judgment.Summaries,
+		)
+
+		emitEvent(ctx, cfg, store.TypeJudgeVerdict, params.cursorJSON, mergeEventData(map[string]any{
+			"iteration":         i,
+			"consecutive_stops": params.termination.Judgment.Strategy.ConsecutiveStops(),
+			"in_fallback":       params.termination.Judgment.Strategy.InFallback(),
+			"stop":              judgeStop,
+		}, params.iterationEventData))
+
+		if params.termination.Judgment.Strategy.InFallback() {
+			emitEvent(ctx, cfg, store.TypeJudgeFallback, params.cursorJSON, mergeEventData(map[string]any{
+				"iteration": i,
+				"reason":    "judge failed 3 consecutive times, falling back to fixed-iteration termination",
+			}, params.iterationEventData))
+		}
+
+		if judgeStop {
+			outcome.stop = true
+			outcome.status = params.termination.StopStatus
+			outcome.reason = judgeReason
+			return outcome, nil
+		}
+	}
+
+	if shouldStop, reason := params.termination.Fixed.ShouldStop(i, iterResult.Decision); shouldStop {
+		outcome.stop = true
+		outcome.status = params.termination.StopStatus
+		outcome.reason = reason
+		return outcome, nil
+	}
+
+	return outcome, nil
+}
+
 // Run executes the iteration loop for a single stage in foreground mode.
 func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 	// On crash/error, release in_progress beads for this session (best-effort).
@@ -325,25 +681,24 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 	stageConfig := buildStageConfig(cfg)
 
 	// Initialize judgment strategy if a judge provider is configured.
-	var judgment *termination.Judgment
-	var judgeEval termination.Evaluator
+	var judgmentCfg *iterationJudgmentConfig
 	if cfg.JudgeProvider != nil {
-		judgment = termination.NewJudgment(termination.JudgmentConfig{
-			ConsensusRequired: cfg.JudgeConsensus,
-			MinIterations:     cfg.JudgeMinIterations,
-		})
-		judgeEval = judge.New(judge.Config{
-			Provider:   cfg.JudgeProvider,
-			Model:      cfg.JudgeModel,
-			MaxRetries: cfg.JudgeMaxRetries,
-		})
+		judgmentCfg = &iterationJudgmentConfig{
+			Strategy: termination.NewJudgment(termination.JudgmentConfig{
+				ConsensusRequired: cfg.JudgeConsensus,
+				MinIterations:     cfg.JudgeMinIterations,
+			}),
+			Evaluator: judge.New(judge.Config{
+				Provider:   cfg.JudgeProvider,
+				Model:      cfg.JudgeModel,
+				MaxRetries: cfg.JudgeMaxRetries,
+			}),
+		}
 	}
 
-	var lastResult extract.Result
 	completed := 0
 	spawnedChildren := 0
 	injectedContext := cfg.InjectedContext // seeded from resume --context or inject signal
-	var summaries []string
 
 	for i := 1; i <= fixed.Target(); i++ {
 		// Check context before starting iteration.
@@ -370,293 +725,53 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 			}, nil
 		}
 
-		// Mark iteration started in store.
-		iterStartTime := time.Now()
-		_ = cfg.Store.StartIteration(ctx, store.IterationInput{
-			SessionName:  cfg.Session,
-			StageName:    cfg.StageName,
-			Iteration:    i,
-			ProviderName: cfg.Provider.Name(),
+		outcome, err := executeIteration(ctx, iterationParams{
+			cfg:                     cfg,
+			hookCtx:                 hc,
+			iteration:               i,
+			providerFailureHookIter: i,
+			stageConfig:             stageConfig,
+			promptTemplate:          cfg.PromptTemplate,
+			storeStageName:          cfg.StageName,
+			hookStageName:           cfg.StageName,
+			cursorJSON:              marshalCursorJSON(i, cfg.Provider.Name(), "", 0),
+			outputErrorMessage:      fmt.Sprintf("write iteration %d output", i),
+			injectedContext:         injectedContext,
+			spawnedChildren:         spawnedChildren,
+			retry: iterationRetryConfig{
+				MaxAttempts:           retryMaxAttempts(cfg),
+				Backoff:               retryBackoff(cfg),
+				OnExhausted:           cfg.RetryOnExhausted,
+				CountExhaustedFailure: 1,
+			},
+			termination: iterationTerminationConfig{
+				Fixed:      fixed,
+				Judgment:   judgmentCfg,
+				StopStatus: store.StatusCompleted,
+			},
 		})
-
-		// Run pre_iteration hook.
-		hc.SetIteration(i)
-		hc.Fire(ctx, "pre_iteration")
-
-		// Capture git HEAD before provider execution.
-		preHead := ""
-		if isGitRepo(cfg.WorkDir) {
-			preHead = gitHead(cfg.WorkDir)
-		}
-
-		// Write session history for this iteration.
-		historyPath := filepath.Join(cfg.RunDir, "history.md")
-		writeHistory(ctx, cfg.Store, cfg.Session, historyPath)
-
-		// Generate context.json.
-		ctxPath, err := apcontext.GenerateContext(cfg.Session, i, stageConfig, cfg.RunDir, nil)
 		if err != nil {
-			return Result{}, fmt.Errorf("runner: generate context for iteration %d: %w", i, err)
+			return Result{}, err
 		}
 
-		// Resolve prompt template. Consume injected context if present.
-		prompt := resolvePrompt(cfg.PromptTemplate, ctxPath, cfg.Session, i, stageConfig, injectedContext)
-		injectedContext = "" // consumed
+		completed += outcome.completedDelta
+		injectedContext = outcome.injectedContext
+		spawnedChildren = outcome.spawnedChildren
 
-		// Read output path from context.json.
-		ctxVars, _ := resolve.VarsFromContext(ctxPath)
-
-		// Build provider request.
-		req := provider.Request{
-			Prompt:  prompt,
-			Model:   cfg.Model,
-			WorkDir: cfg.WorkDir,
-			Env:     buildEnv(cfg, i),
-		}
-
-		// Execute provider with retry.
-		maxAttempts := retryMaxAttempts(cfg)
-		backoff := retryBackoff(cfg)
-		var provResult provider.Result
-		var provErr error
-		var iterResult extract.Result
-
-		cursorJSON := marshalCursorJSON(i, cfg.Provider.Name(), "", 0)
-
-		for attempt := 1; attempt <= maxAttempts; attempt++ {
-			provResult, provErr = executeWithTimeout(ctx, cfg.Provider, req, cfg.IterationTimeout)
-			if provErr == nil {
-				// Provider succeeded — extract decision from stdout.
-				iterResult, _, _ = extract.Extract(provResult.Stdout, provResult.ExitCode)
-				break
+		if outcome.stop {
+			if outcome.status == store.StatusCompleted {
+				finishSession(ctx, cfg, completed, outcome.reason)
 			}
-
-			// On last attempt, don't retry.
-			if attempt >= maxAttempts {
-				break
-			}
-
-			// Emit retry event.
-			emitEvent(ctx, cfg, store.TypeIterationRetried, cursorJSON, map[string]any{
-				"iteration":    i,
-				"attempt":      attempt,
-				"max_attempts": maxAttempts,
-				"error":        provErr.Error(),
-				"backoff_ms":   backoff.Milliseconds(),
-			})
-
-			// Wait with exponential backoff, respecting context cancellation.
-			select {
-			case <-ctx.Done():
-				provErr = ctx.Err()
-				break
-			case <-time.After(backoff):
-			}
-			if ctx.Err() != nil {
-				provErr = ctx.Err()
-				break
-			}
-			backoff *= 2
-		}
-
-		if provErr != nil {
-			// All attempts exhausted or context canceled.
-			emitEvent(ctx, cfg, store.TypeIterationFailed, cursorJSON, map[string]any{
-				"iteration": i,
-				"error":     provErr.Error(),
-				"exit_code": provResult.ExitCode,
-				"attempts":  retryMaxAttempts(cfg),
-			})
-			completed = i
-
-			// Check on_exhausted policy.
-			if strings.ToLower(strings.TrimSpace(cfg.RetryOnExhausted)) == "pause" {
-				escJSON, _ := json.Marshal(map[string]any{
-					"type":   "retry_exhausted",
-					"reason": fmt.Sprintf("retry exhausted after %d attempts: %s", retryMaxAttempts(cfg), provErr.Error()),
-				})
-				_ = cfg.Store.UpdateSession(ctx, cfg.Session, map[string]any{
-					"status":          "paused",
-					"escalation_json": string(escJSON),
-				})
-				return Result{
-					Iterations: completed,
-					Status:     store.StatusPaused,
-					Reason:     "retry exhausted: " + provErr.Error(),
-				}, nil
-			}
-
-			storeMarkFailed(ctx, cfg, "provider_error", provErr.Error())
 			hc.SetIteration(completed)
-			hc.SetStatus("failed")
-			hc.Fire(ctx, "on_failure")
-			return Result{
-				Iterations: completed,
-				Status:     store.StatusFailed,
-				Error:      provErr.Error(),
-			}, nil
-		}
-
-		lastResult = iterResult
-
-		// Build work manifest from git changes during this iteration.
-		manifest := buildWorkManifest(cfg.WorkDir, preHead)
-		manifestJSON, _ := json.Marshal(manifest)
-		diffStat := ""
-		if manifest.Git != nil {
-			diffStat = manifest.Git.DiffStat
-		}
-
-		if err := writeIterationOutput(ctxVars.OUTPUT, iterResult, provResult, diffStat); err != nil {
-			return Result{}, fmt.Errorf("runner: write iteration %d output: %w", i, err)
-		}
-
-		// Complete iteration in store (updates iteration_completed, emits event).
-		signalsJSON, _ := json.Marshal(iterResult.Signals)
-		_ = cfg.Store.CompleteIteration(ctx, store.IterationComplete{
-			SessionName:  cfg.Session,
-			StageName:    cfg.StageName,
-			Iteration:    i,
-			Decision:     iterResult.Decision,
-			Summary:      iterResult.Summary,
-			ExitCode:     provResult.ExitCode,
-			SignalsJSON:  string(signalsJSON),
-			Stdout:       provResult.Stdout,
-			Stderr:       provResult.Stderr,
-			ContextJSON:  string(manifestJSON),
-			ProviderName: cfg.Provider.Name(),
-			DurationMS:   time.Since(iterStartTime).Milliseconds(),
-			StreamJSON:   provResult.StreamJSON,
-		})
-
-		// Run post_iteration hook.
-		hc.SetIteration(i)
-		hc.SetSummary(iterResult.Summary)
-		hc.Fire(ctx, "post_iteration")
-
-		// Inject signal — store text for next iteration's ${CONTEXT}.
-		if iterResult.Signals.Inject != "" {
-			injectedContext = iterResult.Signals.Inject
-			emitEvent(ctx, cfg, store.TypeSignalInject, cursorJSON, map[string]any{
-				"iteration": i,
-				"length":    len(injectedContext),
-			})
-		}
-
-		// Collect summary for judgment history.
-		summaries = append(summaries, iterResult.Summary)
-
-		spawnRes, spawnErr := processSpawnSignals(cfg, i, extractToSpawnSignals(iterResult.Signals.Spawn), spawnedChildren)
-		if spawnErr != nil {
-			return Result{}, fmt.Errorf("runner: process spawn signals: %w", spawnErr)
-		}
-		spawnedChildren = spawnRes.ChildCount
-
-		// Record child sessions in store for lineage tracking.
-		if len(spawnRes.ChildNames) > 0 {
-			for _, child := range spawnRes.ChildNames {
-				_ = cfg.Store.AddChild(ctx, cfg.Session, child)
-			}
-		}
-
-		completed = i
-
-		// Escalate signal — always pauses, overrides agent decision.
-		if iterResult.Signals.Escalate != nil {
-			esc := extractToEscalate(iterResult.Signals.Escalate)
-			sigID := SignalID(i, "escalate", 0)
-
-			// Two-phase: emit dispatching before the side effect.
-			emitEvent(ctx, cfg, store.TypeSignalDispatching, cursorJSON, map[string]any{
-				"signal_id":   sigID,
-				"signal_type": "escalate",
-				"iteration":   i,
-			})
-
-			escJSON, _ := json.Marshal(map[string]any{
-				"type":    esc.Type,
-				"reason":  esc.Reason,
-				"options": esc.Options,
-			})
-			_ = cfg.Store.UpdateSession(ctx, cfg.Session, map[string]any{
-				"status":          "paused",
-				"escalation_json": string(escJSON),
-			})
-
-			emitEvent(ctx, cfg, store.TypeSignalEscalate, cursorJSON, map[string]any{
-				"signal_id": sigID,
-				"iteration": i,
-				"type":      esc.Type,
-				"reason":    esc.Reason,
-				"options":   esc.Options,
-			})
-			if err := dispatchSignalHandlers(dispatchSignalInput{
-				Store:         cfg.Store,
-				Session:       cfg.Session,
-				Stage:         cfg.StageName,
-				Iteration:     i,
-				SignalID:      sigID,
-				SignalType:    "escalate",
-				Handlers:      cfg.EscalateHandlers,
-				Timeout:       cfg.SignalHandlerTimeout,
-				Output:        cfg.SignalOutput,
-				Escalation:    esc,
-				CallbackURL:   cfg.CallbackURL,
-				CallbackToken: cfg.CallbackToken,
-			}); err != nil {
-				return Result{}, fmt.Errorf("runner: dispatch escalate handlers: %w", err)
-			}
-			return Result{
-				Iterations: completed,
-				Status:     store.StatusPaused,
-				Reason:     "escalation: " + esc.Reason,
-			}, nil
-		}
-
-		// Evaluate judgment termination if configured.
-		if judgment != nil && judgeEval != nil && !judgment.InFallback() {
-			judgeStop, judgeReason := judgment.ShouldStop(ctx, i, judgeEval, summaries)
-
-			// Emit judge verdict event.
-			emitEvent(ctx, cfg, store.TypeJudgeVerdict, cursorJSON, map[string]any{
-				"iteration":         i,
-				"consecutive_stops": judgment.ConsecutiveStops(),
-				"in_fallback":       judgment.InFallback(),
-				"stop":              judgeStop,
-			})
-
-			// Emit fallback warning if triggered.
-			if judgment.InFallback() {
-				emitEvent(ctx, cfg, store.TypeJudgeFallback, cursorJSON, map[string]any{
-					"iteration": i,
-					"reason":    "judge failed 3 consecutive times, falling back to fixed-iteration termination",
-				})
-			}
-
-			if judgeStop {
-				finishSession(ctx, cfg, completed, judgeReason)
-				hc.SetIteration(completed)
-				hc.SetStatus("completed")
+			hc.SetStatus(outcome.status)
+			if outcome.status == store.StatusCompleted {
 				hc.Fire(ctx, "post_session")
-				return Result{
-					Iterations: completed,
-					Status:     store.StatusCompleted,
-					Reason:     judgeReason,
-				}, nil
 			}
-		}
-
-		// Evaluate fixed termination.
-		shouldStop, reason := fixed.ShouldStop(i, lastResult.Decision)
-		if shouldStop {
-			finishSession(ctx, cfg, completed, reason)
-			hc.SetIteration(completed)
-			hc.SetStatus("completed")
-			hc.Fire(ctx, "post_session")
 			return Result{
 				Iterations: completed,
-				Status:     store.StatusCompleted,
-				Reason:     reason,
+				Status:     outcome.status,
+				Reason:     outcome.reason,
+				Error:      outcome.err,
 			}, nil
 		}
 	}
@@ -837,7 +952,6 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 		hc.Fire(ctx, "pre_stage")
 
 		fixed := termination.NewFixed(termination.FixedConfig{Iterations: &node.Iterations})
-		var lastResult extract.Result
 		stageCompleted := 0
 
 		for i := 1; i <= fixed.Target(); i++ {
@@ -868,212 +982,72 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 				}, nil
 			}
 
-			nodeIterStartTime := time.Now()
-			if err := cfg.Store.StartIteration(ctx, store.IterationInput{
-				SessionName:  cfg.Session,
-				StageName:    node.ID,
-				Iteration:    i,
-				ProviderName: cfg.Provider.Name(),
-			}); err != nil {
-				emitEvent(ctx, cfg, store.TypeError, "{}", map[string]any{
-					"error":     err.Error(),
-					"type":      "store_tracking",
-					"operation": "start_iteration",
-					"iteration": i,
-					"stage":     node.ID,
-				})
-			}
-
-			// Run pre_iteration hook.
-			hc.SetStage(node.StageName)
-			hc.SetIteration(i)
-			hc.Fire(ctx, "pre_iteration")
-
-			// Capture git HEAD before provider execution.
-			nodePreHead := ""
-			if isGitRepo(cfg.WorkDir) {
-				nodePreHead = gitHead(cfg.WorkDir)
-			}
-
 			cursorJSON := marshalCursorJSON(i, cfg.Provider.Name(), node.ID, nodeIdx+1)
-
-			// Write session history for this iteration.
-			historyPath := filepath.Join(cfg.RunDir, "history.md")
-			writeHistory(ctx, cfg.Store, cfg.Session, historyPath)
-
-			ctxPath, err := apcontext.GenerateContext(cfg.Session, i, stageConfig, cfg.RunDir, nil)
+			outcome, err := executeIteration(ctx, iterationParams{
+				cfg:                     nodeCfg,
+				hookCtx:                 hc,
+				iteration:               i,
+				providerFailureHookIter: completed,
+				stageConfig:             stageConfig,
+				promptTemplate:          nodeCfg.PromptTemplate,
+				storeStageName:          node.ID,
+				hookStageName:           node.StageName,
+				cursorJSON:              cursorJSON,
+				iterationEventData: map[string]any{
+					"stage":   node.StageName,
+					"node_id": node.ID,
+				},
+				signalEventData: map[string]any{
+					"stage":   node.StageName,
+					"node_id": node.ID,
+				},
+				outputErrorMessage: fmt.Sprintf("write stage output for %s iteration %d", node.ID, i),
+				injectedContext:    injectedContext,
+				spawnedChildren:    spawnedChildren,
+				retry: iterationRetryConfig{
+					MaxAttempts: 1,
+				},
+				termination: iterationTerminationConfig{
+					Fixed:            fixed,
+					FailOnAgentError: true,
+				},
+				onStartIterationError: func(err error) {
+					emitEvent(ctx, cfg, store.TypeError, "{}", map[string]any{
+						"error":     err.Error(),
+						"type":      "store_tracking",
+						"operation": "start_iteration",
+						"iteration": i,
+						"stage":     node.ID,
+					})
+				},
+				onCompleteIterationError: func(err error) {
+					emitEvent(ctx, cfg, store.TypeError, cursorJSON, map[string]any{
+						"error":     err.Error(),
+						"type":      "store_tracking",
+						"operation": "complete_iteration",
+						"iteration": i,
+						"stage":     node.ID,
+					})
+				},
+			})
 			if err != nil {
-				return Result{}, fmt.Errorf("runner: generate context for iteration %d: %w", i, err)
+				return Result{}, err
 			}
 
-			prompt := resolvePrompt(nodeCfg.PromptTemplate, ctxPath, cfg.Session, i, stageConfig, injectedContext)
-			injectedContext = ""
+			completed += outcome.completedDelta
+			stageCompleted += outcome.completedDelta
+			injectedContext = outcome.injectedContext
+			spawnedChildren = outcome.spawnedChildren
 
-			ctxVars, _ := resolve.VarsFromContext(ctxPath)
-
-			req := provider.Request{
-				Prompt:  prompt,
-				Model:   nodeCfg.Model,
-				WorkDir: nodeCfg.WorkDir,
-				Env:     buildEnv(nodeCfg, i),
-			}
-
-			provResult, provErr := executeWithTimeout(ctx, nodeCfg.Provider, req, cfg.IterationTimeout)
-			if provErr != nil {
-				emitEvent(ctx, cfg, store.TypeIterationFailed, cursorJSON, map[string]any{
-					"iteration": i,
-					"stage":     node.StageName,
-					"node_id":   node.ID,
-					"error":     provErr.Error(),
-					"exit_code": provResult.ExitCode,
-				})
-				storeMarkFailed(ctx, cfg, "provider_error", provErr.Error())
-				hc.SetStage(node.StageName)
-				hc.SetIteration(completed)
-				hc.SetStatus("failed")
-				hc.Fire(ctx, "on_failure")
-				return Result{
-					Iterations: completed,
-					Status:     store.StatusFailed,
-					Error:      provErr.Error(),
-				}, nil
-			}
-
-			iterResult, _, _ := extract.Extract(provResult.Stdout, provResult.ExitCode)
-			lastResult = iterResult
-
-			// Build work manifest from git changes during this iteration.
-			nodeManifest := buildWorkManifest(cfg.WorkDir, nodePreHead)
-			nodeManifestJSON, _ := json.Marshal(nodeManifest)
-			nodeDiffStat := ""
-			if nodeManifest.Git != nil {
-				nodeDiffStat = nodeManifest.Git.DiffStat
-			}
-
-			if err := writeIterationOutput(ctxVars.OUTPUT, iterResult, provResult, nodeDiffStat); err != nil {
-				return Result{}, fmt.Errorf("runner: write stage output for %s iteration %d: %w", node.ID, i, err)
-			}
-
-			signalsJSON, _ := json.Marshal(iterResult.Signals)
-			if err := cfg.Store.CompleteIteration(ctx, store.IterationComplete{
-				SessionName:  cfg.Session,
-				StageName:    node.ID,
-				Iteration:    i,
-				Decision:     iterResult.Decision,
-				Summary:      iterResult.Summary,
-				ExitCode:     provResult.ExitCode,
-				SignalsJSON:  string(signalsJSON),
-				Stdout:       provResult.Stdout,
-				Stderr:       provResult.Stderr,
-				ContextJSON:  string(nodeManifestJSON),
-				ProviderName: cfg.Provider.Name(),
-				DurationMS:   time.Since(nodeIterStartTime).Milliseconds(),
-				StreamJSON:   provResult.StreamJSON,
-			}); err != nil {
-				emitEvent(ctx, cfg, store.TypeError, cursorJSON, map[string]any{
-					"error":     err.Error(),
-					"type":      "store_tracking",
-					"operation": "complete_iteration",
-					"iteration": i,
-					"stage":     node.ID,
-				})
-			}
-
-			// Run post_iteration hook.
-			hc.SetStage(node.StageName)
-			hc.SetIteration(i)
-			hc.SetSummary(iterResult.Summary)
-			hc.Fire(ctx, "post_iteration")
-
-			if iterResult.Signals.Inject != "" {
-				injectedContext = iterResult.Signals.Inject
-				emitEvent(ctx, cfg, store.TypeSignalInject, cursorJSON, map[string]any{
-					"iteration": i,
-					"stage":     node.StageName,
-					"node_id":   node.ID,
-					"length":    len(injectedContext),
-				})
-			}
-
-			spawnRes, spawnErr := processSpawnSignals(nodeCfg, i, extractToSpawnSignals(iterResult.Signals.Spawn), spawnedChildren)
-			if spawnErr != nil {
-				return Result{}, fmt.Errorf("runner: process spawn signals: %w", spawnErr)
-			}
-			spawnedChildren = spawnRes.ChildCount
-
-			if len(spawnRes.ChildNames) > 0 {
-				for _, child := range spawnRes.ChildNames {
-					_ = cfg.Store.AddChild(ctx, cfg.Session, child)
+			if outcome.stop {
+				if outcome.status != "" {
+					return Result{
+						Iterations: completed,
+						Status:     outcome.status,
+						Reason:     outcome.reason,
+						Error:      outcome.err,
+					}, nil
 				}
-			}
-
-			completed++
-			stageCompleted++
-
-			if iterResult.Signals.Escalate != nil {
-				esc := extractToEscalate(iterResult.Signals.Escalate)
-				sigID := SignalID(i, "escalate", 0)
-
-				emitEvent(ctx, cfg, store.TypeSignalDispatching, cursorJSON, map[string]any{
-					"signal_id":   sigID,
-					"signal_type": "escalate",
-					"iteration":   i,
-				})
-
-				escJSON, _ := json.Marshal(map[string]any{
-					"type":    esc.Type,
-					"reason":  esc.Reason,
-					"options": esc.Options,
-				})
-				_ = cfg.Store.UpdateSession(ctx, cfg.Session, map[string]any{
-					"status":          "paused",
-					"escalation_json": string(escJSON),
-				})
-
-				emitEvent(ctx, cfg, store.TypeSignalEscalate, cursorJSON, map[string]any{
-					"signal_id": sigID,
-					"iteration": i,
-					"stage":     node.StageName,
-					"node_id":   node.ID,
-					"type":      esc.Type,
-					"reason":    esc.Reason,
-					"options":   esc.Options,
-				})
-				if err := dispatchSignalHandlers(dispatchSignalInput{
-					Store:         cfg.Store,
-					Session:       cfg.Session,
-					Stage:         node.StageName,
-					Iteration:     i,
-					SignalID:      sigID,
-					SignalType:    "escalate",
-					Handlers:      cfg.EscalateHandlers,
-					Timeout:       cfg.SignalHandlerTimeout,
-					Output:        cfg.SignalOutput,
-					Escalation:    esc,
-					CallbackURL:   cfg.CallbackURL,
-					CallbackToken: cfg.CallbackToken,
-				}); err != nil {
-					return Result{}, fmt.Errorf("runner: dispatch escalate handlers: %w", err)
-				}
-				return Result{
-					Iterations: completed,
-					Status:     store.StatusPaused,
-					Reason:     "escalation: " + esc.Reason,
-				}, nil
-			}
-
-			decision := strings.ToLower(strings.TrimSpace(lastResult.Decision))
-			if decision == "error" {
-				storeMarkFailed(ctx, cfg, "agent_error", fmt.Sprintf("agent requested error at stage %s iteration %d", node.StageName, i))
-				hc.SetStatus("failed")
-				hc.Fire(ctx, "on_failure")
-				return Result{
-					Iterations: completed,
-					Status:     store.StatusFailed,
-					Error:      "agent requested error",
-				}, nil
-			}
-			if decision == "stop" || i >= fixed.Target() {
 				break
 			}
 		}
@@ -1117,10 +1091,10 @@ func pipelineNodes(pipeline *compile.Pipeline) ([]pipelineRunNode, error) {
 				nodeID = fmt.Sprintf("swarm-%d", idx)
 			}
 			nodes = append(nodes, pipelineRunNode{
-				ID:       nodeID,
-				Index:    idx,
-				Inputs:   node.Inputs,
-				Swarm:    node.Swarm,
+				ID:     nodeID,
+				Index:  idx,
+				Inputs: node.Inputs,
+				Swarm:  node.Swarm,
 			})
 			continue
 		}
