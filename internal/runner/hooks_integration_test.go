@@ -491,6 +491,245 @@ func TestHooks_Pipeline_PreIterationFiresBeforeProvider(t *testing.T) {
 	}
 }
 
+// TestHooks_Pipeline_PreStageFiresBeforeEachNode verifies that pre_stage fires
+// before each pipeline node, recording stage names in order.
+func TestHooks_Pipeline_PreStageFiresBeforeEachNode(t *testing.T) {
+	runDir, s := tempSession(t)
+	workDir := filepath.Dir(filepath.Dir(filepath.Dir(runDir)))
+
+	mp := mock.New(
+		mock.WithFallback(mock.Response{
+			Decision: "continue",
+			Summary:  "stage work",
+		}),
+	)
+
+	logFile := filepath.Join(workDir, "pre-stage.log")
+
+	pipeline := &compile.Pipeline{
+		Name: "pre-stage-hooks",
+		Nodes: []compile.Node{
+			{ID: "plan", Stage: "improve-plan", Runs: 1},
+			{ID: "refine", Stage: "refine-tasks", Runs: 1},
+		},
+	}
+
+	cfg := Config{
+		Session:        "hooks-pre-stage",
+		RunDir:         runDir,
+		Provider:       mp,
+		Pipeline:       pipeline,
+		PromptTemplate: "iteration ${ITERATION}",
+		WorkDir:        workDir,
+		Store:          s,
+		HookTimeout:    10 * time.Second,
+		Hooks: LifecycleHooks{
+			PreStage: "echo $AP_STAGE >> " + logFile,
+		},
+	}
+
+	res, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if res.Status != store.StatusCompleted {
+		t.Fatalf("status = %q, want %q", res.Status, store.StatusCompleted)
+	}
+
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read pre-stage log: %v", err)
+	}
+	lines := nonEmptyLines(string(data))
+	if len(lines) != 2 {
+		t.Fatalf("pre_stage lines = %d, want 2; got: %v", len(lines), lines)
+	}
+	if lines[0] != "improve-plan" {
+		t.Errorf("pre_stage[0] = %q, want improve-plan", lines[0])
+	}
+	if lines[1] != "refine-tasks" {
+		t.Errorf("pre_stage[1] = %q, want refine-tasks", lines[1])
+	}
+}
+
+// TestHooks_Pipeline_FailureMidPipeline verifies that on_failure fires and
+// post_session does NOT fire when a provider fails during a pipeline.
+func TestHooks_Pipeline_FailureMidPipeline(t *testing.T) {
+	runDir, s := tempSession(t)
+	workDir := filepath.Dir(filepath.Dir(filepath.Dir(runDir)))
+
+	// First node succeeds, second node fails.
+	failMP := mock.New(
+		mock.WithResponses(
+			mock.ContinueResponse("node 1 ok"),
+			mock.FailureResponse(context.DeadlineExceeded),
+		),
+	)
+
+	failureMarker := filepath.Join(workDir, "pipeline-failure.marker")
+	successMarker := filepath.Join(workDir, "pipeline-success.marker")
+
+	pipeline := &compile.Pipeline{
+		Name: "fail-pipeline",
+		Nodes: []compile.Node{
+			{ID: "step1", Stage: "improve-plan", Runs: 1},
+			{ID: "step2", Stage: "improve-plan", Runs: 1},
+		},
+	}
+
+	cfg := Config{
+		Session:        "hooks-pipeline-fail",
+		RunDir:         runDir,
+		Provider:       failMP,
+		Pipeline:       pipeline,
+		PromptTemplate: "iteration ${ITERATION}",
+		WorkDir:        workDir,
+		Store:          s,
+		HookTimeout:    10 * time.Second,
+		Hooks: LifecycleHooks{
+			OnFailure:   "touch " + failureMarker,
+			PostSession: "touch " + successMarker,
+		},
+	}
+
+	res, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if res.Status != store.StatusFailed {
+		t.Fatalf("status = %q, want %q", res.Status, store.StatusFailed)
+	}
+
+	// on_failure should have fired.
+	if _, err := os.Stat(failureMarker); os.IsNotExist(err) {
+		t.Error("on_failure marker missing — hook did not fire on pipeline failure")
+	}
+
+	// post_session should NOT have fired.
+	if _, err := os.Stat(successMarker); err == nil {
+		t.Error("post_session marker exists — should not fire on pipeline failure")
+	}
+}
+
+// TestHooks_SingleStage_StopDecision verifies that post_session fires when
+// the agent returns a "stop" decision before reaching max iterations.
+func TestHooks_SingleStage_StopDecision(t *testing.T) {
+	runDir, s := tempSession(t)
+	workDir := filepath.Dir(filepath.Dir(filepath.Dir(runDir)))
+
+	mp := mock.New(
+		mock.WithResponses(
+			mock.ContinueResponse("work 1"),
+			mock.Response{Decision: "stop", Summary: "all done"},
+		),
+	)
+
+	logFile := filepath.Join(workDir, "stop-hooks.log")
+
+	cfg := Config{
+		Session:        "hooks-stop",
+		RunDir:         runDir,
+		StageName:      "test-stage",
+		Provider:       mp,
+		Iterations:     5,
+		PromptTemplate: "iteration ${ITERATION}",
+		Store:          s,
+		WorkDir:        workDir,
+		HookTimeout:    10 * time.Second,
+		Hooks: LifecycleHooks{
+			PreSession:    "echo pre_session >> " + logFile,
+			PostIteration: "echo post_iteration >> " + logFile,
+			PostSession:   "echo post_session >> " + logFile,
+		},
+	}
+
+	res, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if res.Status != store.StatusCompleted {
+		t.Fatalf("status = %q, want %q", res.Status, store.StatusCompleted)
+	}
+	if res.Iterations != 2 {
+		t.Fatalf("iterations = %d, want 2", res.Iterations)
+	}
+
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	lines := nonEmptyLines(string(data))
+	// Expected: pre_session, post_iteration, post_iteration, post_session
+	expected := []string{
+		"pre_session",
+		"post_iteration",
+		"post_iteration",
+		"post_session",
+	}
+	if len(lines) != len(expected) {
+		t.Fatalf("hook log lines = %d, want %d; got: %v", len(lines), len(expected), lines)
+	}
+	for i, want := range expected {
+		if lines[i] != want {
+			t.Errorf("hook log[%d] = %q, want %q", i, lines[i], want)
+		}
+	}
+}
+
+// TestHooks_SingleStage_SummaryInjectionSafety verifies that shell
+// metacharacters in the summary do not cause injection via ${SUMMARY}.
+func TestHooks_SingleStage_SummaryInjectionSafety(t *testing.T) {
+	runDir, s := tempSession(t)
+	workDir := filepath.Dir(filepath.Dir(filepath.Dir(runDir)))
+
+	maliciousMarker := filepath.Join(workDir, "pwned.txt")
+	mp := mock.New(
+		mock.WithResponses(
+			mock.Response{
+				Decision: "stop",
+				Summary:  "$(touch " + maliciousMarker + ")",
+			},
+		),
+	)
+
+	logFile := filepath.Join(workDir, "safe-summary.log")
+
+	cfg := Config{
+		Session:        "hooks-safe-summary",
+		RunDir:         runDir,
+		StageName:      "test-stage",
+		Provider:       mp,
+		Iterations:     1,
+		PromptTemplate: "iteration ${ITERATION}",
+		Store:          s,
+		WorkDir:        workDir,
+		HookTimeout:    10 * time.Second,
+		Hooks: LifecycleHooks{
+			PostIteration: "echo ${SUMMARY} >> " + logFile,
+		},
+	}
+
+	_, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+
+	// The malicious marker should NOT exist.
+	if _, err := os.Stat(maliciousMarker); err == nil {
+		t.Fatal("shell injection via summary succeeded — malicious marker was created")
+	}
+
+	// The log should contain the literal text, not an executed command.
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	content := strings.TrimSpace(string(data))
+	if !strings.Contains(content, "touch") {
+		t.Fatalf("expected literal shell text in log, got %q", content)
+	}
+}
+
 // nonEmptyLines splits text on newlines and returns non-blank lines.
 func nonEmptyLines(s string) []string {
 	var out []string

@@ -384,3 +384,152 @@ func TestHookContext_StateAccumulates(t *testing.T) {
 		t.Errorf("line 3 = %q, want final:iter-xxx (last summary persists)", lines[3])
 	}
 }
+
+func TestRunHook_ShellInjectionSafety(t *testing.T) {
+	dir := t.TempDir()
+	markerPath := filepath.Join(dir, "injection.txt")
+	maliciousMarker := filepath.Join(dir, "pwned.txt")
+
+	vars := map[string]string{
+		"SESSION": "safe",
+		"SUMMARY": "$(touch " + maliciousMarker + ")",
+	}
+
+	// ${SUMMARY} is shell-quoted; the subshell should NOT execute.
+	cmd := "echo ${SUMMARY} > " + markerPath
+	err := RunHook(context.Background(), "test", cmd, dir, vars, 10*time.Second)
+	if err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+
+	// The malicious marker should NOT exist.
+	if _, err := os.Stat(maliciousMarker); err == nil {
+		t.Fatal("shell injection succeeded — malicious marker file was created")
+	}
+
+	// The literal text should have been written.
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	content := strings.TrimSpace(string(data))
+	if !strings.Contains(content, "touch") {
+		t.Fatalf("expected literal shell text, got %q", content)
+	}
+}
+
+func TestRunHook_SummaryWithSpecialChars(t *testing.T) {
+	dir := t.TempDir()
+	markerPath := filepath.Join(dir, "special.txt")
+
+	vars := map[string]string{
+		"SESSION": "s1",
+		"SUMMARY": "feat: add user's auth & fix bug #42",
+	}
+
+	cmd := "echo ${SUMMARY} > " + markerPath
+	err := RunHook(context.Background(), "test", cmd, dir, vars, 10*time.Second)
+	if err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	content := strings.TrimSpace(string(data))
+	if content != "feat: add user's auth & fix bug #42" {
+		t.Fatalf("special chars mangled: got %q", content)
+	}
+}
+
+func TestRunHook_FailingCommandStderr(t *testing.T) {
+	err := RunHook(context.Background(), "stderr_hook", "echo 'oops' >&2; exit 1", t.TempDir(), nil, 10*time.Second)
+	if err == nil {
+		t.Fatal("expected error from failing hook with stderr")
+	}
+	// Error message should include stderr output.
+	if !strings.Contains(err.Error(), "oops") {
+		t.Fatalf("error = %q, want it to include stderr 'oops'", err.Error())
+	}
+}
+
+func TestRunHook_FailingCommandStdoutFallback(t *testing.T) {
+	// When stderr is empty, stdout should appear in the error detail.
+	err := RunHook(context.Background(), "stdout_hook", "echo 'helpful info'; exit 1", t.TempDir(), nil, 10*time.Second)
+	if err == nil {
+		t.Fatal("expected error from failing hook")
+	}
+	if !strings.Contains(err.Error(), "helpful info") {
+		t.Fatalf("error = %q, want it to include stdout 'helpful info'", err.Error())
+	}
+}
+
+func TestRunHook_NegativeTimeout(t *testing.T) {
+	// Negative timeout should be treated like zero (default to 60s).
+	dir := t.TempDir()
+	markerPath := filepath.Join(dir, "neg-timeout.txt")
+	err := RunHook(context.Background(), "test", "touch "+markerPath, dir, nil, -1*time.Second)
+	if err != nil {
+		t.Fatalf("RunHook with negative timeout: %v", err)
+	}
+	if _, err := os.Stat(markerPath); os.IsNotExist(err) {
+		t.Fatal("expected marker file from negative-timeout hook")
+	}
+}
+
+func TestLifecycleHooks_ApplyOverrides_WhitespaceOnly(t *testing.T) {
+	hooks := LifecycleHooks{
+		PreSession: "original",
+	}
+	hooks.ApplyOverrides(map[string]string{
+		"pre_session": "   ", // whitespace-only should NOT override
+	})
+	if hooks.PreSession != "original" {
+		t.Errorf("PreSession = %q, want original (whitespace override should be ignored)", hooks.PreSession)
+	}
+}
+
+func TestLifecycleHooks_ApplyOverrides_UnknownKey(t *testing.T) {
+	hooks := LifecycleHooks{
+		PreSession: "original",
+	}
+	hooks.ApplyOverrides(map[string]string{
+		"unknown_hook": "should be ignored",
+	})
+	if hooks.PreSession != "original" {
+		t.Errorf("PreSession = %q, want original", hooks.PreSession)
+	}
+}
+
+func TestLifecycleHooks_Command_AllHookNames(t *testing.T) {
+	// Exhaustive: every valid hook name returns its value.
+	hooks := LifecycleHooks{
+		PreSession:    "a",
+		PreIteration:  "b",
+		PreStage:      "c",
+		PostIteration: "d",
+		PostStage:     "e",
+		PostSession:   "f",
+		OnFailure:     "g",
+	}
+	for _, tc := range []struct {
+		name string
+		want string
+	}{
+		{"pre_session", "a"},
+		{"pre_iteration", "b"},
+		{"pre_stage", "c"},
+		{"post_iteration", "d"},
+		{"post_stage", "e"},
+		{"post_session", "f"},
+		{"on_failure", "g"},
+		{"", ""},
+		{"random", ""},
+	} {
+		got := hooks.Command(tc.name)
+		if got != tc.want {
+			t.Errorf("Command(%q) = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
