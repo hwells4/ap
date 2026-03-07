@@ -51,7 +51,19 @@ func (p *ProcessLauncher) Start(session string, runnerCmd []string, opts StartOp
 		p.mu.Unlock()
 		return SessionHandle{}, ErrSessionExists
 	}
+	// Reserve the slot to prevent TOCTOU race between check and registration.
+	p.sessions[session] = processEntry{}
 	p.mu.Unlock()
+
+	// On any failure before final registration, release the reservation.
+	registered := false
+	defer func() {
+		if !registered {
+			p.mu.Lock()
+			delete(p.sessions, session)
+			p.mu.Unlock()
+		}
+	}()
 
 	if len(runnerCmd) == 0 {
 		return SessionHandle{}, fmt.Errorf("session: empty runner command")
@@ -143,10 +155,11 @@ func (p *ProcessLauncher) Start(session string, runnerCmd []string, opts StartOp
 		return SessionHandle{}, ErrStartTimeout
 	}
 
-	// Register session.
+	// Finalize registration with real PID.
 	p.mu.Lock()
 	p.sessions[session] = processEntry{pid: pid, session: session}
 	p.mu.Unlock()
+	registered = true
 
 	return SessionHandle{
 		Session: session,

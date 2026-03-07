@@ -167,12 +167,12 @@ func (c *CLI) Execute(ctx context.Context, req provider.Request) (provider.Resul
 		binary = DefaultBinary
 	}
 
-	// Build args: exec --model MODEL --dangerously-bypass-approvals-and-sandbox --ephemeral -
+	// Build args: exec --model MODEL --dangerously-bypass-approvals-and-sandbox -
 	args := []string{"exec", "--model", model}
 	if c.Bypass {
 		args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 	}
-	args = append(args, "--ephemeral", "-")
+	args = append(args, "-")
 
 	cmd := internalexec.Command(ctx, binary, args...)
 	if req.WorkDir != "" {

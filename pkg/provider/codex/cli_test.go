@@ -62,7 +62,7 @@ echo "stderr-line" >&2
 }
 
 func TestExecuteCommandConstruction(t *testing.T) {
-	// Verify the command includes exec subcommand, bypass, and ephemeral flags.
+	// Verify the command includes exec subcommand and bypass flag (no --ephemeral).
 	cli := newTestCLI(t, `
 cat >/dev/null
 echo "$@"
@@ -82,8 +82,8 @@ echo "$@"
 	if !strings.Contains(args, "--dangerously-bypass-approvals-and-sandbox") {
 		t.Errorf("missing --dangerously-bypass-approvals-and-sandbox flag in: %s", args)
 	}
-	if !strings.Contains(args, "--ephemeral") {
-		t.Errorf("missing --ephemeral flag in: %s", args)
+	if strings.Contains(args, "--ephemeral") {
+		t.Errorf("should not include removed --ephemeral flag in: %s", args)
 	}
 	// The "-" flag tells codex to read from stdin.
 	if !strings.Contains(args, " -") {

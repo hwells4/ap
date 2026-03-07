@@ -140,6 +140,29 @@ func resumeSessionStore(deps cliDeps, sessionStore *store.Store, ctx context.Con
 
 	resumeFrom := row.IterationCompleted + 1
 
+	// Validate and parse the run request BEFORE changing state to "running".
+	// This prevents leaving the session in a bad state if validation fails.
+	var req RunRequestFile
+	if row.RunRequestJSON != "" && row.RunRequestJSON != "{}" {
+		if parseErr := json.Unmarshal([]byte(row.RunRequestJSON), &req); parseErr != nil {
+			return renderError(deps, output.ExitGeneralError, output.NewError(
+				"RUN_REQUEST_PARSE_ERROR",
+				fmt.Sprintf("failed to parse run request for session %q", session),
+				parseErr.Error(),
+				"ap resume <session> [--context TEXT] [--json]",
+				nil,
+			))
+		}
+	} else {
+		return renderError(deps, output.ExitGeneralError, output.NewError(
+			"MISSING_RUN_REQUEST",
+			fmt.Sprintf("session %q has no stored run request", session),
+			"The session cannot be resumed without a run request.",
+			"ap resume <session> [--context TEXT] [--json]",
+			[]string{"ap run <spec> <new-session>"},
+		))
+	}
+
 	err = sessionStore.UpdateSession(ctx, session, map[string]any{
 		"status": "running",
 	})
@@ -164,28 +187,6 @@ func resumeSessionStore(deps cliDeps, sessionStore *store.Store, ctx context.Con
 	}
 	if contextOverride != "" {
 		payload["context_override"] = contextOverride
-	}
-
-	// Re-launch the session process via launcher.
-	var req RunRequestFile
-	if row.RunRequestJSON != "" && row.RunRequestJSON != "{}" {
-		if parseErr := json.Unmarshal([]byte(row.RunRequestJSON), &req); parseErr != nil {
-			return renderError(deps, output.ExitGeneralError, output.NewError(
-				"RUN_REQUEST_PARSE_ERROR",
-				fmt.Sprintf("failed to parse run request for session %q", session),
-				parseErr.Error(),
-				"ap resume <session> [--context TEXT] [--json]",
-				nil,
-			))
-		}
-	} else {
-		return renderError(deps, output.ExitGeneralError, output.NewError(
-			"MISSING_RUN_REQUEST",
-			fmt.Sprintf("session %q has no stored run request", session),
-			"The session cannot be resumed without a run request.",
-			"ap resume <session> [--context TEXT] [--json]",
-			[]string{"ap run <spec> <new-session>"},
-		))
 	}
 
 	// Inject context override into the run request so the runner can seed ${CONTEXT}.
