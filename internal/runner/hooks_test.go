@@ -533,3 +533,228 @@ func TestLifecycleHooks_Command_AllHookNames(t *testing.T) {
 		}
 	}
 }
+
+func TestRunHook_NilVars(t *testing.T) {
+	// Passing nil vars should work (no variable substitution).
+	dir := t.TempDir()
+	markerPath := filepath.Join(dir, "nil-vars.txt")
+	err := RunHook(context.Background(), "test", "echo hello > "+markerPath, dir, nil, 10*time.Second)
+	if err != nil {
+		t.Fatalf("RunHook with nil vars: %v", err)
+	}
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "hello" {
+		t.Fatalf("got %q, want hello", strings.TrimSpace(string(data)))
+	}
+}
+
+func TestRunHook_EmptyVars(t *testing.T) {
+	// Passing an empty vars map should work.
+	dir := t.TempDir()
+	markerPath := filepath.Join(dir, "empty-vars.txt")
+	err := RunHook(context.Background(), "test", "echo ok > "+markerPath, dir, map[string]string{}, 10*time.Second)
+	if err != nil {
+		t.Fatalf("RunHook with empty vars: %v", err)
+	}
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != "ok" {
+		t.Fatalf("got %q, want ok", strings.TrimSpace(string(data)))
+	}
+}
+
+func TestLifecycleHooks_ApplyOverrides_AllFields(t *testing.T) {
+	// Override all 7 hook fields at once.
+	hooks := LifecycleHooks{}
+	hooks.ApplyOverrides(map[string]string{
+		"pre_session":    "a",
+		"pre_iteration":  "b",
+		"pre_stage":      "c",
+		"post_iteration": "d",
+		"post_stage":     "e",
+		"post_session":   "f",
+		"on_failure":     "g",
+	})
+	if hooks.PreSession != "a" {
+		t.Errorf("PreSession = %q, want a", hooks.PreSession)
+	}
+	if hooks.PreIteration != "b" {
+		t.Errorf("PreIteration = %q, want b", hooks.PreIteration)
+	}
+	if hooks.PreStage != "c" {
+		t.Errorf("PreStage = %q, want c", hooks.PreStage)
+	}
+	if hooks.PostIteration != "d" {
+		t.Errorf("PostIteration = %q, want d", hooks.PostIteration)
+	}
+	if hooks.PostStage != "e" {
+		t.Errorf("PostStage = %q, want e", hooks.PostStage)
+	}
+	if hooks.PostSession != "f" {
+		t.Errorf("PostSession = %q, want f", hooks.PostSession)
+	}
+	if hooks.OnFailure != "g" {
+		t.Errorf("OnFailure = %q, want g", hooks.OnFailure)
+	}
+	if hooks.IsEmpty() {
+		t.Error("hooks should not be empty after override")
+	}
+}
+
+func TestLifecycleHooks_IsEmpty_EachField(t *testing.T) {
+	// Verify IsEmpty returns false when ANY single field is set.
+	fields := []struct {
+		name string
+		fn   func() LifecycleHooks
+	}{
+		{"PreSession", func() LifecycleHooks { return LifecycleHooks{PreSession: "x"} }},
+		{"PreIteration", func() LifecycleHooks { return LifecycleHooks{PreIteration: "x"} }},
+		{"PreStage", func() LifecycleHooks { return LifecycleHooks{PreStage: "x"} }},
+		{"PostIteration", func() LifecycleHooks { return LifecycleHooks{PostIteration: "x"} }},
+		{"PostStage", func() LifecycleHooks { return LifecycleHooks{PostStage: "x"} }},
+		{"PostSession", func() LifecycleHooks { return LifecycleHooks{PostSession: "x"} }},
+		{"OnFailure", func() LifecycleHooks { return LifecycleHooks{OnFailure: "x"} }},
+	}
+	for _, f := range fields {
+		h := f.fn()
+		if h.IsEmpty() {
+			t.Errorf("IsEmpty() = true when %s is set", f.name)
+		}
+	}
+}
+
+func TestRunHook_BacktickInjectionSafety(t *testing.T) {
+	// Backtick command substitution should also be prevented.
+	dir := t.TempDir()
+	markerPath := filepath.Join(dir, "backtick.txt")
+	maliciousMarker := filepath.Join(dir, "pwned-backtick.txt")
+
+	vars := map[string]string{
+		"SESSION": "safe",
+		"SUMMARY": "`touch " + maliciousMarker + "`",
+	}
+
+	cmd := "echo ${SUMMARY} > " + markerPath
+	err := RunHook(context.Background(), "test", cmd, dir, vars, 10*time.Second)
+	if err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+
+	// The malicious marker should NOT exist.
+	if _, err := os.Stat(maliciousMarker); err == nil {
+		t.Fatal("backtick injection succeeded — malicious marker file was created")
+	}
+}
+
+func TestRunHook_MultilineCommand(t *testing.T) {
+	// Verify multi-line commands work (sh -c handles them).
+	dir := t.TempDir()
+	markerPath := filepath.Join(dir, "multiline.txt")
+	cmd := "echo first > " + markerPath + "\necho second >> " + markerPath
+	err := RunHook(context.Background(), "test", cmd, dir, nil, 10*time.Second)
+	if err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 || lines[0] != "first" || lines[1] != "second" {
+		t.Fatalf("multiline result = %v, want [first, second]", lines)
+	}
+}
+
+func TestRunHook_PipeInjectionSafety(t *testing.T) {
+	// Pipe operator in SUMMARY should not execute as a pipe.
+	dir := t.TempDir()
+	markerPath := filepath.Join(dir, "pipe.txt")
+
+	vars := map[string]string{
+		"SESSION": "safe",
+		"SUMMARY": "hello | cat /etc/passwd",
+	}
+
+	cmd := "echo ${SUMMARY} > " + markerPath
+	err := RunHook(context.Background(), "test", cmd, dir, vars, 10*time.Second)
+	if err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	content := strings.TrimSpace(string(data))
+	// The literal text should appear, including the pipe character.
+	if !strings.Contains(content, "|") {
+		t.Fatalf("pipe char lost: got %q", content)
+	}
+	if !strings.Contains(content, "cat /etc/passwd") {
+		t.Fatalf("expected literal pipe text, got %q", content)
+	}
+}
+
+func TestRunHook_SemicolonInjectionSafety(t *testing.T) {
+	// Semicolons in SUMMARY should not execute as separate commands.
+	dir := t.TempDir()
+	markerPath := filepath.Join(dir, "semicolon.txt")
+	maliciousMarker := filepath.Join(dir, "pwned-semi.txt")
+
+	vars := map[string]string{
+		"SESSION": "safe",
+		"SUMMARY": "done; touch " + maliciousMarker,
+	}
+
+	cmd := "echo ${SUMMARY} > " + markerPath
+	err := RunHook(context.Background(), "test", cmd, dir, vars, 10*time.Second)
+	if err != nil {
+		t.Fatalf("RunHook: %v", err)
+	}
+
+	// The malicious marker should NOT exist.
+	if _, err := os.Stat(maliciousMarker); err == nil {
+		t.Fatal("semicolon injection succeeded — malicious marker file was created")
+	}
+}
+
+func TestNewHookContext_DefaultStatus(t *testing.T) {
+	cfg := Config{Session: "test"}
+	hc := NewHookContext(cfg)
+	vars := hc.vars()
+	if vars["STATUS"] != "running" {
+		t.Errorf("default status = %q, want running", vars["STATUS"])
+	}
+}
+
+func TestHookContext_SettersUpdateVars(t *testing.T) {
+	cfg := Config{Session: "test-session"}
+	hc := NewHookContext(cfg)
+
+	hc.SetStage("my-stage")
+	hc.SetIteration(5)
+	hc.SetStatus("completed")
+	hc.SetSummary("all done")
+
+	vars := hc.vars()
+	if vars["SESSION"] != "test-session" {
+		t.Errorf("SESSION = %q, want test-session", vars["SESSION"])
+	}
+	if vars["STAGE"] != "my-stage" {
+		t.Errorf("STAGE = %q, want my-stage", vars["STAGE"])
+	}
+	if vars["ITERATION"] != "5" {
+		t.Errorf("ITERATION = %q, want 5", vars["ITERATION"])
+	}
+	if vars["STATUS"] != "completed" {
+		t.Errorf("STATUS = %q, want completed", vars["STATUS"])
+	}
+	if vars["SUMMARY"] != "all done" {
+		t.Errorf("SUMMARY = %q, want all done", vars["SUMMARY"])
+	}
+}
