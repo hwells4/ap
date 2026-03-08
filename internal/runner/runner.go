@@ -295,6 +295,7 @@ type iterationParams struct {
 	spawnedChildren          int
 	retry                    iterationRetryConfig
 	termination              iterationTerminationConfig
+	contextOpts              *apcontext.GenerateContextOpts
 	onStartIterationError    func(error)
 	onCompleteIterationError func(error)
 }
@@ -346,16 +347,19 @@ func executeIteration(ctx context.Context, params iterationParams) (iterationOut
 		preHead = gitHead(cfg.WorkDir)
 	}
 
-	historyPath := filepath.Join(cfg.RunDir, "history.md")
-	writeHistory(ctx, cfg.Store, cfg.Session, historyPath)
-
-	ctxPath, err := apcontext.GenerateContext(cfg.Session, i, params.stageConfig, cfg.RunDir, nil)
+	ctxPath, err := apcontext.GenerateContext(cfg.Session, i, params.stageConfig, cfg.RunDir, params.contextOpts)
 	if err != nil {
 		return iterationOutcome{}, fmt.Errorf("runner: generate context for iteration %d: %w", i, err)
 	}
 
-	prompt := resolvePrompt(params.promptTemplate, ctxPath, cfg.Session, i, params.stageConfig, params.injectedContext)
 	ctxVars, _ := resolve.VarsFromContext(ctxPath)
+
+	// Write history.md to the iteration directory (path from context.json).
+	if ctxVars.HISTORY != "" {
+		writeHistory(ctx, cfg.Store, cfg.Session, ctxVars.HISTORY)
+	}
+
+	prompt := resolvePrompt(params.promptTemplate, ctxPath, cfg.Session, i, params.stageConfig, params.injectedContext)
 
 	req := provider.Request{
 		Prompt:  prompt,
@@ -672,6 +676,9 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 	}
 	emitEvent(ctx, cfg, store.TypeSessionStart, "{}", startData)
 
+	// Create empty messages.jsonl so agents can find it via context.json.
+	ensureMessagesFile(cfg.RunDir)
+
 	// Initialize hook context — accumulates state, available to all hooks.
 	hc := NewHookContext(cfg)
 	hc.SetStage(cfg.StageName)
@@ -871,6 +878,9 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 		},
 	})
 
+	// Create empty messages.jsonl so agents can find it via context.json.
+	ensureMessagesFile(cfg.RunDir)
+
 	// Initialize hook context for pipeline run.
 	hc := NewHookContext(cfg)
 	firstStage := nodes[0].StageName
@@ -895,7 +905,7 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 			hc.SetStage(node.ID)
 			hc.Fire(ctx, "pre_stage")
 
-			swarmResult, swarmErr := executeSwarmNode(ctx, cfg, node, nodeIdx, injectedContext)
+			swarmResult, swarmErr := executeSwarmNode(ctx, cfg, node, nodeIdx, injectedContext, pipelineName)
 			if swarmErr != nil {
 				storeMarkFailed(ctx, cfg, "swarm_error", swarmErr.Error())
 				hc.SetStage(node.ID)
@@ -1004,6 +1014,7 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 				outputErrorMessage: fmt.Sprintf("write stage output for %s iteration %d", node.ID, i),
 				injectedContext:    injectedContext,
 				spawnedChildren:    spawnedChildren,
+				contextOpts:        &apcontext.GenerateContextOpts{PipelineName: pipelineName},
 				retry: iterationRetryConfig{
 					MaxAttempts: 1,
 				},
@@ -1145,15 +1156,25 @@ type swarmNodeResult struct {
 }
 
 // executeSwarmNode runs a swarm block within a pipeline.
-func executeSwarmNode(ctx context.Context, cfg Config, node pipelineRunNode, nodeIdx int, injectedContext string) (swarmNodeResult, error) {
+func executeSwarmNode(ctx context.Context, cfg Config, node pipelineRunNode, nodeIdx int, injectedContext string, pipelineName string) (swarmNodeResult, error) {
 	if node.Swarm == nil {
 		return swarmNodeResult{}, fmt.Errorf("runner: node %q is not a swarm node", node.ID)
 	}
 
-	// Create the swarm executor.
+	// Capture git HEAD once before any provider runs to avoid race
+	// conditions between concurrent providers in the same worktree.
+	blockPreHead := ""
+	if isGitRepo(cfg.WorkDir) {
+		blockPreHead = gitHead(cfg.WorkDir)
+	}
+
+	// Create the swarm executor with hook context for iteration hooks.
 	executor := &swarmExecutor{
-		cfg:     cfg,
-		blockID: node.ID,
+		cfg:          cfg,
+		blockID:      node.ID,
+		hookCtx:      NewHookContext(cfg),
+		blockPreHead: blockPreHead,
+		pipelineName: pipelineName,
 	}
 
 	// Emit swarm.started event.
@@ -1479,6 +1500,16 @@ func runTargetPayload(target runtarget.Target) map[string]any {
 		"project_key":  target.ProjectKey,
 		"source":       target.Source,
 	}
+}
+
+// ensureMessagesFile creates an empty messages.jsonl in the run directory
+// if it doesn't already exist. Best-effort: errors are silently ignored.
+func ensureMessagesFile(runDir string) {
+	path := filepath.Join(runDir, "messages.jsonl")
+	if _, err := os.Stat(path); err == nil {
+		return // already exists
+	}
+	_ = os.WriteFile(path, []byte{}, 0o644)
 }
 
 // emitEvent is a best-effort helper that appends an event to the store.

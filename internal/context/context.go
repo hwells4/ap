@@ -128,7 +128,7 @@ func GenerateContext(session string, iteration int, stageConfig StageConfig, run
 	}
 
 	progressFile := filepath.Join(runDir, "progress.md")
-	historyFile := filepath.Join(runDir, "history.md")
+	historyFile := filepath.Join(iterDir, "history.md")
 
 	outputFile := filepath.Join(iterDir, "output.md")
 	messagesFile := filepath.Join(runDir, "messages.jsonl")

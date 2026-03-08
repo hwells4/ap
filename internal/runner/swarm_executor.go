@@ -24,8 +24,11 @@ import (
 // swarmExecutor implements swarm.Executor by bridging to the runner's
 // provider execution infrastructure.
 type swarmExecutor struct {
-	cfg     Config // runner.Config (store, workdir, etc.)
-	blockID string
+	cfg          Config       // runner.Config (store, workdir, etc.)
+	blockID      string
+	hookCtx      *HookContext // lifecycle hooks for iteration events
+	blockPreHead string       // git HEAD captured once at swarm block start
+	pipelineName string       // pipeline name for context.json
 }
 
 // Execute runs a single stage for a single provider instance inside a swarm block.
@@ -98,18 +101,28 @@ func (e *swarmExecutor) Execute(ctx context.Context, req swarm.ExecuteRequest) (
 			ProviderName: prov.Name(),
 		})
 
-		// Capture git HEAD before execution.
-		preHead := ""
-		if isGitRepo(e.cfg.WorkDir) {
-			preHead = gitHead(e.cfg.WorkDir)
+		// Fire pre_iteration hook.
+		if e.hookCtx != nil {
+			e.hookCtx.SetStage(stageName)
+			e.hookCtx.SetIteration(i)
+			e.hookCtx.Fire(ctx, "pre_iteration")
 		}
+
+		// Use the block-level preHead captured once at swarm start.
+		// Per-provider git capture is racy when multiple providers
+		// run concurrently in the same worktree.
+		preHead := e.blockPreHead
 
 		// Write provider-scoped history.
 		historyPath := filepath.Join(req.StageDir, "iterations", fmt.Sprintf("%03d", i), "history.md")
 		writeProviderHistory(ctx, e.cfg.Store, e.cfg.Session, compoundStageName, historyPath)
 
 		// Generate context.json into the provider's stage directory.
-		ctxPath, err := apcontext.GenerateContext(e.cfg.Session, i, stageConfig, req.ProviderDir, nil)
+		var ctxOpts *apcontext.GenerateContextOpts
+		if e.pipelineName != "" {
+			ctxOpts = &apcontext.GenerateContextOpts{PipelineName: e.pipelineName}
+		}
+		ctxPath, err := apcontext.GenerateContext(e.cfg.Session, i, stageConfig, req.ProviderDir, ctxOpts)
 		if err != nil {
 			return swarm.StageResult{}, fmt.Errorf("generate context for iteration %d: %w", i, err)
 		}
@@ -184,6 +197,14 @@ func (e *swarmExecutor) Execute(ctx context.Context, req swarm.ExecuteRequest) (
 			ProviderName: prov.Name(),
 			DurationMS:   time.Since(iterStartTime).Milliseconds(),
 		})
+
+		// Fire post_iteration hook.
+		if e.hookCtx != nil {
+			e.hookCtx.SetStage(stageName)
+			e.hookCtx.SetIteration(i)
+			e.hookCtx.SetSummary(iterResult.Summary)
+			e.hookCtx.Fire(ctx, "post_iteration")
+		}
 
 		// Handle inject signal.
 		if iterResult.Signals.Inject != "" {

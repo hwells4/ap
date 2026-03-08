@@ -77,7 +77,8 @@ func Extract(stdout string, exitCode int) (Result, Source, error) {
 }
 
 // extractFencedBlock finds the LAST ```ap-result ... ``` block in stdout
-// and attempts to parse its JSON content.
+// and attempts to parse its JSON content. Supports both multi-line fenced
+// blocks and inline single-line blocks (e.g. ```ap-result {...} ```).
 func extractFencedBlock(stdout string) (Result, bool) {
 	lines := strings.Split(stdout, "\n")
 
@@ -88,16 +89,29 @@ func extractFencedBlock(stdout string) (Result, bool) {
 		trimmed := strings.TrimSpace(lines[i])
 		openTicks := apResultFenceTicks(trimmed)
 		if openTicks == 0 {
+			// Check for inline ap-result block within this line.
+			if result, ok := extractInlineFencedBlock(trimmed); ok {
+				return result, true
+			}
 			continue
 		}
 		// Found opening fence, look for closing fence with >= openTicks backticks
+		foundClose := false
 		for j := i + 1; j < len(lines); j++ {
 			closeTrimmed := strings.TrimSpace(lines[j])
 			if isClosingFence(closeTrimmed, openTicks) {
 				lastBlockStart = i + 1
 				lastBlockEnd = j
 				i = j // skip past this block
+				foundClose = true
 				break
+			}
+		}
+		// If no closing fence on subsequent lines, try inline extraction
+		// (the entire block may be on this single line).
+		if !foundClose {
+			if result, ok := extractInlineFencedBlock(trimmed); ok {
+				return result, true
 			}
 		}
 	}
@@ -127,6 +141,84 @@ func extractFencedBlock(stdout string) (Result, bool) {
 	}
 
 	return result, true
+}
+
+// extractInlineFencedBlock handles the case where an agent emits the entire
+// ap-result block on a single line, e.g.:
+//
+//	some text ```ap-result {"decision":"stop","summary":"Done"} ```
+//
+// It scans for ```ap-result (case-insensitive) anywhere in the line, then
+// finds the closing ``` and parses the JSON between them.
+func extractInlineFencedBlock(line string) (Result, bool) {
+	lower := strings.ToLower(line)
+	// Find the opening fence marker anywhere in the line.
+	idx := strings.Index(lower, "```ap-result")
+	if idx < 0 {
+		return Result{}, false
+	}
+	// Count backticks at the opening fence.
+	openStart := idx
+	ticks := 0
+	for openStart+ticks < len(line) && line[openStart+ticks] == '`' {
+		ticks++
+	}
+	if ticks < 3 {
+		return Result{}, false
+	}
+	// Content starts after the opening fence marker ("```ap-result" portion).
+	contentStart := openStart + ticks
+	// Skip "ap-result" (case-insensitive) after the backticks.
+	rest := line[contentStart:]
+	lowerRest := strings.ToLower(rest)
+	if !strings.HasPrefix(lowerRest, "ap-result") {
+		return Result{}, false
+	}
+	contentStart += len("ap-result")
+	rest = line[contentStart:]
+
+	// Find the closing fence: at least `ticks` backticks.
+	closeIdx := findClosingFenceInline(rest, ticks)
+	if closeIdx < 0 {
+		return Result{}, false
+	}
+
+	content := strings.TrimSpace(rest[:closeIdx])
+	if content == "" {
+		return Result{}, false
+	}
+
+	var result Result
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		return Result{}, false
+	}
+
+	result.Decision = strings.ToLower(strings.TrimSpace(result.Decision))
+	if result.Decision == "" {
+		result.Decision = "continue"
+	}
+	return result, true
+}
+
+// findClosingFenceInline finds a closing fence (>= minTicks consecutive
+// backticks) within a string. Returns the index of the first backtick of
+// the closing fence, or -1 if not found.
+func findClosingFenceInline(s string, minTicks int) int {
+	i := 0
+	for i < len(s) {
+		if s[i] != '`' {
+			i++
+			continue
+		}
+		start := i
+		for i < len(s) && s[i] == '`' {
+			i++
+		}
+		if i-start >= minTicks {
+			return start
+		}
+	}
+	return -1
 }
 
 // apResultFenceTicks returns the number of backticks in the opening fence
@@ -168,9 +260,36 @@ func isClosingFence(line string, minTicks int) bool {
 
 func tail(s string, maxLen int) string {
 	s = strings.TrimSpace(s)
+	s = sanitizeFenceContent(s)
 	runes := []rune(s)
 	if len(runes) <= maxLen {
 		return s
 	}
 	return string(runes[len(runes)-maxLen:])
+}
+
+// sanitizeFenceContent strips ```ap-result fenced blocks from fallback
+// summary text so that raw fence markers don't leak into commit messages
+// or other user-facing output.
+func sanitizeFenceContent(s string) string {
+	lower := strings.ToLower(s)
+	idx := strings.Index(lower, "```ap-result")
+	if idx < 0 {
+		return s
+	}
+	// Try to extract the summary from the JSON inside the fence.
+	// If successful, use that instead of the raw text.
+	if result, ok := extractInlineFencedBlock(s[idx:]); ok && result.Summary != "" {
+		prefix := strings.TrimSpace(s[:idx])
+		if prefix != "" {
+			return prefix + " " + result.Summary
+		}
+		return result.Summary
+	}
+	// If we can't parse it, strip the fence markers and keep what's before.
+	prefix := strings.TrimSpace(s[:idx])
+	if prefix != "" {
+		return prefix
+	}
+	return s
 }

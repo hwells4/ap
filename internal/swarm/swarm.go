@@ -620,7 +620,7 @@ func effectiveStageRuns(stage compile.SwarmStage) int {
 }
 
 func stageDirectoryName(index int, stage compile.SwarmStage) string {
-	return fmt.Sprintf("stage-%02d-%s", index+1, sanitizeSegment(parallelStageKey(stage, index)))
+	return fmt.Sprintf("stage-%02d-%s", index, sanitizeSegment(parallelStageKey(stage, index)))
 }
 
 func parallelStageKey(stage compile.SwarmStage, index int) string {

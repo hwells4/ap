@@ -234,7 +234,7 @@ func TestRun_ResumeSkipsCompletedProviders(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed claude state: %v", err)
 	}
-	existingOutput := filepath.Join(claudeDir, "stage-01-analyze", "output.md")
+	existingOutput := filepath.Join(claudeDir, "stage-00-analyze", "output.md")
 	if err := os.MkdirAll(filepath.Dir(existingOutput), 0o755); err != nil {
 		t.Fatalf("mkdir existing output dir: %v", err)
 	}

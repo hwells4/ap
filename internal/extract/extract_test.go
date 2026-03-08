@@ -184,6 +184,27 @@ func TestExtract(t *testing.T) {
 			wantResult: Result{Decision: "continue"},
 			wantSource: SourceDefault,
 		},
+		// 23. Inline fenced block (single line with preceding text)
+		{
+			name:       "inline fenced block",
+			stdout:     "some text before ```ap-result {\"decision\": \"stop\", \"summary\": \"Done inline\"} ```",
+			wantResult: Result{Decision: "stop", Summary: "Done inline"},
+			wantSource: SourceFencedBlock,
+		},
+		// 24. Inline fenced block with no preceding text
+		{
+			name:       "inline fenced block no prefix",
+			stdout:     "```ap-result {\"decision\": \"continue\", \"summary\": \"Inline only\"} ```",
+			wantResult: Result{Decision: "continue", Summary: "Inline only"},
+			wantSource: SourceFencedBlock,
+		},
+		// 25. Inline with 4 backticks
+		{
+			name:       "inline 4 backtick fence",
+			stdout:     "text ````ap-result {\"decision\": \"stop\", \"summary\": \"Four ticks\"} ````",
+			wantResult: Result{Decision: "stop", Summary: "Four ticks"},
+			wantSource: SourceFencedBlock,
+		},
 	}
 
 	for _, tt := range tests {
@@ -223,6 +244,43 @@ func TestExtract(t *testing.T) {
 				} else if !json.Valid(got.Signals.Spawn) {
 					t.Errorf("spawn signal is not valid JSON: %s", got.Signals.Spawn)
 				}
+			}
+		})
+	}
+}
+
+func TestSanitizeFenceContent(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "no fence markers",
+			input: "clean summary text",
+			want:  "clean summary text",
+		},
+		{
+			name:  "fence with valid JSON extracts summary",
+			input: "text before ```ap-result {\"decision\":\"stop\",\"summary\":\"Extracted summary\"} ```",
+			want:  "text before Extracted summary",
+		},
+		{
+			name:  "fence with invalid JSON keeps prefix",
+			input: "text before ```ap-result {invalid} ```",
+			want:  "text before",
+		},
+		{
+			name:  "fence only no prefix with valid JSON",
+			input: "```ap-result {\"decision\":\"stop\",\"summary\":\"Only summary\"} ```",
+			want:  "Only summary",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeFenceContent(tt.input)
+			if got != tt.want {
+				t.Errorf("sanitizeFenceContent() = %q, want %q", got, tt.want)
 			}
 		})
 	}

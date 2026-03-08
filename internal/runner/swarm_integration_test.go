@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -317,6 +318,109 @@ func TestSwarm_HooksFireAroundSwarmNodes(t *testing.T) {
 	}
 	if !postStageFound {
 		t.Error("no hook.completed event for post_stage around swarm")
+	}
+}
+
+// TestSwarm_PostIterationHooksFireInSwarm verifies that post_iteration hooks
+// fire for each iteration inside a swarm block (regression test for P2 bug).
+func TestSwarm_PostIterationHooksFireInSwarm(t *testing.T) {
+	runDir, s := tempSession(t)
+	workDir := filepath.Dir(filepath.Dir(filepath.Dir(runDir)))
+
+	mp := mock.New(
+		mock.WithFallback(mock.Response{
+			Decision: "continue",
+			Summary:  "swarm iter hook test",
+		}),
+	)
+
+	logFile := filepath.Join(workDir, "swarm-iter-hooks.log")
+
+	pipeline := &compile.Pipeline{
+		Name: "swarm-iter-hooks",
+		Nodes: []compile.Node{
+			{
+				ID: "swarm-node",
+				Swarm: &compile.SwarmBlock{
+					Providers: compile.ProviderList{
+						{Name: "mock"},
+					},
+					Stages: []compile.SwarmStage{
+						{ID: "work", Stage: "improve-plan", Runs: 2},
+					},
+				},
+			},
+		},
+	}
+
+	cfg := Config{
+		Session:        "swarm-iter-hooks",
+		RunDir:         runDir,
+		Provider:       mp,
+		Pipeline:       pipeline,
+		PromptTemplate: "iteration ${ITERATION}",
+		WorkDir:        workDir,
+		Store:          s,
+		HookTimeout:    10 * time.Second,
+		Hooks: LifecycleHooks{
+			PostIteration: "echo post_iteration >> " + logFile,
+		},
+	}
+
+	res, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if res.Status != store.StatusCompleted {
+		t.Fatalf("status = %q, want %q", res.Status, store.StatusCompleted)
+	}
+
+	// 1 provider * 2 iterations = 2 post_iteration hooks should have fired.
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("post_iteration hook fired %d times, want 2; log content: %q", len(lines), string(data))
+	}
+}
+
+// TestSwarm_MessagesFileCreated verifies messages.jsonl is created at session
+// start (regression test for P4 bug).
+func TestSwarm_MessagesFileCreated(t *testing.T) {
+	runDir, s := tempSession(t)
+	workDir := filepath.Dir(filepath.Dir(filepath.Dir(runDir)))
+
+	mp := mock.New(
+		mock.WithFallback(mock.Response{
+			Decision: "stop",
+			Summary:  "done",
+		}),
+	)
+
+	cfg := Config{
+		Session:        "messages-test",
+		RunDir:         runDir,
+		StageName:      "improve-plan",
+		Provider:       mp,
+		Iterations:     1,
+		PromptTemplate: "iteration ${ITERATION}",
+		WorkDir:        workDir,
+		Store:          s,
+	}
+
+	res, err := Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if res.Status != store.StatusCompleted {
+		t.Fatalf("status = %q, want %q", res.Status, store.StatusCompleted)
+	}
+
+	messagesPath := filepath.Join(runDir, "messages.jsonl")
+	if _, err := os.Stat(messagesPath); os.IsNotExist(err) {
+		t.Fatal("messages.jsonl should exist after session start")
 	}
 }
 

@@ -42,7 +42,7 @@ func TestParallelExecutor_SingleStage(t *testing.T) {
 	}
 
 	providerDir := filepath.Join(runDir, "swarm-00-test-block", "providers", "claude-1")
-	stageDir := filepath.Join(providerDir, "stage-01-analyze")
+	stageDir := filepath.Join(providerDir, "stage-00-analyze")
 	if err := os.MkdirAll(stageDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestParallelExecutor_ProviderFailure(t *testing.T) {
 	}
 
 	providerDir := filepath.Join(runDir, "swarm-00-fail-block", "providers", "claude")
-	stageDir := filepath.Join(providerDir, "stage-01-analyze")
+	stageDir := filepath.Join(providerDir, "stage-00-analyze")
 	if err := os.MkdirAll(stageDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func TestParallelExecutor_StoreIsolation(t *testing.T) {
 		}
 
 		providerDir := filepath.Join(runDir, "swarm-00-"+blockID, "providers", provName)
-		stageDir := filepath.Join(providerDir, "stage-01-review")
+		stageDir := filepath.Join(providerDir, "stage-00-review")
 		if err := os.MkdirAll(stageDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
