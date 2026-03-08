@@ -682,6 +682,7 @@ func Run(ctx context.Context, cfg Config) (runResult Result, runErr error) {
 	// Initialize hook context — accumulates state, available to all hooks.
 	hc := NewHookContext(cfg)
 	hc.SetStage(cfg.StageName)
+	hc.SetContext(cfg.InjectedContext)
 	hc.Fire(ctx, "pre_session")
 
 	fixed := termination.NewFixed(termination.FixedConfig{Iterations: &cfg.Iterations})
@@ -883,6 +884,7 @@ func runPipeline(ctx context.Context, cfg Config) (Result, error) {
 
 	// Initialize hook context for pipeline run.
 	hc := NewHookContext(cfg)
+	hc.SetContext(cfg.InjectedContext)
 	firstStage := nodes[0].StageName
 	if firstStage == "" {
 		firstStage = nodes[0].ID

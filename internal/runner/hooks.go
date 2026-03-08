@@ -100,6 +100,7 @@ type HookContext struct {
 	iter    int
 	status  string
 	summary string // last iteration summary
+	context string // injected context from --context flag
 }
 
 // NewHookContext creates a HookContext for a session.
@@ -118,6 +119,9 @@ func (hc *HookContext) SetStatus(status string) { hc.status = status }
 
 // SetSummary updates the last iteration summary.
 func (hc *HookContext) SetSummary(summary string) { hc.summary = summary }
+
+// SetContext updates the injected context (from --context flag).
+func (hc *HookContext) SetContext(ctx string) { hc.context = ctx }
 
 // Fire executes a named lifecycle hook. Non-fatal: emits events but never
 // returns an error to the caller.
@@ -147,6 +151,7 @@ func (hc *HookContext) vars() map[string]string {
 		"ITERATION": strconv.Itoa(hc.iter),
 		"STATUS":    hc.status,
 		"SUMMARY":   hc.summary,
+		"CONTEXT":   hc.context,
 	}
 }
 

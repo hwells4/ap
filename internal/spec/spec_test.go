@@ -480,7 +480,7 @@ func TestParseWithOptionsStagePrecedenceProjectOverBuiltin(t *testing.T) {
 	t.Parallel()
 
 	projectRoot := t.TempDir()
-	stageDir := filepath.Join(projectRoot, ".claude", "stages", "ralph")
+	stageDir := filepath.Join(projectRoot, ".ap", "stages", "ralph")
 	if err := os.MkdirAll(stageDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

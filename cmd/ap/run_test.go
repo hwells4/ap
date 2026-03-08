@@ -684,7 +684,7 @@ func TestRun_BackgroundLaunch_JSON(t *testing.T) {
 func TestRun_BackgroundLaunch_ProjectRootFlag(t *testing.T) {
 	dir := setupStageDir(t)
 	overrideRoot := t.TempDir()
-	stageDir := filepath.Join(overrideRoot, ".claude", "stages", "ralph")
+	stageDir := filepath.Join(overrideRoot, ".ap", "stages", "ralph")
 	if err := os.MkdirAll(stageDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -982,7 +982,7 @@ func TestRun_Foreground_FailedStatus(t *testing.T) {
 func setupStageDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	stageDir := filepath.Join(dir, ".claude", "stages", "ralph")
+	stageDir := filepath.Join(dir, ".ap", "stages", "ralph")
 	if err := os.MkdirAll(stageDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

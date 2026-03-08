@@ -165,7 +165,7 @@ func TestList_DeterministicOrder(t *testing.T) {
 
 func TestList_ProjectStages_Override(t *testing.T) {
 	dir := t.TempDir()
-	stageDir := filepath.Join(dir, ".claude", "stages", "ralph")
+	stageDir := filepath.Join(dir, ".ap", "stages", "ralph")
 	if err := os.MkdirAll(stageDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestList_ProjectStages_Override(t *testing.T) {
 
 func TestList_ProjectStages_Alongside(t *testing.T) {
 	dir := t.TempDir()
-	stageDir := filepath.Join(dir, ".claude", "stages", "my-custom-stage")
+	stageDir := filepath.Join(dir, ".ap", "stages", "my-custom-stage")
 	if err := os.MkdirAll(stageDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -108,13 +108,18 @@ func ResolveStage(name string, opts ResolveOptions) (Definition, error) {
 	}
 
 	if strings.TrimSpace(opts.ProjectRoot) != "" {
-		addCandidate(filepath.Join(opts.ProjectRoot, ".claude", "stages", name, "stage.yaml"))
+		addCandidate(filepath.Join(opts.ProjectRoot, ".ap", "stages", name, "stage.yaml"))
 	}
 	if strings.TrimSpace(opts.PipelineDir) != "" {
 		addCandidate(filepath.Join(opts.PipelineDir, "stages", name, "stage.yaml"))
 	}
 	if strings.TrimSpace(opts.AgentPipelinesRoot) != "" {
 		addCandidate(filepath.Join(opts.AgentPipelinesRoot, "scripts", "stages", name, "stage.yaml"))
+	}
+
+	// User-global stages: ~/.config/ap/stages/{name}/stage.yaml
+	if home, err := os.UserHomeDir(); err == nil {
+		addCandidate(filepath.Join(home, ".config", "ap", "stages", name, "stage.yaml"))
 	}
 
 	for _, candidate := range candidates {

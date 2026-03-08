@@ -671,7 +671,20 @@ func discoverAvailableStages(getwd func() (string, error), projectRootOverride s
 		}
 	}
 	if projectRoot != "" {
-		entries, err := os.ReadDir(filepath.Join(projectRoot, ".claude", "stages"))
+		entries, err := os.ReadDir(filepath.Join(projectRoot, ".ap", "stages"))
+		if err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() {
+					if name := strings.TrimSpace(entry.Name()); name != "" {
+						names[name] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+	// User-global stages: ~/.config/ap/stages/{name}/
+	if home, err := os.UserHomeDir(); err == nil {
+		entries, err := os.ReadDir(filepath.Join(home, ".config", "ap", "stages"))
 		if err == nil {
 			for _, entry := range entries {
 				if entry.IsDir() {

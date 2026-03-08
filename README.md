@@ -59,10 +59,10 @@ Typo-tolerant: `ralph 25` recovers to `ralph:25`, `a > b` recovers to `a -> b`.
 
 ## Stages
 
-Stages are reusable prompt + config bundles. Builtins are embedded; project stages live at `.claude/stages/{name}/`:
+Stages are reusable prompt + config bundles. Builtins are embedded; project stages live at `.ap/stages/{name}/`:
 
 ```
-.claude/stages/my-stage/
+.ap/stages/my-stage/
   stage.yaml
   prompt.md
 ```

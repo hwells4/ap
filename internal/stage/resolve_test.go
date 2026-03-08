@@ -14,7 +14,7 @@ func TestResolveStagePrecedence(t *testing.T) {
 	pipelineDir := filepath.Join(tempDir, "pipeline")
 	agentRoot := filepath.Join(tempDir, "agent")
 
-	projectStages := filepath.Join(projectRoot, ".claude", "stages")
+	projectStages := filepath.Join(projectRoot, ".ap", "stages")
 	pipelineStages := filepath.Join(pipelineDir, "stages")
 	agentStages := filepath.Join(agentRoot, "scripts", "stages")
 
@@ -47,7 +47,7 @@ func TestResolveStagePrecedence(t *testing.T) {
 func TestResolveStagePromptField(t *testing.T) {
 	tempDir := t.TempDir()
 	projectRoot := filepath.Join(tempDir, "project")
-	projectStages := filepath.Join(projectRoot, ".claude", "stages")
+	projectStages := filepath.Join(projectRoot, ".ap", "stages")
 
 	stageDir := writeStage(t, projectStages, "alpha", "prompts/custom.md", "prompts/custom.md")
 	writeFile(t, filepath.Join(stageDir, "prompt.md"))
@@ -66,7 +66,7 @@ func TestResolveStagePromptField(t *testing.T) {
 func TestResolveStageMissingPrompt(t *testing.T) {
 	tempDir := t.TempDir()
 	projectRoot := filepath.Join(tempDir, "project")
-	projectStages := filepath.Join(projectRoot, ".claude", "stages")
+	projectStages := filepath.Join(projectRoot, ".ap", "stages")
 
 	writeStage(t, projectStages, "alpha", "", "")
 
@@ -95,7 +95,7 @@ func TestResolveStageNotFoundListsPaths(t *testing.T) {
 	}
 
 	expectedPaths := []string{
-		filepath.Join(projectRoot, ".claude", "stages", "missing", "stage.yaml"),
+		filepath.Join(projectRoot, ".ap", "stages", "missing", "stage.yaml"),
 		filepath.Join(pipelineDir, "stages", "missing", "stage.yaml"),
 		filepath.Join(agentRoot, "scripts", "stages", "missing", "stage.yaml"),
 	}
@@ -146,7 +146,7 @@ func TestResolveStageUsesEmbeddedBuiltinsByDefault(t *testing.T) {
 func TestResolveStageLocalOverridesBuiltin(t *testing.T) {
 	tempDir := t.TempDir()
 	projectRoot := filepath.Join(tempDir, "project")
-	projectStages := filepath.Join(projectRoot, ".claude", "stages")
+	projectStages := filepath.Join(projectRoot, ".ap", "stages")
 
 	localStageDir := writeStage(t, projectStages, "ralph", "", "prompt.md")
 
@@ -227,7 +227,7 @@ func writeFile(t *testing.T, path string) {
 
 func TestReadHooks_Present(t *testing.T) {
 	dir := t.TempDir()
-	stageDir := filepath.Join(dir, ".claude", "stages", "test")
+	stageDir := filepath.Join(dir, ".ap", "stages", "test")
 	if err := os.MkdirAll(stageDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -266,7 +266,7 @@ hooks:
 
 func TestReadHooks_Absent(t *testing.T) {
 	dir := t.TempDir()
-	stageDir := filepath.Join(dir, ".claude", "stages", "nohooks")
+	stageDir := filepath.Join(dir, ".ap", "stages", "nohooks")
 	if err := os.MkdirAll(stageDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}

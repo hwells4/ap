@@ -145,10 +145,19 @@ func discoverStages(projectRoot string) ([]stageEntry, error) {
 		}
 	}
 
-	// Scan project stage directory.
-	localRoot := filepath.Join(projectRoot, ".claude", "stages")
-	if err := mergeLocalStages(localRoot, merged); err != nil {
+	// Scan project stage directory (overrides builtins).
+	localRoot := filepath.Join(projectRoot, ".ap", "stages")
+	if err := mergeLocalStages(localRoot, "project", false, merged); err != nil {
 		return nil, err
+	}
+
+	// Scan user-global stage directory (~/.config/ap/stages/).
+	// Does not override project or builtin stages.
+	if home, err := os.UserHomeDir(); err == nil {
+		userRoot := filepath.Join(home, ".config", "ap", "stages")
+		if err := mergeLocalStages(userRoot, "user", true, merged); err != nil {
+			return nil, err
+		}
 	}
 
 	// Sort by name for deterministic output.
@@ -165,7 +174,7 @@ func discoverStages(projectRoot string) ([]stageEntry, error) {
 	return result, nil
 }
 
-func mergeLocalStages(root string, merged map[string]stageEntry) error {
+func mergeLocalStages(root, source string, skipExisting bool, merged map[string]stageEntry) error {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -182,6 +191,11 @@ func mergeLocalStages(root string, merged map[string]stageEntry) error {
 		if name == "" {
 			continue
 		}
+		if skipExisting {
+			if _, exists := merged[name]; exists {
+				continue
+			}
+		}
 		configPath := filepath.Join(root, name, "stage.yaml")
 		config, err := os.ReadFile(configPath)
 		if err != nil {
@@ -193,7 +207,7 @@ func mergeLocalStages(root string, merged map[string]stageEntry) error {
 		merged[name] = stageEntry{
 			Name:        name,
 			Description: parseDescription(config),
-			Source:      "project",
+			Source:      source,
 		}
 	}
 	return nil
